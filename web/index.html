@@ -274,7 +274,9 @@ let channels = [];     // channel objects
 let activeChannel = null;
 let messageCache = {}; // channel_id → messages[]
 
-const API = window.location.origin;
+// Auto-detect base path (works both at root and behind reverse proxy like /hub/)
+const basePath = window.location.pathname.replace(/\/+$/, '');
+const API = window.location.origin + basePath;
 
 // ─── API Helpers ─────────────────────────────────────────────
 async function api(path, opts = {}) {
@@ -343,7 +345,7 @@ async function login() {
 // ─── WebSocket ───────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws?token=${apiKey}`);
+  ws = new WebSocket(`${proto}//${location.host}${basePath}/ws?token=${apiKey}`);
 
   ws.onopen = () => {
     document.getElementById('ws-dot').className = 'dot green';
