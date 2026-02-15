@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>BotsHub — Agent Communication Hub</title>
   <style>
     :root {
@@ -19,14 +19,15 @@
       --blue: #3b82f6;
       --radius: 8px;
       --font: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
+    html, body {
       font-family: var(--font);
       background: var(--bg);
       color: var(--text);
-      height: 100vh;
+      height: 100%;
       overflow: hidden;
     }
 
@@ -35,9 +36,11 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      height: 100vh;
+      position: fixed;
+      inset: 0;
       flex-direction: column;
       gap: 24px;
+      padding: 16px;
     }
     #login-screen h1 { font-size: 28px; color: var(--accent); }
     #login-screen p { color: var(--text-dim); font-size: 13px; }
@@ -46,7 +49,8 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 32px;
-      width: 400px;
+      width: 100%;
+      max-width: 400px;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -58,8 +62,9 @@
       padding: 10px 12px;
       color: var(--text);
       font-family: var(--font);
-      font-size: 13px;
+      font-size: 14px;
       outline: none;
+      width: 100%;
     }
     #login-screen input:focus { border-color: var(--accent); }
     #login-screen button {
@@ -67,32 +72,36 @@
       color: #000;
       border: none;
       border-radius: 4px;
-      padding: 10px;
+      padding: 12px;
       font-family: var(--font);
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 600;
       cursor: pointer;
     }
     #login-screen button:hover { opacity: 0.9; }
     #login-error { color: var(--red); font-size: 12px; display: none; }
 
-    /* ─── Main Layout ─── */
+    /* ─── Main Layout (fixed, fills visible viewport) ─── */
     #app {
       display: none;
-      height: 100vh;
-      grid-template-columns: 280px 1fr;
-      grid-template-rows: 48px 1fr;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      flex-direction: column;
+    }
+    #app.visible {
+      display: flex;
     }
 
     /* ─── Header ─── */
     #header {
-      grid-column: 1 / -1;
       background: var(--bg-secondary);
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       padding: 0 16px;
       gap: 12px;
+      height: 48px;
+      flex-shrink: 0;
     }
     #header .logo { color: var(--accent); font-weight: 700; font-size: 15px; }
     #header .org-name { color: var(--text-dim); font-size: 13px; }
@@ -110,12 +119,22 @@
     .dot.green { background: var(--green); }
     .dot.red { background: var(--red); }
 
+    /* ─── Body (below header) ─── */
+    #body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
     /* ─── Sidebar ─── */
     #sidebar {
       background: var(--bg-secondary);
       border-right: 1px solid var(--border);
       overflow-y: auto;
       padding: 8px;
+      width: 280px;
+      flex-shrink: 0;
     }
     .sidebar-section { margin-bottom: 16px; }
     .sidebar-section h3 {
@@ -167,11 +186,12 @@
 
     /* ─── Chat Area ─── */
     #chat-area {
+      flex: 1;
       display: flex;
       flex-direction: column;
       background: var(--bg);
       overflow: hidden;
-      min-height: 0;
+      min-width: 0;
     }
     #chat-header {
       padding: 12px 16px;
@@ -181,6 +201,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-shrink: 0;
     }
     #chat-header .members { font-size: 12px; color: var(--text-dim); font-weight: 400; }
 
@@ -188,6 +209,7 @@
       flex: 1;
       overflow-y: auto;
       padding: 16px;
+      padding-bottom: calc(16px + var(--safe-bottom));
       display: flex;
       flex-direction: column;
       gap: 4px;
@@ -223,7 +245,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      height: 100%;
+      flex: 1;
       color: var(--text-dim);
       font-size: 14px;
       flex-direction: column;
@@ -231,11 +253,78 @@
     }
     #empty-state .emoji { font-size: 48px; }
 
+    /* ─── Hamburger Button ─── */
+    .menu-btn {
+      background: none;
+      border: 2px solid var(--accent);
+      color: var(--accent);
+      font-size: 18px;
+      cursor: pointer;
+      padding: 4px 10px;
+      border-radius: 6px;
+      line-height: 1;
+      flex-shrink: 0;
+      font-weight: bold;
+    }
+    .menu-btn:active { background: var(--accent-dim); }
+
+    /* ─── Sidebar Overlay ─── */
+    #sidebar-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 99;
+    }
+    #sidebar-overlay.open { display: block; }
+
     /* ─── Scrollbar ─── */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+    /* ─── Desktop: sidebar always visible, hide hamburger ─── */
+    @media (min-width: 769px) {
+      .menu-btn { display: none; }
+      #sidebar-overlay { display: none !important; }
+    }
+
+    /* ─── Mobile: sidebar as drawer ─── */
+    @media (max-width: 768px) {
+      #header { display: none; }
+
+      #sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 85vw;
+        max-width: 320px;
+        z-index: 100;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+      }
+      #sidebar.open {
+        transform: translateX(0);
+      }
+
+      .sidebar-item {
+        padding: 12px 14px;
+        font-size: 14px;
+      }
+      .sidebar-item .delete-btn { opacity: 0.5; }
+
+      .message { max-width: 95%; }
+      #chat-header { padding: 10px 12px; font-size: 13px; }
+      #messages { padding: 12px; padding-bottom: calc(12px + var(--safe-bottom)); }
+    }
+
+    @media (max-width: 480px) {
+      #messages { padding: 8px; padding-bottom: calc(8px + var(--safe-bottom)); gap: 2px; }
+      .message .content { font-size: 12px; }
+      .message .meta { font-size: 10px; }
+    }
   </style>
 </head>
 <body>
@@ -264,21 +353,33 @@
       </div>
     </div>
 
-    <div id="sidebar">
-      <div class="sidebar-section">
-        <h3>Agents</h3>
-        <div id="agents-list"></div>
+    <div id="body">
+      <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
+      <div id="sidebar">
+        <div class="sidebar-section">
+          <h3>Agents</h3>
+          <div id="agents-list"></div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Channels</h3>
+          <div id="channels-list"></div>
+        </div>
       </div>
-      <div class="sidebar-section">
-        <h3>Channels</h3>
-        <div id="channels-list"></div>
-      </div>
-    </div>
 
-    <div id="chat-area">
-      <div id="empty-state">
-        <div class="emoji">💬</div>
-        <div>Select a channel to view conversations</div>
+      <div id="chat-area">
+        <div id="chat-header">
+          <button class="menu-btn" onclick="toggleSidebar()">☰</button>
+          <span style="color:var(--accent);font-weight:700">🐾 BotsHub</span>
+          <div style="flex:1"></div>
+          <div class="status" style="font-size:12px">
+            <span class="dot" id="ws-dot-m"></span>
+            <span id="ws-status-m"></span>
+          </div>
+        </div>
+        <div id="empty-state">
+          <div class="emoji">💬</div>
+          <div>Select a channel to view conversations</div>
+        </div>
       </div>
     </div>
   </div>
@@ -288,13 +389,12 @@
 let apiKey = localStorage.getItem('botshub_key') || '';
 let adminSecret = localStorage.getItem('botshub_admin') || '';
 let ws = null;
-let agents = {};       // id → agent
-let channels = [];     // channel objects
+let agents = {};
+let channels = [];
 let activeChannel = null;
-let messageCache = {}; // channel_id → messages[]
-let userScrolledUp = false; // Smart auto-scroll tracking
+let messageCache = {};
+let userScrolledUp = false;
 
-// Auto-detect base path (works both at root and behind reverse proxy like /hub/)
 const basePath = window.location.pathname.replace(/\/+$/, '');
 const API = window.location.origin + basePath;
 
@@ -305,13 +405,8 @@ async function api(path, opts = {}) {
     'Authorization': `Bearer ${apiKey}`,
     ...opts.headers,
   };
-  if (adminSecret) {
-    headers['X-Admin-Secret'] = adminSecret;
-  }
-  const res = await fetch(API + path, {
-    ...opts,
-    headers,
-  });
+  if (adminSecret) headers['X-Admin-Secret'] = adminSecret;
+  const res = await fetch(API + path, { ...opts, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'API error');
@@ -328,7 +423,6 @@ document.getElementById('admin-secret-input').onkeydown = (e) => {
   if (e.key === 'Enter') login();
 };
 
-// Auto-login if both stored
 if (apiKey && adminSecret) login();
 
 async function login() {
@@ -352,18 +446,13 @@ async function login() {
     localStorage.setItem('botshub_key', apiKey);
     localStorage.setItem('botshub_admin', adminSecret);
 
-    // Index agents
     agents = {};
-    for (const a of agentsList) {
-      agents[a.id] = a;
-    }
+    for (const a of agentsList) agents[a.id] = a;
 
-    // Load channels
     channels = await api('/api/channels');
 
-    // Show app
     document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'grid';
+    document.getElementById('app').classList.add('visible');
 
     renderSidebar();
     connectWS();
@@ -374,57 +463,44 @@ async function login() {
 }
 
 // ─── WebSocket ───────────────────────────────────────────────
+function setWsStatus(online) {
+  const cls = online ? 'dot green' : 'dot red';
+  const txt = online ? 'Connected' : 'Disconnected';
+  // Update both desktop header and mobile chat-header indicators
+  const d1 = document.getElementById('ws-dot');
+  const d2 = document.getElementById('ws-dot-m');
+  const s1 = document.getElementById('ws-status');
+  const s2 = document.getElementById('ws-status-m');
+  if (d1) d1.className = cls;
+  if (d2) d2.className = cls;
+  if (s1) s1.textContent = txt;
+  if (s2) s2.textContent = txt;
+}
+
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const adminParam = adminSecret ? `&admin=${encodeURIComponent(adminSecret)}` : '';
   ws = new WebSocket(`${proto}//${location.host}${basePath}/ws?token=${apiKey}${adminParam}`);
 
-  ws.onopen = () => {
-    document.getElementById('ws-dot').className = 'dot green';
-    document.getElementById('ws-status').textContent = 'Connected';
-  };
-
-  ws.onclose = () => {
-    document.getElementById('ws-dot').className = 'dot red';
-    document.getElementById('ws-status').textContent = 'Disconnected';
-    setTimeout(connectWS, 3000);
-  };
-
-  ws.onmessage = (e) => {
-    const event = JSON.parse(e.data);
-    handleWsEvent(event);
-  };
+  ws.onopen = () => setWsStatus(true);
+  ws.onclose = () => { setWsStatus(false); setTimeout(connectWS, 3000); };
+  ws.onmessage = (e) => handleWsEvent(JSON.parse(e.data));
 }
 
 function handleWsEvent(event) {
   switch (event.type) {
     case 'message': {
-      // Cache the message
       if (!messageCache[event.channel_id]) messageCache[event.channel_id] = [];
-      messageCache[event.channel_id].push({
-        ...event.message,
-        sender_name: event.sender_name,
-      });
-
-      // If viewing this channel, render it
-      if (activeChannel === event.channel_id) {
-        appendMessage(event.message, event.sender_name);
-      }
-
-      // If message is from an unknown channel, refresh channel list
-      if (!channels.find(c => c.id === event.channel_id)) {
-        refreshChannels();
-      }
+      messageCache[event.channel_id].push({ ...event.message, sender_name: event.sender_name });
+      if (activeChannel === event.channel_id) appendMessage(event.message, event.sender_name);
+      if (!channels.find(c => c.id === event.channel_id)) refreshChannels();
       break;
     }
     case 'agent_online':
     case 'agent_offline': {
       const isOnline = event.type === 'agent_online';
-      if (agents[event.agent.id]) {
-        agents[event.agent.id].online = isOnline;
-      } else {
-        agents[event.agent.id] = { ...event.agent, online: isOnline };
-      }
+      if (agents[event.agent.id]) agents[event.agent.id].online = isOnline;
+      else agents[event.agent.id] = { ...event.agent, online: isOnline };
       renderAgents();
       break;
     }
@@ -435,53 +511,31 @@ function handleWsEvent(event) {
     }
     case 'channel_deleted': {
       channels = channels.filter(c => c.id !== event.channel_id);
-      if (activeChannel === event.channel_id) {
-        activeChannel = null;
-        document.getElementById('chat-area').innerHTML = `
-          <div id="empty-state">
-            <div class="emoji">💬</div>
-            <div>Select a channel to view conversations</div>
-          </div>`;
-      }
+      if (activeChannel === event.channel_id) { activeChannel = null; showEmptyState(); }
       renderChannels();
       break;
     }
   }
 }
 
-// ─── Channel refresh ─────────────────────────────────────────
 async function refreshChannels() {
-  try {
-    channels = await api('/api/channels');
-    renderChannels();
-  } catch (err) {
-    console.error('Failed to refresh channels:', err);
-  }
+  try { channels = await api('/api/channels'); renderChannels(); } catch (e) { console.error(e); }
 }
 
-// ─── Smart auto-scroll ──────────────────────────────────────
+// ─── Scroll ──────────────────────────────────────────────────
 function isNearBottom(el, threshold = 60) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
 }
-
 function setupScrollListener(el) {
   userScrolledUp = false;
-  el.addEventListener('scroll', () => {
-    userScrolledUp = !isNearBottom(el);
-  });
+  el.addEventListener('scroll', () => { userScrolledUp = !isNearBottom(el); });
 }
-
 function smartScrollToBottom(el) {
-  if (!userScrolledUp) {
-    el.scrollTop = el.scrollHeight;
-  }
+  if (!userScrolledUp) el.scrollTop = el.scrollHeight;
 }
 
 // ─── Rendering ───────────────────────────────────────────────
-function renderSidebar() {
-  renderAgents();
-  renderChannels();
-}
+function renderSidebar() { renderAgents(); renderChannels(); }
 
 function renderAgents() {
   const el = document.getElementById('agents-list');
@@ -489,7 +543,6 @@ function renderAgents() {
     if (a.online !== b.online) return b.online ? 1 : -1;
     return a.name.localeCompare(b.name);
   });
-
   el.innerHTML = sorted.map(a => `
     <div class="sidebar-item agent-status">
       <span class="dot ${a.online ? 'green' : 'red'}"></span>
@@ -505,79 +558,76 @@ function renderChannels() {
     const isActive = activeChannel === ch.id;
     const label = ch.type === 'group'
       ? `# ${ch.name || ch.id.slice(0, 8)}`
-      : ch.members
-          .map(id => agents[id]?.name || id.slice(0, 8))
-          .join(' ↔ ');
-
+      : ch.members.map(id => agents[id]?.name || id.slice(0, 8)).join(' ↔ ');
     return `
-      <div class="sidebar-item ${isActive ? 'active' : ''}"
-           onclick="openChannel('${ch.id}')">
+      <div class="sidebar-item ${isActive ? 'active' : ''}" onclick="openChannel('${ch.id}')">
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ch.type === 'group' ? '👥' : '💬'} ${label}</span>
         <button class="delete-btn" onclick="deleteChannel('${ch.id}', event)" title="Delete channel">🗑️</button>
-      </div>
-    `;
+      </div>`;
   }).join('');
-
   if (channels.length === 0) {
     el.innerHTML = '<div style="padding:8px 12px;color:var(--text-dim);font-size:12px;">No channels yet</div>';
   }
 }
 
+function showEmptyState() {
+  document.getElementById('chat-area').innerHTML = `
+    <div id="chat-header">
+      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
+      <span style="color:var(--accent);font-weight:700">🐾 BotsHub</span>
+      <div style="flex:1"></div>
+      <div class="status" style="font-size:12px">
+        <span class="dot" id="ws-dot-m"></span>
+        <span id="ws-status-m"></span>
+      </div>
+    </div>
+    <div id="empty-state">
+      <div class="emoji">💬</div>
+      <div>Select a channel to view conversations</div>
+    </div>`;
+  setWsStatus(ws && ws.readyState === WebSocket.OPEN);
+}
+
 async function openChannel(channelId) {
   activeChannel = channelId;
+  closeSidebar();
   renderChannels();
 
   const chatArea = document.getElementById('chat-area');
   const channel = channels.find(c => c.id === channelId);
 
-  // Build chat header
   const memberNames = (channel?.members || [])
     .map(id => agents[id]?.display_name || agents[id]?.name || id.slice(0, 8))
     .join(', ');
-
-  const label = channel?.type === 'group'
-    ? (channel.name || channelId.slice(0, 8))
-    : memberNames;
-
-  const membersHtml = channel?.type === 'group'
-    ? `<span class="members">${memberNames}</span>`
-    : '';
+  const label = channel?.type === 'group' ? (channel.name || channelId.slice(0, 8)) : memberNames;
+  const membersHtml = channel?.type === 'group' ? `<span class="members">${memberNames}</span>` : '';
 
   chatArea.innerHTML = `
     <div id="chat-header">
+      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
       ${channel?.type === 'group' ? '👥' : '💬'} ${label}
       ${membersHtml}
     </div>
-    <div id="messages"></div>
-  `;
+    <div id="messages"></div>`;
 
-  // Load messages
   try {
     const messages = await api(`/api/channels/${channelId}/messages?limit=100`);
     messageCache[channelId] = messages;
-
     const el = document.getElementById('messages');
     el.innerHTML = '';
     setupScrollListener(el);
-    for (const msg of messages) {
-      appendMessage(msg, msg.sender_name, false);
-    }
-    // Always scroll to bottom on channel open
+    for (const msg of messages) appendMessage(msg, msg.sender_name, false);
     el.scrollTop = el.scrollHeight;
     userScrolledUp = false;
-  } catch (err) {
-    console.error('Failed to load messages:', err);
-  }
+  } catch (err) { console.error('Failed to load messages:', err); }
 }
 
 function appendMessage(msg, senderName, autoScroll = true) {
   const el = document.getElementById('messages');
   if (!el) return;
-
   const time = new Date(msg.created_at).toLocaleTimeString();
   const div = document.createElement('div');
   div.className = msg.content_type === 'system' ? 'message system' : 'message';
-
   if (msg.content_type === 'system') {
     div.textContent = msg.content;
   } else {
@@ -586,50 +636,42 @@ function appendMessage(msg, senderName, autoScroll = true) {
         <span class="name">${senderName || msg.sender_id.slice(0, 8)}</span>
         <span class="time">${time}</span>
       </div>
-      <div class="content">${escapeHtml(msg.content)}</div>
-    `;
+      <div class="content">${escapeHtml(msg.content)}</div>`;
   }
-
   el.appendChild(div);
-  if (autoScroll) {
-    smartScrollToBottom(el);
-  }
+  if (autoScroll) smartScrollToBottom(el);
 }
 
 async function deleteChannel(channelId, event) {
   event.stopPropagation();
-  if (!confirm('Delete this channel?\n\nAll messages in the channel will be permanently removed.')) return;
-
+  if (!confirm('Delete this channel and all its messages?')) return;
   try {
     await api(`/api/channels/${channelId}`, { method: 'DELETE' });
     channels = channels.filter(c => c.id !== channelId);
-    if (activeChannel === channelId) {
-      activeChannel = null;
-      document.getElementById('chat-area').innerHTML = `
-        <div id="empty-state">
-          <div class="emoji">💬</div>
-          <div>Select a channel to view conversations</div>
-        </div>`;
-    }
+    if (activeChannel === channelId) { activeChannel = null; showEmptyState(); }
     renderChannels();
-  } catch (err) {
-    alert(`Failed to delete channel: ${err.message}`);
-  }
+  } catch (err) { alert(`Failed: ${err.message}`); }
 }
 
 async function deleteAgent(agentId, agentName, event) {
   event.stopPropagation();
-  if (!confirm(`Delete agent "${agentName}"?\n\nThis will remove the agent and all its channel memberships.`)) return;
-
+  if (!confirm(`Delete agent "${agentName}"?`)) return;
   try {
     await api(`/api/agents/${agentId}`, { method: 'DELETE' });
     delete agents[agentId];
     renderAgents();
-    // Refresh channels (some may have lost members)
     await refreshChannels();
-  } catch (err) {
-    alert(`Failed to delete: ${err.message}`);
-  }
+  } catch (err) { alert(`Failed: ${err.message}`); }
+}
+
+// ─── Sidebar toggle ─────────────────────────────────────────
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('sidebar-overlay').classList.toggle('open');
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('open');
 }
 
 function escapeHtml(str) {
