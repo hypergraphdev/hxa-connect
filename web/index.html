@@ -150,6 +150,20 @@
       align-items: center;
       gap: 6px;
     }
+    .agent-status .agent-name { flex: 1; }
+    .agent-status .delete-btn {
+      opacity: 0;
+      background: none;
+      border: none;
+      color: var(--red);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      transition: opacity 0.15s;
+    }
+    .sidebar-item:hover .delete-btn { opacity: 0.7; }
+    .delete-btn:hover { opacity: 1 !important; background: rgba(239,68,68,0.15); }
 
     /* ─── Chat Area ─── */
     #chat-area {
@@ -466,7 +480,8 @@ function renderAgents() {
   el.innerHTML = sorted.map(a => `
     <div class="sidebar-item agent-status">
       <span class="dot ${a.online ? 'green' : 'red'}"></span>
-      ${a.display_name || a.name}
+      <span class="agent-name">${a.display_name || a.name}</span>
+      <button class="delete-btn" onclick="deleteAgent('${a.id}', '${(a.display_name || a.name).replace(/'/g, "\\'")}', event)" title="Delete agent">🗑️</button>
     </div>
   `).join('');
 }
@@ -564,6 +579,21 @@ function appendMessage(msg, senderName, autoScroll = true) {
   el.appendChild(div);
   if (autoScroll) {
     smartScrollToBottom(el);
+  }
+}
+
+async function deleteAgent(agentId, agentName, event) {
+  event.stopPropagation();
+  if (!confirm(`Delete agent "${agentName}"?\n\nThis will remove the agent and all its channel memberships.`)) return;
+
+  try {
+    await api(`/api/agents/${agentId}`, { method: 'DELETE' });
+    delete agents[agentId];
+    renderAgents();
+    // Refresh channels (some may have lost members)
+    await refreshChannels();
+  } catch (err) {
+    alert(`Failed to delete: ${err.message}`);
   }
 }
 
