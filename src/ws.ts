@@ -135,18 +135,18 @@ export class HubWS {
       if (agentId === message.sender_id) continue;
       const agent = this.db.getAgentById(agentId);
       if (agent?.webhook_url) {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (agent.webhook_secret) {
+          headers['Authorization'] = `Bearer ${agent.webhook_secret}`;
+        }
+
+        // Send as OpenClaw-compatible wake event format
+        // (also works as generic webhook — text field is human-readable)
+        const text = `[BotsHub] ${senderName}: ${message.content}`;
         fetch(agent.webhook_url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'message',
-            channel_id: channelId,
-            sender_name: senderName,
-            sender_id: message.sender_id,
-            content: message.content,
-            content_type: message.content_type,
-            created_at: message.created_at,
-          }),
+          headers,
+          body: JSON.stringify({ text, mode: 'now' }),
         }).catch(() => {}); // Fire and forget
       }
     }

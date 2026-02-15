@@ -37,6 +37,7 @@ export class HubDB {
         token TEXT UNIQUE NOT NULL,
         metadata TEXT,
         webhook_url TEXT,
+        webhook_secret TEXT,
         online INTEGER DEFAULT 0,
         last_seen_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -110,7 +111,7 @@ export class HubDB {
 
   // ─── Agent Operations ────────────────────────────────────
 
-  registerAgent(orgId: string, name: string, displayName?: string, metadata?: Record<string, unknown>, webhookUrl?: string): Agent {
+  registerAgent(orgId: string, name: string, displayName?: string, metadata?: Record<string, unknown>, webhookUrl?: string, webhookSecret?: string): Agent {
     // Check if agent already exists → return existing token
     const existing = this.db.prepare(
       'SELECT * FROM agents WHERE org_id = ? AND name = ?'
@@ -118,16 +119,16 @@ export class HubDB {
 
     if (existing) {
       // Update last seen, set online, and optionally update webhook
-      if (webhookUrl !== undefined) {
+      if (webhookUrl !== undefined || webhookSecret !== undefined) {
         this.db.prepare(
-          'UPDATE agents SET online = 1, last_seen_at = ?, webhook_url = ? WHERE id = ?'
-        ).run(Date.now(), webhookUrl, existing.id);
+          'UPDATE agents SET online = 1, last_seen_at = ?, webhook_url = COALESCE(?, webhook_url), webhook_secret = COALESCE(?, webhook_secret) WHERE id = ?'
+        ).run(Date.now(), webhookUrl ?? null, webhookSecret ?? null, existing.id);
       } else {
         this.db.prepare(
           'UPDATE agents SET online = 1, last_seen_at = ? WHERE id = ?'
         ).run(Date.now(), existing.id);
       }
-      return { ...existing, online: true, last_seen_at: Date.now(), webhook_url: webhookUrl ?? existing.webhook_url };
+      return { ...existing, online: true, last_seen_at: Date.now(), webhook_url: webhookUrl ?? existing.webhook_url, webhook_secret: webhookSecret ?? existing.webhook_secret };
     }
 
     const agent: Agent = {
@@ -138,16 +139,17 @@ export class HubDB {
       token: `agent_${crypto.randomBytes(24).toString('hex')}`,
       metadata: metadata ? JSON.stringify(metadata) : null,
       webhook_url: webhookUrl || null,
+      webhook_secret: webhookSecret || null,
       online: true,
       last_seen_at: Date.now(),
       created_at: Date.now(),
     };
 
     this.db.prepare(
-      `INSERT INTO agents (id, org_id, name, display_name, token, metadata, webhook_url, online, last_seen_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO agents (id, org_id, name, display_name, token, metadata, webhook_url, webhook_secret, online, last_seen_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(agent.id, agent.org_id, agent.name, agent.display_name, agent.token,
-          agent.metadata, agent.webhook_url, agent.online ? 1 : 0, agent.last_seen_at, agent.created_at);
+          agent.metadata, agent.webhook_url, agent.webhook_secret, agent.online ? 1 : 0, agent.last_seen_at, agent.created_at);
 
     return agent;
   }

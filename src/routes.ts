@@ -59,7 +59,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Returns: { agent_id, token, name }
    */
   auth.post('/api/register', requireOrg, (req, res) => {
-    const { name, display_name, metadata, webhook_url } = req.body;
+    const { name, display_name, metadata, webhook_url, webhook_secret } = req.body;
     if (!name) {
       res.status(400).json({ error: 'name is required' });
       return;
@@ -70,7 +70,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url);
+    const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret);
 
     // Broadcast agent online to all org viewers (Web UI etc.)
     ws.broadcastToOrg(req.org!.id, {
