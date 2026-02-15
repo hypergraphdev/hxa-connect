@@ -36,6 +36,7 @@ export class HubDB {
         display_name TEXT,
         token TEXT UNIQUE NOT NULL,
         metadata TEXT,
+        webhook_url TEXT,
         online INTEGER DEFAULT 0,
         last_seen_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -109,18 +110,24 @@ export class HubDB {
 
   // ─── Agent Operations ────────────────────────────────────
 
-  registerAgent(orgId: string, name: string, displayName?: string, metadata?: Record<string, unknown>): Agent {
+  registerAgent(orgId: string, name: string, displayName?: string, metadata?: Record<string, unknown>, webhookUrl?: string): Agent {
     // Check if agent already exists → return existing token
     const existing = this.db.prepare(
       'SELECT * FROM agents WHERE org_id = ? AND name = ?'
     ).get(orgId, name) as any;
 
     if (existing) {
-      // Update last seen and set online
-      this.db.prepare(
-        'UPDATE agents SET online = 1, last_seen_at = ? WHERE id = ?'
-      ).run(Date.now(), existing.id);
-      return { ...existing, online: true, last_seen_at: Date.now() };
+      // Update last seen, set online, and optionally update webhook
+      if (webhookUrl !== undefined) {
+        this.db.prepare(
+          'UPDATE agents SET online = 1, last_seen_at = ?, webhook_url = ? WHERE id = ?'
+        ).run(Date.now(), webhookUrl, existing.id);
+      } else {
+        this.db.prepare(
+          'UPDATE agents SET online = 1, last_seen_at = ? WHERE id = ?'
+        ).run(Date.now(), existing.id);
+      }
+      return { ...existing, online: true, last_seen_at: Date.now(), webhook_url: webhookUrl ?? existing.webhook_url };
     }
 
     const agent: Agent = {
@@ -130,16 +137,17 @@ export class HubDB {
       display_name: displayName || null,
       token: `agent_${crypto.randomBytes(24).toString('hex')}`,
       metadata: metadata ? JSON.stringify(metadata) : null,
+      webhook_url: webhookUrl || null,
       online: true,
       last_seen_at: Date.now(),
       created_at: Date.now(),
     };
 
     this.db.prepare(
-      `INSERT INTO agents (id, org_id, name, display_name, token, metadata, online, last_seen_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO agents (id, org_id, name, display_name, token, metadata, webhook_url, online, last_seen_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(agent.id, agent.org_id, agent.name, agent.display_name, agent.token,
-          agent.metadata, agent.online ? 1 : 0, agent.last_seen_at, agent.created_at);
+          agent.metadata, agent.webhook_url, agent.online ? 1 : 0, agent.last_seen_at, agent.created_at);
 
     return agent;
   }

@@ -15,6 +15,7 @@ export interface Agent {
   display_name: string | null;
   token: string;
   metadata: string | null; // JSON string
+  webhook_url: string | null;
   online: boolean;
   last_seen_at: number | null;
   created_at: number;
@@ -49,6 +50,7 @@ export interface RegisterRequest {
   name: string;
   display_name?: string;
   metadata?: Record<string, unknown>;
+  webhook_url?: string;
 }
 
 export interface RegisterResponse {

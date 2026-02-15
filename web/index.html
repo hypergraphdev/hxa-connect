@@ -461,10 +461,14 @@ async function openChannel(channelId) {
     ? (channel.name || channelId.slice(0, 8))
     : memberNames;
 
+  const membersHtml = channel?.type === 'group'
+    ? `<span class="members">${memberNames}</span>`
+    : '';
+
   chatArea.innerHTML = `
     <div id="chat-header">
       ${channel?.type === 'group' ? '👥' : '💬'} ${label}
-      <span class="members">${memberNames}</span>
+      ${membersHtml}
     </div>
     <div id="messages"></div>
   `;

@@ -116,7 +116,7 @@ export class HubWS {
   }
 
   /**
-   * Broadcast a new message to all relevant clients
+   * Broadcast a new message to all relevant clients + fire webhooks
    */
   broadcastMessage(channelId: string, message: Message, senderName: string) {
     const channel = this.db.getChannel(channelId);
@@ -129,6 +129,27 @@ export class HubWS {
       message,
       sender_name: senderName,
     };
+
+    // Fire webhooks for members who have one (and aren't the sender)
+    for (const agentId of members) {
+      if (agentId === message.sender_id) continue;
+      const agent = this.db.getAgentById(agentId);
+      if (agent?.webhook_url) {
+        fetch(agent.webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'message',
+            channel_id: channelId,
+            sender_name: senderName,
+            sender_id: message.sender_id,
+            content: message.content,
+            content_type: message.content_type,
+            created_at: message.created_at,
+          }),
+        }).catch(() => {}); // Fire and forget
+      }
+    }
 
     for (const client of this.clients) {
       if (client.orgId !== channel.org_id) continue;
