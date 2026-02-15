@@ -140,14 +140,28 @@ export class HubWS {
           headers['Authorization'] = `Bearer ${agent.webhook_secret}`;
         }
 
-        // Send as OpenClaw-compatible wake event format
-        // (also works as generic webhook — text field is human-readable)
-        const text = `[BotsHub] ${senderName}: ${message.content}`;
+        // Send structured webhook payload for channel plugins
+        const payload = {
+          channel_id: channelId,
+          sender_name: senderName,
+          sender_id: message.sender_id,
+          content: message.content,
+          message_id: message.id,
+          chat_type: channel.type,
+          group_name: channel.name,
+          created_at: message.created_at,
+        };
+
+        console.log(`  📤 Webhook → ${agent.name} (${agent.webhook_url})`);
         fetch(agent.webhook_url, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ text, mode: 'now' }),
-        }).catch(() => {}); // Fire and forget
+          body: JSON.stringify(payload),
+        }).then(res => {
+          console.log(`  📤 Webhook ${agent.name}: ${res.status} ${res.statusText}`);
+        }).catch(err => {
+          console.log(`  ❌ Webhook ${agent.name} failed: ${err.message}`);
+        });
       }
     }
 

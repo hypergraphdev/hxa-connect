@@ -193,11 +193,11 @@ export class HubDB {
 
   // ─── Channel Operations ──────────────────────────────────
 
-  createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Channel {
+  createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Channel & { isNew?: boolean } {
     // For direct channels, check if one already exists between these two agents
     if (type === 'direct' && memberIds.length === 2) {
       const existing = this.findDirectChannel(memberIds[0], memberIds[1]);
-      if (existing) return existing;
+      if (existing) return { ...existing, isNew: false };
     }
 
     const channel: Channel = {
@@ -223,7 +223,7 @@ export class HubDB {
     });
     tx();
 
-    return channel;
+    return { ...channel, isNew: true };
   }
 
   private findDirectChannel(agentId1: string, agentId2: string): Channel | undefined {

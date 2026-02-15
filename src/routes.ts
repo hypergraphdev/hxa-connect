@@ -354,6 +354,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Find or create direct channel
     const channel = db.createChannel(orgId, 'direct', [req.agent!.id, target.id]);
+
+    // Broadcast channel creation if new
+    if (channel.isNew) {
+      ws.broadcastToOrg(orgId, {
+        type: 'channel_created',
+        channel: { id: channel.id, org_id: channel.org_id, type: channel.type, name: channel.name, created_at: channel.created_at },
+        members: [req.agent!.id, target.id],
+      });
+    }
+
     const msg = db.createMessage(channel.id, req.agent!.id, content, content_type || 'text');
 
     // Broadcast

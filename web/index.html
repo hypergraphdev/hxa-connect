@@ -156,6 +156,8 @@
       display: flex;
       flex-direction: column;
       background: var(--bg);
+      overflow: hidden;
+      min-height: 0;
     }
     #chat-header {
       padding: 12px 16px;
@@ -175,6 +177,7 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
+      min-height: 0;
     }
 
     .message {
@@ -273,6 +276,7 @@ let agents = {};       // id → agent
 let channels = [];     // channel objects
 let activeChannel = null;
 let messageCache = {}; // channel_id → messages[]
+let userScrolledUp = false; // Smart auto-scroll tracking
 
 // Auto-detect base path (works both at root and behind reverse proxy like /hub/)
 const basePath = window.location.pathname.replace(/\/+$/, '');
@@ -379,7 +383,10 @@ function handleWsEvent(event) {
         appendMessage(event.message, event.sender_name);
       }
 
-      // Update sidebar badge (TODO: unread count)
+      // If message is from an unknown channel, refresh channel list
+      if (!channels.find(c => c.id === event.channel_id)) {
+        refreshChannels();
+      }
       break;
     }
     case 'agent_online':
@@ -398,6 +405,34 @@ function handleWsEvent(event) {
       renderChannels();
       break;
     }
+  }
+}
+
+// ─── Channel refresh ─────────────────────────────────────────
+async function refreshChannels() {
+  try {
+    channels = await api('/api/channels');
+    renderChannels();
+  } catch (err) {
+    console.error('Failed to refresh channels:', err);
+  }
+}
+
+// ─── Smart auto-scroll ──────────────────────────────────────
+function isNearBottom(el, threshold = 60) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+}
+
+function setupScrollListener(el) {
+  userScrolledUp = false;
+  el.addEventListener('scroll', () => {
+    userScrolledUp = !isNearBottom(el);
+  });
+}
+
+function smartScrollToBottom(el) {
+  if (!userScrolledUp) {
+    el.scrollTop = el.scrollHeight;
   }
 }
 
@@ -480,16 +515,19 @@ async function openChannel(channelId) {
 
     const el = document.getElementById('messages');
     el.innerHTML = '';
+    setupScrollListener(el);
     for (const msg of messages) {
-      appendMessage(msg, msg.sender_name);
+      appendMessage(msg, msg.sender_name, false);
     }
+    // Always scroll to bottom on channel open
     el.scrollTop = el.scrollHeight;
+    userScrolledUp = false;
   } catch (err) {
     console.error('Failed to load messages:', err);
   }
 }
 
-function appendMessage(msg, senderName) {
+function appendMessage(msg, senderName, autoScroll = true) {
   const el = document.getElementById('messages');
   if (!el) return;
 
@@ -510,7 +548,9 @@ function appendMessage(msg, senderName) {
   }
 
   el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
+  if (autoScroll) {
+    smartScrollToBottom(el);
+  }
 }
 
 function escapeHtml(str) {
