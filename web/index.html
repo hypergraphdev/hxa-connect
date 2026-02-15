@@ -286,13 +286,17 @@ const API = window.location.origin + basePath;
 
 // ─── API Helpers ─────────────────────────────────────────────
 async function api(path, opts = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    ...opts.headers,
+  };
+  if (adminSecret) {
+    headers['X-Admin-Secret'] = adminSecret;
+  }
   const res = await fetch(API + path, {
     ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      ...opts.headers,
-    },
+    headers,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));

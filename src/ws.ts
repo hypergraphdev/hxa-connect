@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import type { HubDB } from './db.js';
-import type { HubConfig, Message, WsServerEvent } from './types.js';
+import type { Message, WsServerEvent } from './types.js';
 import { URL } from 'node:url';
 
 interface WsClient {
@@ -15,11 +15,9 @@ export class HubWS {
   private wss: WebSocketServer;
   private clients: Set<WsClient> = new Set();
   private db: HubDB;
-  private config: HubConfig;
 
-  constructor(server: Server, db: HubDB, config: HubConfig) {
+  constructor(server: Server, db: HubDB) {
     this.db = db;
-    this.config = config;
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
     this.wss.on('connection', (ws, req) => {
@@ -53,13 +51,13 @@ export class HubWS {
         return;
       }
 
-      // Try org key + admin secret (for web UI / human admins)
+      // Try org key + org admin secret (for web UI / human admins)
       const org = db.getOrgByKey(token);
       if (org) {
-        // Require admin secret for org-level access
+        // Require org-scoped admin secret
         const adminToken = url.searchParams.get('admin');
-        if (this.config.admin_secret && adminToken !== this.config.admin_secret) {
-          ws.close(4003, 'Admin secret required for org-level access');
+        if (!adminToken || !db.verifyOrgAdminSecret(org.id, adminToken)) {
+          ws.close(4003, 'Org admin secret required for console access');
           return;
         }
 

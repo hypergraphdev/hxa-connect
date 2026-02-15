@@ -4,6 +4,7 @@ export interface Org {
   id: string;
   name: string;
   api_key: string;
+  admin_secret: string;
   persist_messages: boolean;
   created_at: number;
 }

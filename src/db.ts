@@ -25,6 +25,7 @@ export class HubDB {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         api_key TEXT UNIQUE NOT NULL,
+        admin_secret TEXT,
         persist_messages INTEGER DEFAULT 1,
         created_at INTEGER NOT NULL
       );
@@ -73,6 +74,20 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_channels_org ON channels(org_id);
       CREATE INDEX IF NOT EXISTS idx_channel_members_agent ON channel_members(agent_id);
     `);
+
+    // Migration: add admin_secret to existing orgs that don't have it
+    try {
+      this.db.exec(`ALTER TABLE orgs ADD COLUMN admin_secret TEXT`);
+    } catch {
+      // Column already exists
+    }
+    // Generate admin_secret for orgs that don't have one
+    const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE admin_secret IS NULL').all() as any[];
+    for (const org of orgsWithoutSecret) {
+      const secret = crypto.randomBytes(24).toString('hex');
+      this.db.prepare('UPDATE orgs SET admin_secret = ? WHERE id = ?').run(secret, org.id);
+      console.log(`  🔐 Generated admin_secret for org ${org.id}`);
+    }
   }
 
   // ─── Org Operations ──────────────────────────────────────
@@ -82,12 +97,13 @@ export class HubDB {
       id: uuid(),
       name,
       api_key: crypto.randomBytes(24).toString('hex'),
+      admin_secret: crypto.randomBytes(24).toString('hex'),
       persist_messages: persistMessages,
       created_at: Date.now(),
     };
     this.db.prepare(
-      'INSERT INTO orgs (id, name, api_key, persist_messages, created_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(org.id, org.name, org.api_key, org.persist_messages ? 1 : 0, org.created_at);
+      'INSERT INTO orgs (id, name, api_key, admin_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(org.id, org.name, org.api_key, org.admin_secret, org.persist_messages ? 1 : 0, org.created_at);
     return org;
   }
 
@@ -95,6 +111,11 @@ export class HubDB {
     const row = this.db.prepare('SELECT * FROM orgs WHERE api_key = ?').get(apiKey) as any;
     if (!row) return undefined;
     return { ...row, persist_messages: !!row.persist_messages };
+  }
+
+  verifyOrgAdminSecret(orgId: string, secret: string): boolean {
+    const row = this.db.prepare('SELECT admin_secret FROM orgs WHERE id = ?').get(orgId) as any;
+    return row?.admin_secret === secret;
   }
 
   getOrgById(id: string): Org | undefined {

@@ -102,15 +102,19 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
-   * DELETE /api/agents/:id — Remove an agent (admin only)
-   * Auth: Admin secret (not org key — agents have org key, so it's not safe)
+   * DELETE /api/agents/:id — Remove an agent (org admin only)
+   * Auth: Org API Key + Org Admin Secret (via X-Admin-Secret header)
    */
-  router.delete('/api/agents/:id', (req, res) => {
-    if (!requireAdmin(req, res)) return;
+  auth.delete('/api/agents/:id', requireOrg, (req, res) => {
+    // Require org admin secret
+    const adminSecret = req.headers['x-admin-secret'] as string;
+    if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
+      res.status(403).json({ error: 'Org admin secret required' });
+      return;
+    }
 
-    // Admin needs to specify which org via query param or we look up the agent directly
     const agent = db.getAgentById(req.params.id as string);
-    if (!agent) {
+    if (!agent || agent.org_id !== req.org!.id) {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }
