@@ -9,14 +9,26 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   // ─── Public: Setup ────────────────────────────────────────
 
+  // Admin secret check helper
+  function requireAdmin(req: import('express').Request, res: import('express').Response): boolean {
+    if (!config.admin_secret) return true; // No secret = open (local/dev mode)
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    if (token !== config.admin_secret) {
+      res.status(401).json({ error: 'Admin authentication required' });
+      return false;
+    }
+    return true;
+  }
+
   /**
-   * POST /api/orgs — Create an organization (bootstrap endpoint)
+   * POST /api/orgs — Create an organization
    * Body: { name, persist_messages? }
+   * Auth: Admin secret (if BOTSHUB_ADMIN_SECRET is set)
    * Returns: org with api_key
-   *
-   * In production, you'd protect this. For self-hosted, it's open.
    */
   router.post('/api/orgs', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const { name, persist_messages } = req.body;
     if (!name) {
       res.status(400).json({ error: 'name is required' });
@@ -27,9 +39,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
-   * GET /api/orgs — List all orgs (admin)
+   * GET /api/orgs — List all orgs
+   * Auth: Admin secret (if BOTSHUB_ADMIN_SECRET is set)
    */
-  router.get('/api/orgs', (_req, res) => {
+  router.get('/api/orgs', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     res.json(db.listOrgs());
   });
 

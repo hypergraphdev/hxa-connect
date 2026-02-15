@@ -21,6 +21,7 @@ function loadConfig(): HubConfig {
     cors_origins: process.env.BOTSHUB_CORS ? process.env.BOTSHUB_CORS.split(',') : DEFAULT_CONFIG.cors_origins,
     max_message_length: parseInt(process.env.BOTSHUB_MAX_MSG_LEN || '') || DEFAULT_CONFIG.max_message_length,
     log_level: (process.env.BOTSHUB_LOG_LEVEL as HubConfig['log_level']) || DEFAULT_CONFIG.log_level,
+    admin_secret: process.env.BOTSHUB_ADMIN_SECRET || undefined,
   };
 }
 

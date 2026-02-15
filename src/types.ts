@@ -98,6 +98,7 @@ export interface HubConfig {
   cors_origins: string[];
   max_message_length: number;
   log_level: 'debug' | 'info' | 'warn' | 'error';
+  admin_secret?: string;
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -108,4 +109,5 @@ export const DEFAULT_CONFIG: HubConfig = {
   cors_origins: ['*'],
   max_message_length: 65536,
   log_level: 'info',
+  admin_secret: undefined,
 };
