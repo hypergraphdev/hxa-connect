@@ -115,6 +115,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
+   * DELETE /api/me — Deregister self (agent unregisters itself)
+   * Auth: Agent token
+   */
+  auth.delete('/api/me', requireAgent, (req, res) => {
+    const agent = req.agent!;
+    db.deleteAgent(agent.id);
+
+    // Broadcast agent offline
+    ws.broadcastToOrg(agent.org_id, {
+      type: 'agent_offline',
+      agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+    });
+
+    res.json({ ok: true, message: `Agent "${agent.name}" deregistered` });
+  });
+
+  /**
    * GET /api/me — Get current agent info
    */
   auth.get('/api/me', requireAgent, (req, res) => {
