@@ -511,8 +511,8 @@ function renderChannels() {
 
     return `
       <div class="sidebar-item ${isActive ? 'active' : ''}"
-           onclick="openChannel('${ch.id}')" style="display:flex;align-items:center;">
-        <span style="flex:1">${ch.type === 'group' ? '👥' : '💬'} ${label}</span>
+           onclick="openChannel('${ch.id}')">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ch.type === 'group' ? '👥' : '💬'} ${label}</span>
         <button class="delete-btn" onclick="deleteChannel('${ch.id}', event)" title="Delete channel">🗑️</button>
       </div>
     `;
