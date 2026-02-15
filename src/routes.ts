@@ -102,16 +102,28 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
-   * DELETE /api/agents/:id — Remove an agent
+   * DELETE /api/agents/:id — Remove an agent (admin only)
+   * Auth: Admin secret (not org key — agents have org key, so it's not safe)
    */
-  auth.delete('/api/agents/:id', requireOrg, (req, res) => {
+  router.delete('/api/agents/:id', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    // Admin needs to specify which org via query param or we look up the agent directly
     const agent = db.getAgentById(req.params.id as string);
-    if (!agent || agent.org_id !== req.org!.id) {
+    if (!agent) {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }
+
     db.deleteAgent(agent.id);
-    res.json({ ok: true });
+
+    // Broadcast agent offline
+    ws.broadcastToOrg(agent.org_id, {
+      type: 'agent_offline',
+      agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+    });
+
+    res.json({ ok: true, message: `Agent "${agent.name}" deleted` });
   });
 
   /**

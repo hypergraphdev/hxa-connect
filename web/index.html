@@ -232,6 +232,7 @@
     <p>Agent-to-Agent Communication Hub</p>
     <div class="login-box">
       <input id="api-key-input" type="text" placeholder="Org API Key" autocomplete="off" />
+      <input id="admin-secret-input" type="password" placeholder="Admin Secret" autocomplete="off" />
       <button id="login-btn">Connect</button>
       <div id="login-error"></div>
     </div>
@@ -271,6 +272,7 @@
 <script>
 // ─── State ───────────────────────────────────────────────────
 let apiKey = localStorage.getItem('botshub_key') || '';
+let adminSecret = localStorage.getItem('botshub_admin') || '';
 let ws = null;
 let agents = {};       // id → agent
 let channels = [];     // channel objects
@@ -302,28 +304,35 @@ async function api(path, opts = {}) {
 // ─── Login ───────────────────────────────────────────────────
 document.getElementById('login-btn').onclick = login;
 document.getElementById('api-key-input').onkeydown = (e) => {
+  if (e.key === 'Enter') document.getElementById('admin-secret-input').focus();
+};
+document.getElementById('admin-secret-input').onkeydown = (e) => {
   if (e.key === 'Enter') login();
 };
 
-// Auto-login if key stored
-if (apiKey) login();
+// Auto-login if both stored
+if (apiKey && adminSecret) login();
 
 async function login() {
-  const input = document.getElementById('api-key-input');
+  const keyInput = document.getElementById('api-key-input');
+  const secretInput = document.getElementById('admin-secret-input');
   const errorEl = document.getElementById('login-error');
-  const key = input.value.trim() || apiKey;
+  const key = keyInput.value.trim() || apiKey;
+  const secret = secretInput.value.trim() || adminSecret;
 
   if (!key) {
-    errorEl.textContent = 'Please enter an API key';
+    errorEl.textContent = 'Please enter an Org API Key';
     errorEl.style.display = 'block';
     return;
   }
 
   apiKey = key;
+  adminSecret = secret;
 
   try {
     const agentsList = await api('/api/agents');
     localStorage.setItem('botshub_key', apiKey);
+    localStorage.setItem('botshub_admin', adminSecret);
 
     // Index agents
     agents = {};
@@ -349,7 +358,8 @@ async function login() {
 // ─── WebSocket ───────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}${basePath}/ws?token=${apiKey}`);
+  const adminParam = adminSecret ? `&admin=${encodeURIComponent(adminSecret)}` : '';
+  ws = new WebSocket(`${proto}//${location.host}${basePath}/ws?token=${apiKey}${adminParam}`);
 
   ws.onopen = () => {
     document.getElementById('ws-dot').className = 'dot green';

@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import type { HubDB } from './db.js';
-import type { Message, WsServerEvent } from './types.js';
+import type { HubConfig, Message, WsServerEvent } from './types.js';
 import { URL } from 'node:url';
 
 interface WsClient {
@@ -15,9 +15,11 @@ export class HubWS {
   private wss: WebSocketServer;
   private clients: Set<WsClient> = new Set();
   private db: HubDB;
+  private config: HubConfig;
 
-  constructor(server: Server, db: HubDB) {
+  constructor(server: Server, db: HubDB, config: HubConfig) {
     this.db = db;
+    this.config = config;
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
     this.wss.on('connection', (ws, req) => {
@@ -29,7 +31,7 @@ export class HubWS {
         return;
       }
 
-      // Authenticate
+      // Authenticate as agent
       const agent = db.getAgentByToken(token);
       if (agent) {
         const client: WsClient = {
@@ -51,9 +53,16 @@ export class HubWS {
         return;
       }
 
-      // Try org key (for web UI observers)
+      // Try org key + admin secret (for web UI / human admins)
       const org = db.getOrgByKey(token);
       if (org) {
+        // Require admin secret for org-level access
+        const adminToken = url.searchParams.get('admin');
+        if (this.config.admin_secret && adminToken !== this.config.admin_secret) {
+          ws.close(4003, 'Admin secret required for org-level access');
+          return;
+        }
+
         const client: WsClient = {
           ws,
           orgId: org.id,

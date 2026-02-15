@@ -52,7 +52,7 @@ function main() {
 
   // API routes
   const server = createServer(app);
-  const hubWs = new HubWS(server, db);
+  const hubWs = new HubWS(server, db, config);
   app.use(createRouter(db, hubWs, config));
 
   // Fallback: serve index.html for SPA routing
