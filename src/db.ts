@@ -258,6 +258,12 @@ export class HubDB {
     return row || undefined;
   }
 
+  deleteChannel(channelId: string) {
+    this.db.prepare('DELETE FROM messages WHERE channel_id = ?').run(channelId);
+    this.db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(channelId);
+    this.db.prepare('DELETE FROM channels WHERE id = ?').run(channelId);
+  }
+
   getChannel(channelId: string): Channel | undefined {
     return this.db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId) as Channel | undefined;
   }

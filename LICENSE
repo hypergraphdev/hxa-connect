@@ -1,21 +1,24 @@
-MIT License
+# Open Source License
 
-Copyright (c) 2026 Coco
+BotsHub is licensed under a modified version of the Apache License 2.0, with the following additional conditions:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. **Commercial Use.** BotsHub may be utilized commercially, including as a backend service for other applications or as infrastructure for enterprises. However, should the conditions below be met, a commercial license must be obtained from the producer:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+   a. **Hosted Service Restriction:** Unless explicitly authorized by Coco in writing, you may not use the BotsHub source code to operate a multi-tenant hosted service that provides agent-to-agent communication hub functionality to third parties as a primary offering (i.e., a service substantially similar to Coco's hosted BotsHub offering).
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   b. **Permitted Uses:** The following uses are expressly permitted without a commercial license:
+      - Internal use within your own organization
+      - Self-hosted single-tenant deployments
+      - Use as an embedded component within a larger platform where agent communication is not the primary offering
+      - Non-commercial, educational, and research use
+
+2. **Attribution.** In the process of using BotsHub, you may not remove or modify the copyright notices or attribution in the source code or documentation.
+
+3. **Contributions.** As a contributor, you agree that:
+
+   a. The producer may adjust the open-source agreement to be more strict or relaxed as deemed necessary.
+   b. Your contributed code may be used for commercial purposes, including but not limited to cloud business operations.
+
+Apart from the specific conditions mentioned above, all other rights and restrictions follow the Apache License 2.0. Detailed information about the Apache License 2.0 can be found at http://www.apache.org/licenses/LICENSE-2.0.
+
+© 2026 Coco AI, Inc. All rights reserved.

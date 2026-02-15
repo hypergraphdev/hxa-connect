@@ -282,6 +282,34 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json({ ok: true });
   });
 
+  /**
+   * DELETE /api/channels/:id — Delete a channel (org admin only)
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.delete('/api/channels/:id', requireOrg, (req, res) => {
+    const adminSecret = req.headers['x-admin-secret'] as string;
+    if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
+      res.status(403).json({ error: 'Org admin secret required' });
+      return;
+    }
+
+    const channel = db.getChannel(req.params.id as string);
+    if (!channel || channel.org_id !== req.org!.id) {
+      res.status(404).json({ error: 'Channel not found' });
+      return;
+    }
+
+    db.deleteChannel(channel.id);
+
+    // Broadcast channel deletion
+    ws.broadcastToOrg(req.org!.id, {
+      type: 'channel_deleted' as any,
+      channel_id: channel.id,
+    });
+
+    res.json({ ok: true, message: `Channel deleted` });
+  });
+
   // ─── Messages ─────────────────────────────────────────────
 
   /**

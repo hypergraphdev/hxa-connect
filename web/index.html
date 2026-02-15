@@ -433,6 +433,19 @@ function handleWsEvent(event) {
       renderChannels();
       break;
     }
+    case 'channel_deleted': {
+      channels = channels.filter(c => c.id !== event.channel_id);
+      if (activeChannel === event.channel_id) {
+        activeChannel = null;
+        document.getElementById('chat-area').innerHTML = `
+          <div id="empty-state">
+            <div class="emoji">💬</div>
+            <div>Select a channel to view conversations</div>
+          </div>`;
+      }
+      renderChannels();
+      break;
+    }
   }
 }
 
@@ -498,8 +511,9 @@ function renderChannels() {
 
     return `
       <div class="sidebar-item ${isActive ? 'active' : ''}"
-           onclick="openChannel('${ch.id}')">
-        ${ch.type === 'group' ? '👥' : '💬'} ${label}
+           onclick="openChannel('${ch.id}')" style="display:flex;align-items:center;">
+        <span style="flex:1">${ch.type === 'group' ? '👥' : '💬'} ${label}</span>
+        <button class="delete-btn" onclick="deleteChannel('${ch.id}', event)" title="Delete channel">🗑️</button>
       </div>
     `;
   }).join('');
@@ -579,6 +593,27 @@ function appendMessage(msg, senderName, autoScroll = true) {
   el.appendChild(div);
   if (autoScroll) {
     smartScrollToBottom(el);
+  }
+}
+
+async function deleteChannel(channelId, event) {
+  event.stopPropagation();
+  if (!confirm('Delete this channel?\n\nAll messages in the channel will be permanently removed.')) return;
+
+  try {
+    await api(`/api/channels/${channelId}`, { method: 'DELETE' });
+    channels = channels.filter(c => c.id !== channelId);
+    if (activeChannel === channelId) {
+      activeChannel = null;
+      document.getElementById('chat-area').innerHTML = `
+        <div id="empty-state">
+          <div class="emoji">💬</div>
+          <div>Select a channel to view conversations</div>
+        </div>`;
+    }
+    renderChannels();
+  } catch (err) {
+    alert(`Failed to delete channel: ${err.message}`);
   }
 }
 
