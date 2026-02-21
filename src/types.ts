@@ -1,3 +1,13 @@
+// ─── MessageV2: Structured Message Parts ─────────────────────
+
+export type MessagePart =
+  | { type: 'text'; content: string }
+  | { type: 'markdown'; content: string }
+  | { type: 'json'; content: Record<string, unknown> }
+  | { type: 'file'; url: string; name: string; mime_type: string; size?: number }
+  | { type: 'image'; url: string; alt?: string }
+  | { type: 'link'; url: string; title?: string };
+
 // ─── Core Entities ───────────────────────────────────────────
 
 export interface Org {
@@ -18,6 +28,18 @@ export interface Agent {
   metadata: string | null; // JSON string
   webhook_url: string | null;
   webhook_secret: string | null;
+  bio: string | null;
+  role: string | null;
+  function: string | null;
+  team: string | null;
+  tags: string | null; // JSON string of string[]
+  languages: string | null; // JSON string of string[]
+  protocols: string | null; // JSON string
+  status_text: string | null;
+  timezone: string | null;
+  active_hours: string | null;
+  version: string;
+  runtime: string | null;
   online: boolean;
   last_seen_at: number | null;
   created_at: number;
@@ -43,14 +65,146 @@ export interface Message {
   sender_id: string;
   content: string;
   content_type: 'text' | 'json' | 'system';
+  parts: string | null; // JSON string of MessagePart[]
   created_at: number;
+}
+
+export type ThreadType = 'discussion' | 'request' | 'collab';
+export type ThreadStatus = 'open' | 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
+export type CloseReason = 'manual' | 'timeout' | 'error';
+
+export interface Thread {
+  id: string;
+  org_id: string;
+  topic: string;
+  type: ThreadType;
+  status: ThreadStatus;
+  initiator_id: string | null;
+  channel_id: string | null;
+  context: string | null; // JSON string
+  close_reason: CloseReason | null;
+  created_at: number;
+  updated_at: number;
+  last_activity_at: number;
+  resolved_at: number | null;
+}
+
+export interface ThreadParticipant {
+  thread_id: string;
+  bot_id: string;
+  label: string | null;
+  joined_at: number;
+}
+
+export interface ThreadMessage {
+  id: string;
+  thread_id: string;
+  sender_id: string | null;
+  content: string;
+  content_type: string;
+  parts: string | null; // JSON string of MessagePart[]
+  metadata: string | null; // JSON string
+  created_at: number;
+}
+
+export type ArtifactType = 'text' | 'markdown' | 'json' | 'code' | 'file' | 'link';
+
+export interface Artifact {
+  id: string;
+  thread_id: string;
+  artifact_key: string;
+  type: ArtifactType;
+  title: string | null;
+  content: string | null;
+  language: string | null;
+  url: string | null;
+  mime_type: string | null;
+  contributor_id: string | null;
+  version: number;
+  format_warning: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface FileRecord {
+  id: string;
+  org_id: string;
+  uploader_id: string;
+  name: string;
+  mime_type: string | null;
+  size: number;
+  path: string;  // disk path relative to data_dir
+  created_at: number;
+}
+
+// ─── Catchup (Offline Event Replay) ─────────────────────────
+
+export interface CatchupEventEnvelope {
+  event_id: string;
+  occurred_at: number;
+}
+
+export type CatchupEvent = CatchupEventEnvelope & (
+  | { type: 'thread_invited'; thread_id: string; topic: string; inviter: string }
+  | { type: 'thread_status_changed'; thread_id: string; topic: string; from: ThreadStatus; to: ThreadStatus; by: string }
+  | { type: 'thread_message_summary'; thread_id: string; topic: string; count: number; last_at: number }
+  | { type: 'thread_artifact_added'; thread_id: string; artifact_key: string; version: number }
+  | { type: 'channel_message_summary'; channel_id: string; channel_name?: string; count: number; last_at: number }
+);
+
+export interface CatchupResponse {
+  events: CatchupEvent[];
+  has_more: boolean;
+  cursor?: string;
+}
+
+export interface CatchupCountResponse {
+  thread_invites: number;
+  thread_status_changes: number;
+  thread_activities: number;
+  channel_messages: number;
+  total: number;
 }
 
 // ─── API Request/Response Types ──────────────────────────────
 
+export interface BotProtocols {
+  version: string;
+  messaging: boolean;
+  threads: boolean;
+  streaming: boolean;
+}
+
+export interface AgentProfileInput {
+  bio?: string | null;
+  role?: string | null;
+  function?: string | null;
+  team?: string | null;
+  tags?: string[] | null;
+  languages?: string[] | null;
+  protocols?: BotProtocols | null;
+  status_text?: string | null;
+  timezone?: string | null;
+  active_hours?: string | null;
+  version?: string;
+  runtime?: string | null;
+}
+
 export interface RegisterRequest {
   name: string;
   display_name?: string;
+  bio?: string | null;
+  role?: string | null;
+  function?: string | null;
+  team?: string | null;
+  tags?: string[] | null;
+  languages?: string[] | null;
+  protocols?: BotProtocols | null;
+  status_text?: string | null;
+  timezone?: string | null;
+  active_hours?: string | null;
+  version?: string;
+  runtime?: string | null;
   metadata?: Record<string, unknown>;
   webhook_url?: string;
   webhook_secret?: string; // Sent as Authorization: Bearer <secret>
@@ -62,6 +216,15 @@ export interface RegisterResponse {
   name: string;
 }
 
+export interface UpdateProfileRequest extends AgentProfileInput {}
+
+export interface ListBotsFilters {
+  role?: string;
+  tag?: string;
+  status?: string;
+  q?: string;
+}
+
 export interface CreateChannelRequest {
   type: 'direct' | 'group';
   name?: string;
@@ -69,29 +232,56 @@ export interface CreateChannelRequest {
 }
 
 export interface SendMessageRequest {
-  content: string;
+  content?: string;
   content_type?: 'text' | 'json';
+  parts?: MessagePart[];
 }
 
 export interface DirectSendRequest {
   to: string; // agent ID or name
-  content: string;
+  content?: string;
   content_type?: 'text' | 'json';
+  parts?: MessagePart[];
+}
+
+// ─── Wire-format messages (parts as parsed array) ────────────
+
+export interface WireMessage extends Omit<Message, 'parts'> {
+  parts: MessagePart[];
+}
+
+export interface WireThreadMessage extends Omit<ThreadMessage, 'parts'> {
+  parts: MessagePart[];
 }
 
 // ─── WebSocket Events ────────────────────────────────────────
 
 export type WsServerEvent =
-  | { type: 'message'; channel_id: string; message: Message; sender_name: string }
+  | { type: 'message'; channel_id: string; message: WireMessage; sender_name: string }
   | { type: 'agent_online'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
   | { type: 'agent_offline'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
   | { type: 'channel_created'; channel: Channel; members: string[] }
+  | { type: 'thread_created'; thread: Thread }
+  | { type: 'thread_updated'; thread: Thread; changes: string[] }
+  | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }
+  | { type: 'thread_artifact'; thread_id: string; artifact: Artifact; action: 'added' | 'updated' }
+  | { type: 'thread_participant'; thread_id: string; bot_id: string; action: 'joined' | 'left' }
   | { type: 'error'; message: string }
   | { type: 'pong' };
 
 export type WsClientEvent =
-  | { type: 'send'; channel_id: string; content: string; content_type?: string }
+  | { type: 'send'; channel_id: string; content?: string; content_type?: string; parts?: MessagePart[] }
   | { type: 'ping' };
+
+// ─── Webhook Health ──────────────────────────────────────────
+
+export interface WebhookHealth {
+  healthy: boolean;
+  last_success: number | null;
+  last_failure: number | null;
+  consecutive_failures: number;
+  degraded: boolean;  // true when consecutive_failures >= 10
+}
 
 // ─── Config ──────────────────────────────────────────────────
 
@@ -104,6 +294,49 @@ export interface HubConfig {
   max_message_length: number;
   log_level: 'debug' | 'info' | 'warn' | 'error';
   admin_secret?: string;
+  file_upload_mb_per_day: number;
+  max_file_size_mb: number;
+}
+
+// ─── Shared Validation ──────────────────────────────────────
+
+const VALID_PART_TYPES = new Set(['text', 'markdown', 'json', 'file', 'image', 'link']);
+
+/**
+ * Validate an array of message parts. Returns an error string or null.
+ * Shared by REST routes and WebSocket handler.
+ */
+export function validateParts(parts: unknown): string | null {
+  if (!Array.isArray(parts)) return 'parts must be an array';
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part || typeof part !== 'object') return `parts[${i}] must be an object`;
+    if (!VALID_PART_TYPES.has(part.type)) return `parts[${i}].type is invalid (got "${part.type}")`;
+
+    switch (part.type) {
+      case 'text':
+      case 'markdown':
+        if (typeof part.content !== 'string') return `parts[${i}].content must be a string`;
+        break;
+      case 'json':
+        if (part.content === null || typeof part.content !== 'object') return `parts[${i}].content must be an object`;
+        break;
+      case 'file':
+        if (typeof part.url !== 'string') return `parts[${i}].url is required`;
+        if (typeof part.name !== 'string') return `parts[${i}].name is required`;
+        if (typeof part.mime_type !== 'string') return `parts[${i}].mime_type is required`;
+        break;
+      case 'image':
+        if (typeof part.url !== 'string') return `parts[${i}].url is required`;
+        break;
+      case 'link':
+        if (typeof part.url !== 'string') return `parts[${i}].url is required`;
+        break;
+    }
+  }
+
+  return null;
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -115,4 +348,6 @@ export const DEFAULT_CONFIG: HubConfig = {
   max_message_length: 65536,
   log_level: 'info',
   admin_secret: undefined,
+  file_upload_mb_per_day: 500,
+  max_file_size_mb: 50,
 };

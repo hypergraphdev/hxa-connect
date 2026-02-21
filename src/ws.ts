@@ -1,7 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import type { HubDB } from './db.js';
-import type { Message, WsServerEvent } from './types.js';
+import type { WebhookManager } from './webhook.js';
+import { validateParts, type HubConfig, type Message, type MessagePart, type WireMessage, type WsServerEvent } from './types.js';
 import { URL } from 'node:url';
 
 interface WsClient {
@@ -15,9 +16,13 @@ export class HubWS {
   private wss: WebSocketServer;
   private clients: Set<WsClient> = new Set();
   private db: HubDB;
+  private webhookManager: WebhookManager;
+  private config: HubConfig;
 
-  constructor(server: Server, db: HubDB) {
+  constructor(server: Server, db: HubDB, webhookManager: WebhookManager, config: HubConfig) {
     this.db = db;
+    this.webhookManager = webhookManager;
+    this.config = config;
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
     this.wss.on('connection', (ws, req) => {
@@ -40,6 +45,9 @@ export class HubWS {
         };
         this.clients.add(client);
         db.setAgentOnline(agent.id, true);
+
+        // Reset degraded webhook status on reconnect
+        db.resetWebhookDegraded(agent.id);
 
         // Broadcast online status
         this.broadcastToOrg(agent.org_id, {
@@ -92,9 +100,59 @@ export class HubWS {
             return;
           }
 
+          // Validate and handle parts
+          let partsJson: string | null = null;
+          if (data.parts && Array.isArray(data.parts)) {
+            const partsError = validateParts(data.parts);
+            if (partsError) {
+              this.send(client, { type: 'error', message: partsError });
+              return;
+            }
+            partsJson = JSON.stringify(data.parts);
+          }
+
+          // Resolve content from parts if not provided
+          let content = data.content;
+          if (!content && data.parts && Array.isArray(data.parts)) {
+            for (const part of data.parts) {
+              if ((part.type === 'text' || part.type === 'markdown') && typeof part.content === 'string') {
+                content = part.content;
+                break;
+              }
+            }
+            if (!content) {
+              content = `[${data.parts.map((p: any) => p.type).join(', ')}]`;
+            }
+          }
+
+          if (!content) {
+            this.send(client, { type: 'error', message: 'content or parts is required' });
+            return;
+          }
+
+          if (content.length > this.config.max_message_length) {
+            this.send(client, { type: 'error', message: `Message too long (max ${this.config.max_message_length} chars)` });
+            return;
+          }
+
           const contentType = data.content_type || 'text';
-          const msg = this.db.createMessage(data.channel_id, client.agentId, data.content, contentType);
+          const msg = this.db.createMessage(data.channel_id, client.agentId, content, contentType, partsJson);
           const agent = this.db.getAgentById(client.agentId);
+
+          // Record catchup events for channel members except sender
+          const channel = this.db.getChannel(data.channel_id);
+          if (channel) {
+            const members = this.db.getChannelMembers(data.channel_id);
+            for (const m of members) {
+              if (m.agent_id === client.agentId) continue;
+              this.db.recordCatchupEvent(channel.org_id, m.agent_id, 'channel_message_summary', {
+                channel_id: channel.id,
+                channel_name: channel.name ?? undefined,
+                count: 1,
+                last_at: msg.created_at,
+              });
+            }
+          }
 
           this.broadcastMessage(data.channel_id, msg, agent?.name || 'unknown');
         }
@@ -130,10 +188,23 @@ export class HubWS {
     if (!channel) return;
 
     const members = this.db.getChannelMembers(channelId).map(m => m.agent_id);
+
+    // Parse parts for wire format: send parsed array, not raw JSON string
+    let parsedParts: MessagePart[];
+    try {
+      parsedParts = message.parts
+        ? JSON.parse(message.parts)
+        : [{ type: 'text', content: message.content }];
+    } catch {
+      parsedParts = [{ type: 'text', content: message.content }];
+    }
+
+    const wireMessage: WireMessage = { ...message, parts: parsedParts };
+
     const event: WsServerEvent = {
       type: 'message',
       channel_id: channelId,
-      message,
+      message: wireMessage,
       sender_name: senderName,
     };
 
@@ -142,33 +213,22 @@ export class HubWS {
       if (agentId === message.sender_id) continue;
       const agent = this.db.getAgentById(agentId);
       if (agent?.webhook_url) {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (agent.webhook_secret) {
-          headers['Authorization'] = `Bearer ${agent.webhook_secret}`;
-        }
-
         // Send structured webhook payload for channel plugins
         const payload = {
           channel_id: channelId,
           sender_name: senderName,
           sender_id: message.sender_id,
           content: message.content,
+          parts: parsedParts,
           message_id: message.id,
           chat_type: channel.type,
           group_name: channel.name,
           created_at: message.created_at,
         };
 
-        console.log(`  📤 Webhook → ${agent.name} (${agent.webhook_url})`);
-        fetch(agent.webhook_url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-        }).then(res => {
-          console.log(`  📤 Webhook ${agent.name}: ${res.status} ${res.statusText}`);
-        }).catch(err => {
-          console.log(`  ❌ Webhook ${agent.name} failed: ${err.message}`);
-        });
+        console.log(`  \ud83d\udce4 Webhook \u2192 ${agent.name} (${agent.webhook_url})`);
+        // Fire-and-forget — retries happen in background
+        void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, payload);
       }
     }
 
@@ -189,6 +249,36 @@ export class HubWS {
   }
 
   /**
+   * Broadcast thread event to all thread participants + org admins + participant webhooks
+   */
+  broadcastThreadEvent(orgId: string, threadId: string, event: WsServerEvent) {
+    const participantIds = this.db.getParticipants(threadId).map(p => p.bot_id);
+
+    let excludeWebhookBotId: string | undefined;
+    if (event.type === 'thread_message' && event.message.sender_id) {
+      excludeWebhookBotId = event.message.sender_id;
+    } else if (event.type === 'thread_artifact' && event.artifact.contributor_id) {
+      excludeWebhookBotId = event.artifact.contributor_id;
+    }
+
+    this.fireThreadWebhooks(participantIds, event, excludeWebhookBotId);
+
+    const participantSet = new Set(participantIds);
+    for (const client of this.clients) {
+      if (client.orgId !== orgId) continue;
+
+      if (client.isOrgAdmin) {
+        this.send(client, event);
+        continue;
+      }
+
+      if (client.agentId && participantSet.has(client.agentId)) {
+        this.send(client, event);
+      }
+    }
+  }
+
+  /**
    * Broadcast event to all clients in an org
    */
   broadcastToOrg(orgId: string, event: WsServerEvent, excludeAgentId?: string) {
@@ -202,6 +292,19 @@ export class HubWS {
   private send(client: WsClient, event: WsServerEvent) {
     if (client.ws.readyState === WebSocket.OPEN) {
       client.ws.send(JSON.stringify(event));
+    }
+  }
+
+  private fireThreadWebhooks(participantIds: string[], event: WsServerEvent, excludeBotId?: string) {
+    for (const agentId of participantIds) {
+      if (excludeBotId && agentId === excludeBotId) continue;
+
+      const agent = this.db.getAgentById(agentId);
+      if (!agent?.webhook_url) continue;
+
+      console.log(`  \ud83d\udce4 Thread webhook \u2192 ${agent.name} (${agent.webhook_url})`);
+      // Fire-and-forget — retries happen in background
+      void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, event);
     }
   }
 }

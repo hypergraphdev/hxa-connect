@@ -1,8 +1,105 @@
 import { Router } from 'express';
+import multer from 'multer';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg } from './auth.js';
-import type { HubConfig } from './types.js';
+import { validateParts, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse } from './types.js';
+
+function parseJsonField<T>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+function toAgentResponse(agent: Agent) {
+  return {
+    id: agent.id,
+    org_id: agent.org_id,
+    name: agent.name,
+    display_name: agent.display_name,
+    online: agent.online,
+    last_seen_at: agent.last_seen_at,
+    created_at: agent.created_at,
+    metadata: parseJsonField<Record<string, unknown>>(agent.metadata),
+    bio: agent.bio,
+    role: agent.role,
+    function: agent.function,
+    team: agent.team,
+    tags: parseJsonField<string[]>(agent.tags),
+    languages: parseJsonField<string[]>(agent.languages),
+    protocols: parseJsonField<Record<string, unknown>>(agent.protocols),
+    status_text: agent.status_text,
+    timezone: agent.timezone,
+    active_hours: agent.active_hours,
+    version: agent.version,
+    runtime: agent.runtime,
+  };
+}
+
+function getQueryString(value: unknown): string | undefined {
+  if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : undefined;
+  return typeof value === 'string' ? value : undefined;
+}
+
+// ─── MessageV2 Helpers ───────────────────────────────────────
+// validateParts is imported from types.ts
+
+/**
+ * Extract a plain text content string from parts array for backward compat.
+ * Uses the first text or markdown part.
+ */
+function contentFromParts(parts: MessagePart[]): string {
+  for (const part of parts) {
+    if (part.type === 'text' || part.type === 'markdown') return part.content;
+  }
+  // Fallback: describe what the message contains
+  const types = parts.map(p => p.type);
+  return `[${types.join(', ')}]`;
+}
+
+/**
+ * Enrich a Message for wire format: parse parts JSON string into array.
+ * When parts is null (legacy message), auto-generate from content.
+ */
+function enrichMessage(msg: Message): WireMessage {
+  let parsed: MessagePart[];
+  try {
+    parsed = msg.parts
+      ? JSON.parse(msg.parts)
+      : [{ type: 'text', content: msg.content }];
+  } catch {
+    parsed = [{ type: 'text', content: msg.content }];
+  }
+  return { ...msg, parts: parsed };
+}
+
+/**
+ * Enrich a ThreadMessage for wire format: parse parts JSON string into array.
+ * When parts is null (legacy message), auto-generate from content.
+ */
+function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
+  let parsed: MessagePart[];
+  try {
+    parsed = msg.parts
+      ? JSON.parse(msg.parts)
+      : [{ type: 'text', content: msg.content }];
+  } catch {
+    parsed = [{ type: 'text', content: msg.content }];
+  }
+  return { ...msg, parts: parsed };
+}
+
+const THREAD_TYPES = new Set<ThreadType>(['discussion', 'request', 'collab']);
+const THREAD_STATUSES = new Set<ThreadStatus>(['open', 'active', 'blocked', 'reviewing', 'resolved', 'closed']);
+const CLOSE_REASONS = new Set<CloseReason>(['manual', 'timeout', 'error']);
+const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code', 'file', 'link']);
+const ARTIFACT_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
 
 export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   const router = Router();
@@ -14,11 +111,54 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!config.admin_secret) return true; // No secret = open (local/dev mode)
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-    if (token !== config.admin_secret) {
+    if (!token) {
+      res.status(401).json({ error: 'Admin authentication required' });
+      return false;
+    }
+    const expected = Buffer.from(config.admin_secret, 'utf8');
+    const actual = Buffer.from(token, 'utf8');
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
       res.status(401).json({ error: 'Admin authentication required' });
       return false;
     }
     return true;
+  }
+
+  function requireOrgOrAgent(req: import('express').Request, res: import('express').Response): string | undefined {
+    if (req.agent) return req.agent.org_id;
+    if (req.org) return req.org.id;
+    res.status(403).json({ error: 'Authentication required' });
+    return undefined;
+  }
+
+  function resolveAgent(orgId: string, idOrName: unknown): Agent | undefined {
+    if (typeof idOrName !== 'string') return undefined;
+    // Check ID first, but only accept if it belongs to this org
+    const byId = db.getAgentById(idOrName);
+    if (byId && byId.org_id === orgId) return byId;
+    // Fall back to name lookup within the org
+    const byName = db.getAgentByName(orgId, idOrName);
+    if (byName) return byName;
+    return undefined;
+  }
+
+  function requireThreadParticipant(
+    req: import('express').Request,
+    res: import('express').Response,
+    threadId: string,
+  ): Thread | undefined {
+    const thread = db.getThread(threadId);
+    if (!thread) {
+      res.status(404).json({ error: 'Thread not found' });
+      return undefined;
+    }
+
+    if (!req.agent || !db.isParticipant(thread.id, req.agent.id)) {
+      res.status(403).json({ error: 'Not a participant of this thread' });
+      return undefined;
+    }
+
+    return thread;
   }
 
   /**
@@ -59,7 +199,26 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Returns: { agent_id, token, name }
    */
   auth.post('/api/register', requireOrg, (req, res) => {
-    const { name, display_name, metadata, webhook_url, webhook_secret } = req.body;
+    const {
+      name,
+      display_name,
+      metadata,
+      webhook_url,
+      webhook_secret,
+      bio,
+      role,
+      function: functionName,
+      team,
+      tags,
+      languages,
+      protocols,
+      status_text,
+      timezone,
+      active_hours,
+      version,
+      runtime,
+    } = req.body;
+
     if (!name) {
       res.status(400).json({ error: 'name is required' });
       return;
@@ -70,7 +229,41 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret);
+    // Validate profile field types
+    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime };
+    for (const [key, val] of Object.entries(stringFields)) {
+      if (val !== undefined && val !== null && typeof val !== 'string') {
+        res.status(400).json({ error: `${key} must be a string or null` });
+        return;
+      }
+    }
+    for (const [key, val] of Object.entries({ tags, languages }) as [string, unknown][]) {
+      if (val !== undefined && val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
+        res.status(400).json({ error: `${key} must be an array of strings or null` });
+        return;
+      }
+    }
+    if (protocols !== undefined && protocols !== null && typeof protocols !== 'object') {
+      res.status(400).json({ error: 'protocols must be an object or null' });
+      return;
+    }
+
+    const profile: AgentProfileInput = {
+      bio,
+      role,
+      function: functionName,
+      team,
+      tags,
+      languages,
+      protocols,
+      status_text,
+      timezone,
+      active_hours,
+      version,
+      runtime,
+    };
+
+    const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
 
     // Broadcast agent online to all org viewers (Web UI etc.)
     ws.broadcastToOrg(req.org!.id, {
@@ -81,7 +274,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json({
       agent_id: agent.id,
       token: agent.token,
-      name: agent.name,
+      ...toAgentResponse(agent),
     });
   });
 
@@ -90,15 +283,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/agents', requireOrg, (req, res) => {
     const agents = db.listAgents(req.org!.id);
-    res.json(agents.map(a => ({
-      id: a.id,
-      name: a.name,
-      display_name: a.display_name,
-      online: a.online,
-      last_seen_at: a.last_seen_at,
-      metadata: a.metadata ? JSON.parse(a.metadata) : null,
-      created_at: a.created_at,
-    })));
+    res.json(agents.map(a => toAgentResponse(a)));
   });
 
   /**
@@ -152,14 +337,75 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/me', requireAgent, (req, res) => {
     const a = req.agent!;
-    res.json({
-      id: a.id,
-      name: a.name,
-      display_name: a.display_name,
-      org_id: a.org_id,
-      online: a.online,
-      metadata: a.metadata ? JSON.parse(a.metadata) : null,
-    });
+    res.json(toAgentResponse(a));
+  });
+
+  /**
+   * PATCH /api/me/profile — Update current bot profile fields
+   */
+  auth.patch('/api/me/profile', requireAgent, (req, res) => {
+    const {
+      bio,
+      role,
+      function: functionName,
+      team,
+      tags,
+      languages,
+      protocols,
+      status_text,
+      timezone,
+      active_hours,
+      version,
+      runtime,
+    } = req.body;
+
+    const fields: AgentProfileInput = {
+      bio,
+      role,
+      function: functionName,
+      team,
+      tags,
+      languages,
+      protocols,
+      status_text,
+      timezone,
+      active_hours,
+      version,
+      runtime,
+    };
+
+    if (Object.values(fields).every(v => v === undefined)) {
+      res.status(400).json({ error: 'No profile fields provided' });
+      return;
+    }
+
+    // Validate field types to prevent 500s and invalid stored data
+    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime };
+    for (const [key, val] of Object.entries(stringFields)) {
+      if (val !== undefined && val !== null && typeof val !== 'string') {
+        res.status(400).json({ error: `${key} must be a string or null` });
+        return;
+      }
+    }
+    for (const [key, val] of Object.entries({ tags, languages }) as [string, unknown][]) {
+      if (val !== undefined && val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
+        res.status(400).json({ error: `${key} must be an array of strings or null` });
+        return;
+      }
+    }
+    if (protocols !== undefined && protocols !== null && typeof protocols !== 'object') {
+      res.status(400).json({ error: 'protocols must be an object or null' });
+      return;
+    }
+
+    const updated = db.updateProfile(req.agent!.id, fields);
+    if (!updated) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    req.agent = updated;
+    res.json(toAgentResponse(updated));
   });
 
   /**
@@ -169,14 +415,74 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const agents = db.listAgents(req.agent!.org_id);
     res.json(agents
       .filter(a => a.id !== req.agent!.id)
-      .map(a => ({
-        id: a.id,
-        name: a.name,
-        display_name: a.display_name,
-        online: a.online,
-        last_seen_at: a.last_seen_at,
-      }))
+      .map(a => toAgentResponse(a))
     );
+  });
+
+  /**
+   * GET /api/bots — Discover bots in org
+   * Query: role?, tag?, status?, q?
+   * Auth: org API key or agent token
+   */
+  auth.get('/api/bots', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+
+    const role = getQueryString(req.query.role);
+    const tag = getQueryString(req.query.tag);
+    const status = getQueryString(req.query.status);
+    const q = getQueryString(req.query.q);
+
+    const bots = db.listBots(orgId, { role, tag, status, q });
+    res.json(bots.map(bot => toAgentResponse(bot)));
+  });
+
+  /**
+   * GET /api/bots/:name/webhook/health — Check webhook health for a bot
+   * Auth: agent token or org API key
+   * Org-scoped: only check bots in the same org
+   */
+  auth.get('/api/bots/:name/webhook/health', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+
+    const bot = db.getAgentByName(orgId, req.params.name as string);
+    if (!bot) {
+      res.status(404).json({ error: 'Bot not found' });
+      return;
+    }
+
+    const health = db.getWebhookHealth(bot.id);
+    if (!health) {
+      // No webhook activity recorded yet
+      res.json({
+        healthy: true,
+        last_success: null,
+        last_failure: null,
+        consecutive_failures: 0,
+        degraded: false,
+      });
+      return;
+    }
+
+    res.json(health);
+  });
+
+  /**
+   * GET /api/bots/:name/profile — Get full profile by bot name
+   * Auth: org API key or agent token
+   */
+  auth.get('/api/bots/:name/profile', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+
+    const bot = db.getAgentByName(orgId, req.params.name as string);
+    if (!bot) {
+      res.status(404).json({ error: 'Bot not found' });
+      return;
+    }
+
+    res.json(toAgentResponse(bot));
   });
 
   // ─── Channels ─────────────────────────────────────────────
@@ -310,6 +616,666 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json({ ok: true, message: `Channel deleted` });
   });
 
+  // ─── Threads ─────────────────────────────────────────────
+
+  /**
+   * POST /api/threads — Create a thread
+   * Body: { topic, type?, participants?, channel_id?, context? }
+   */
+  auth.post('/api/threads', requireAgent, (req, res) => {
+    const { topic, type, participants, channel_id, context } = req.body;
+    const orgId = req.agent!.org_id;
+
+    if (!topic || typeof topic !== 'string') {
+      res.status(400).json({ error: 'topic is required' });
+      return;
+    }
+
+    const threadType = (typeof type === 'string' ? type : 'discussion') as ThreadType;
+    if (!THREAD_TYPES.has(threadType)) {
+      res.status(400).json({ error: 'Invalid thread type' });
+      return;
+    }
+
+    if (participants !== undefined && !Array.isArray(participants)) {
+      res.status(400).json({ error: 'participants must be an array' });
+      return;
+    }
+
+    const resolvedParticipantIds: string[] = [];
+    for (const p of (participants || [])) {
+      const bot = resolveAgent(orgId, p);
+      if (!bot) {
+        res.status(400).json({ error: `Agent not found: ${p}` });
+        return;
+      }
+      resolvedParticipantIds.push(bot.id);
+    }
+
+    let resolvedChannelId: string | undefined;
+    if (channel_id !== undefined && channel_id !== null) {
+      if (typeof channel_id !== 'string') {
+        res.status(400).json({ error: 'channel_id must be a string' });
+        return;
+      }
+
+      const channel = db.getChannel(channel_id);
+      if (!channel || channel.org_id !== orgId) {
+        res.status(400).json({ error: 'Invalid channel_id' });
+        return;
+      }
+      resolvedChannelId = channel.id;
+    }
+
+    let contextJson: string | null | undefined;
+    if (context !== undefined) {
+      if (context === null) {
+        contextJson = null;
+      } else if (typeof context === 'string') {
+        contextJson = context;
+      } else {
+        try {
+          contextJson = JSON.stringify(context);
+        } catch {
+          res.status(400).json({ error: 'context must be JSON-serializable' });
+          return;
+        }
+      }
+    }
+
+    try {
+      const thread = db.createThread(
+        orgId,
+        req.agent!.id,
+        topic,
+        threadType,
+        resolvedParticipantIds,
+        resolvedChannelId,
+        contextJson,
+      );
+
+      // Record catchup events: thread_invited for each participant (except initiator)
+      const allParticipantIds = Array.from(new Set([req.agent!.id, ...resolvedParticipantIds]));
+      for (const pid of allParticipantIds) {
+        if (pid === req.agent!.id) continue;
+        db.recordCatchupEvent(orgId, pid, 'thread_invited', {
+          thread_id: thread.id,
+          topic: thread.topic,
+          inviter: req.agent!.id,
+        });
+      }
+
+      ws.broadcastThreadEvent(orgId, thread.id, {
+        type: 'thread_created',
+        thread,
+      });
+
+      res.json(thread);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to create thread' });
+    }
+  });
+
+  /**
+   * GET /api/threads — List my threads
+   * Query: status?
+   */
+  auth.get('/api/threads', requireAgent, (req, res) => {
+    const statusRaw = getQueryString(req.query.status);
+    if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
+      res.status(400).json({ error: 'Invalid status filter' });
+      return;
+    }
+
+    const status = statusRaw as ThreadStatus | undefined;
+    const threads = db.listThreadsForAgent(req.agent!.id, status);
+    res.json(threads);
+  });
+
+  /**
+   * GET /api/threads/:id — Thread details with participants
+   */
+  auth.get('/api/threads/:id', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    const participants = db.getParticipants(thread.id).map(p => {
+      const bot = db.getAgentById(p.bot_id);
+      return {
+        bot_id: p.bot_id,
+        name: bot?.name,
+        display_name: bot?.display_name,
+        online: bot?.online,
+        label: p.label,
+        joined_at: p.joined_at,
+      };
+    });
+
+    res.json({ ...thread, participants });
+  });
+
+  /**
+   * PATCH /api/threads/:id — Update thread status/context/topic
+   * Body: { status?, close_reason?, context?, topic? }
+   */
+  auth.patch('/api/threads/:id', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    const { status: statusInput, close_reason, context, topic } = req.body;
+    if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined) {
+      res.status(400).json({ error: 'No updatable fields provided' });
+      return;
+    }
+
+    // Block all mutations on terminal threads (status transitions handled separately in updateThreadStatus)
+    if ((thread.status === 'resolved' || thread.status === 'closed') && statusInput === undefined) {
+      res.status(409).json({ error: 'Thread is in terminal state; no updates allowed' });
+      return;
+    }
+
+    if (topic !== undefined && (typeof topic !== 'string' || topic.trim().length === 0)) {
+      res.status(400).json({ error: 'topic must be a non-empty string' });
+      return;
+    }
+
+    let status: ThreadStatus | undefined;
+    if (statusInput !== undefined) {
+      if (typeof statusInput !== 'string' || !THREAD_STATUSES.has(statusInput as ThreadStatus)) {
+        res.status(400).json({ error: 'Invalid status' });
+        return;
+      }
+      status = statusInput as ThreadStatus;
+    }
+
+    let closeReason: CloseReason | undefined;
+    if (close_reason !== undefined) {
+      if (typeof close_reason !== 'string' || !CLOSE_REASONS.has(close_reason as CloseReason)) {
+        res.status(400).json({ error: 'Invalid close_reason' });
+        return;
+      }
+      closeReason = close_reason as CloseReason;
+    }
+
+    if (status === 'closed' && closeReason === undefined) {
+      res.status(400).json({ error: 'close_reason is required for closed status' });
+      return;
+    }
+    if (status !== 'closed' && closeReason !== undefined) {
+      res.status(400).json({ error: 'close_reason is only allowed with closed status' });
+      return;
+    }
+
+    let contextJson: string | null | undefined;
+    if (context !== undefined) {
+      if (context === null) {
+        contextJson = null;
+      } else if (typeof context === 'string') {
+        contextJson = context;
+      } else {
+        try {
+          contextJson = JSON.stringify(context);
+        } catch {
+          res.status(400).json({ error: 'context must be JSON-serializable' });
+          return;
+        }
+      }
+    }
+
+    const changes: string[] = [];
+    let updated: Thread | undefined = thread;
+
+    try {
+      if (status !== undefined) {
+        const previousStatus = thread.status;
+        updated = db.updateThreadStatus(thread.id, status, closeReason);
+        if (!updated) {
+          res.status(404).json({ error: 'Thread not found' });
+          return;
+        }
+        changes.push('status');
+        if (status === 'closed') changes.push('close_reason');
+        if (status === 'resolved') changes.push('resolved_at');
+
+        // Record catchup event for all participants
+        const participants = db.getParticipants(thread.id);
+        for (const p of participants) {
+          db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_status_changed', {
+            thread_id: thread.id,
+            topic: thread.topic,
+            from: previousStatus,
+            to: status,
+            by: req.agent!.id,
+          });
+        }
+      }
+
+      if (context !== undefined) {
+        updated = db.updateThreadContext(thread.id, contextJson ?? null);
+        if (!updated) {
+          res.status(404).json({ error: 'Thread not found' });
+          return;
+        }
+        changes.push('context');
+      }
+
+      if (topic !== undefined) {
+        updated = db.updateThreadTopic(thread.id, topic.trim());
+        if (!updated) {
+          res.status(404).json({ error: 'Thread not found' });
+          return;
+        }
+        changes.push('topic');
+      }
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to update thread' });
+      return;
+    }
+
+    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_updated',
+      thread: updated!,
+      changes,
+    });
+
+    res.json(updated);
+  });
+
+  /**
+   * POST /api/threads/:id/participants — Invite bot (id or name)
+   * Body: { bot_id, label? }
+   */
+  auth.post('/api/threads/:id/participants', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Thread is in terminal state; no participant changes allowed' });
+      return;
+    }
+
+    const { bot_id, label } = req.body;
+    if (!bot_id || typeof bot_id !== 'string') {
+      res.status(400).json({ error: 'bot_id is required' });
+      return;
+    }
+    if (label !== undefined && label !== null && typeof label !== 'string') {
+      res.status(400).json({ error: 'label must be a string' });
+      return;
+    }
+
+    const bot = resolveAgent(thread.org_id, bot_id);
+    if (!bot) {
+      res.status(404).json({ error: `Agent not found: ${bot_id}` });
+      return;
+    }
+
+    const alreadyParticipant = db.isParticipant(thread.id, bot.id);
+    try {
+      const participant = db.addParticipant(thread.id, bot.id, label);
+
+      if (!alreadyParticipant) {
+        // Record catchup event for the invited bot
+        db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
+          thread_id: thread.id,
+          topic: thread.topic,
+          inviter: req.agent!.id,
+        });
+
+        ws.broadcastThreadEvent(thread.org_id, thread.id, {
+          type: 'thread_participant',
+          thread_id: thread.id,
+          bot_id: bot.id,
+          action: 'joined',
+        });
+      }
+
+      res.json(participant);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to add participant' });
+    }
+  });
+
+  /**
+   * DELETE /api/threads/:id/participants/:bot — Leave/remove participant (id or name)
+   */
+  auth.delete('/api/threads/:id/participants/:bot', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Thread is in terminal state; no participant changes allowed' });
+      return;
+    }
+
+    const target = resolveAgent(thread.org_id, req.params.bot as string);
+    if (!target) {
+      res.status(404).json({ error: `Agent not found: ${req.params.bot}` });
+      return;
+    }
+
+    if (!db.isParticipant(thread.id, target.id)) {
+      res.status(404).json({ error: 'Bot is not a participant in this thread' });
+      return;
+    }
+
+    const participants = db.getParticipants(thread.id);
+    if (participants.length <= 1) {
+      res.status(400).json({ error: 'Cannot remove the last participant from a thread' });
+      return;
+    }
+
+    // Broadcast leave event BEFORE removing participant, so the removed bot
+    // is still in the recipient list and receives the notification
+    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_participant',
+      thread_id: thread.id,
+      bot_id: target.id,
+      action: 'left',
+    });
+    db.removeParticipant(thread.id, target.id);
+
+    res.json({ ok: true });
+  });
+
+  /**
+   * POST /api/threads/:id/messages — Send a thread message
+   * Body: { content, content_type?, metadata? }
+   */
+  auth.post('/api/threads/:id/messages', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Thread is in terminal state; no new messages allowed' });
+      return;
+    }
+
+    const { content, content_type, metadata, parts } = req.body;
+
+    // Validate parts if provided
+    let partsJson: string | null = null;
+    if (parts !== undefined) {
+      const partsError = validateParts(parts);
+      if (partsError) {
+        res.status(400).json({ error: partsError });
+        return;
+      }
+      partsJson = JSON.stringify(parts);
+    }
+
+    // Resolve content: explicit content, or auto-generate from parts
+    const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
+    if (!resolvedContent || typeof resolvedContent !== 'string') {
+      res.status(400).json({ error: 'content or parts is required' });
+      return;
+    }
+
+    if (resolvedContent.length > config.max_message_length) {
+      res.status(400).json({ error: `Message too long (max ${config.max_message_length} chars)` });
+      return;
+    }
+
+    let metadataJson: string | null | undefined;
+    if (metadata !== undefined) {
+      if (metadata === null) {
+        metadataJson = null;
+      } else if (typeof metadata === 'string') {
+        metadataJson = metadata;
+      } else {
+        try {
+          metadataJson = JSON.stringify(metadata);
+        } catch {
+          res.status(400).json({ error: 'metadata must be JSON-serializable' });
+          return;
+        }
+      }
+    }
+
+    const message = db.createThreadMessage(
+      thread.id,
+      req.agent!.id,
+      resolvedContent,
+      typeof content_type === 'string' ? content_type : 'text',
+      metadataJson,
+      partsJson,
+    );
+
+    const enriched = enrichThreadMessage(message);
+
+    // Record catchup events for all participants except the sender
+    const threadParticipants = db.getParticipants(thread.id);
+    for (const p of threadParticipants) {
+      if (p.bot_id === req.agent!.id) continue;
+      db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
+        thread_id: thread.id,
+        topic: thread.topic,
+        count: 1,
+        last_at: message.created_at,
+      });
+    }
+
+    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_message',
+      thread_id: thread.id,
+      message: enriched,
+    });
+
+    res.json(enriched);
+  });
+
+  /**
+   * GET /api/threads/:id/messages — Get thread messages
+   * Query: limit?, before?
+   */
+  auth.get('/api/threads/:id/messages', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
+    const beforeStr = getQueryString(req.query.before);
+    const before = beforeStr ? parseInt(beforeStr) : undefined;
+
+    const messages = db.getThreadMessages(thread.id, limit, before);
+    const enriched = messages.map(m => {
+      const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+    });
+
+    res.json(enriched.reverse());
+  });
+
+  /**
+   * POST /api/threads/:id/artifacts — Add new artifact (new key only)
+   * Use PATCH to update existing artifacts with new versions.
+   */
+  auth.post('/api/threads/:id/artifacts', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Thread is in terminal state; no new artifacts allowed' });
+      return;
+    }
+
+    const {
+      artifact_key,
+      type,
+      title,
+      content,
+      language,
+      url,
+      mime_type,
+    } = req.body;
+
+    if (!artifact_key || typeof artifact_key !== 'string' || !ARTIFACT_KEY_PATTERN.test(artifact_key)) {
+      res.status(400).json({ error: 'artifact_key is required and must be URL-safe' });
+      return;
+    }
+
+    const artifactType = (typeof type === 'string' ? type : 'text') as ArtifactType;
+    if (!ARTIFACT_TYPES.has(artifactType)) {
+      res.status(400).json({ error: 'Invalid artifact type' });
+      return;
+    }
+
+    if (title !== undefined && title !== null && typeof title !== 'string') {
+      res.status(400).json({ error: 'title must be a string or null' });
+      return;
+    }
+    if (content !== undefined && content !== null && typeof content !== 'string') {
+      res.status(400).json({ error: 'content must be a string or null' });
+      return;
+    }
+    if (language !== undefined && language !== null && typeof language !== 'string') {
+      res.status(400).json({ error: 'language must be a string or null' });
+      return;
+    }
+    if (url !== undefined && url !== null && typeof url !== 'string') {
+      res.status(400).json({ error: 'url must be a string or null' });
+      return;
+    }
+    if (mime_type !== undefined && mime_type !== null && typeof mime_type !== 'string') {
+      res.status(400).json({ error: 'mime_type must be a string or null' });
+      return;
+    }
+
+    // POST only creates new artifact keys; use PATCH to update existing ones
+    const existing = db.getArtifact(thread.id, artifact_key);
+    if (existing) {
+      res.status(409).json({ error: `Artifact key "${artifact_key}" already exists. Use PATCH to update it.` });
+      return;
+    }
+
+    try {
+      const artifact = db.addArtifact(
+        thread.id,
+        req.agent!.id,
+        artifact_key,
+        artifactType,
+        title === undefined ? undefined : (title ?? null),
+        content === undefined ? undefined : (content ?? null),
+        language === undefined ? undefined : (language ?? null),
+        url === undefined ? undefined : (url ?? null),
+        mime_type === undefined ? undefined : (mime_type ?? null),
+      );
+
+      // Record catchup events for all participants except the contributor
+      const participants = db.getParticipants(thread.id);
+      for (const p of participants) {
+        if (p.bot_id === req.agent!.id) continue;
+        db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+          thread_id: thread.id,
+          artifact_key: artifact.artifact_key,
+          version: artifact.version,
+        });
+      }
+
+      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+        type: 'thread_artifact',
+        thread_id: thread.id,
+        artifact,
+        action: 'added',
+      });
+
+      res.json(artifact);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to add artifact' });
+    }
+  });
+
+  /**
+   * PATCH /api/threads/:id/artifacts/:key — Update artifact (new version)
+   */
+  auth.patch('/api/threads/:id/artifacts/:key', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Thread is in terminal state; no artifact updates allowed' });
+      return;
+    }
+
+    const key = req.params.key as string;
+    if (!key || !ARTIFACT_KEY_PATTERN.test(key)) {
+      res.status(400).json({ error: 'Invalid artifact key' });
+      return;
+    }
+
+    const { content, title } = req.body;
+    if (typeof content !== 'string') {
+      res.status(400).json({ error: 'content is required' });
+      return;
+    }
+    if (title !== undefined && title !== null && typeof title !== 'string') {
+      res.status(400).json({ error: 'title must be a string or null' });
+      return;
+    }
+
+    try {
+      const artifact = db.updateArtifact(
+        thread.id,
+        key,
+        req.agent!.id,
+        content,
+        title === undefined ? undefined : (title ?? null),
+      );
+
+      if (!artifact) {
+        res.status(404).json({ error: 'Artifact not found' });
+        return;
+      }
+
+      // Record catchup events for all participants except the contributor
+      const participants = db.getParticipants(thread.id);
+      for (const p of participants) {
+        if (p.bot_id === req.agent!.id) continue;
+        db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+          thread_id: thread.id,
+          artifact_key: artifact.artifact_key,
+          version: artifact.version,
+        });
+      }
+
+      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+        type: 'thread_artifact',
+        thread_id: thread.id,
+        artifact,
+        action: 'updated',
+      });
+
+      res.json(artifact);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to update artifact' });
+    }
+  });
+
+  /**
+   * GET /api/threads/:id/artifacts — List latest artifact version for each key
+   */
+  auth.get('/api/threads/:id/artifacts', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    res.json(db.listArtifacts(thread.id));
+  });
+
+  /**
+   * GET /api/threads/:id/artifacts/:key/versions — List all versions for a key
+   */
+  auth.get('/api/threads/:id/artifacts/:key/versions', requireAgent, (req, res) => {
+    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    const key = req.params.key as string;
+    if (!key || !ARTIFACT_KEY_PATTERN.test(key)) {
+      res.status(400).json({ error: 'Invalid artifact key' });
+      return;
+    }
+
+    res.json(db.getArtifactVersions(thread.id, key));
+  });
+
   // ─── Messages ─────────────────────────────────────────────
 
   /**
@@ -328,23 +1294,49 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const { content, content_type } = req.body;
-    if (!content) {
-      res.status(400).json({ error: 'content is required' });
+    const { content, content_type, parts } = req.body;
+
+    // Validate parts if provided
+    let partsJson: string | null = null;
+    if (parts !== undefined) {
+      const partsError = validateParts(parts);
+      if (partsError) {
+        res.status(400).json({ error: partsError });
+        return;
+      }
+      partsJson = JSON.stringify(parts);
+    }
+
+    // Resolve content: explicit content, or auto-generate from parts
+    const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
+    if (!resolvedContent) {
+      res.status(400).json({ error: 'content or parts is required' });
       return;
     }
 
-    if (content.length > config.max_message_length) {
+    if (resolvedContent.length > config.max_message_length) {
       res.status(400).json({ error: `Message too long (max ${config.max_message_length} chars)` });
       return;
     }
 
-    const msg = db.createMessage(channel.id, req.agent!.id, content, content_type || 'text');
+    const msg = db.createMessage(channel.id, req.agent!.id, resolvedContent, content_type || 'text', partsJson);
+
+    // Record catchup events for all channel members except the sender
+    const members = db.getChannelMembers(channel.id);
+    for (const m of members) {
+      if (m.agent_id === req.agent!.id) continue;
+      db.recordCatchupEvent(channel.org_id, m.agent_id, 'channel_message_summary', {
+        channel_id: channel.id,
+        channel_name: channel.name ?? undefined,
+        count: 1,
+        last_at: msg.created_at,
+      });
+    }
 
     // Broadcast via WebSocket
     ws.broadcastMessage(channel.id, msg, req.agent!.name);
 
-    res.json(msg);
+    res.json(enrichMessage(msg));
   });
 
   /**
@@ -368,17 +1360,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const limitStr = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
-    const beforeStr = Array.isArray(req.query.before) ? req.query.before[0] : req.query.before;
-    const limit = Math.min(parseInt(limitStr as string) || 50, 200);
-    const before = beforeStr ? parseInt(beforeStr as string) : undefined;
+    const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
+    const beforeStr = getQueryString(req.query.before);
+    const before = beforeStr ? parseInt(beforeStr) : undefined;
 
     const messages = db.getMessages(channel.id, limit, before);
 
-    // Enrich with sender names
+    // Enrich with sender names and parsed parts
     const enriched = messages.map(m => {
-      const sender = db.getAgentById(m.sender_id);
-      return { ...m, sender_name: sender?.name || 'unknown' };
+      const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse()); // Return in chronological order
@@ -389,9 +1380,24 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { to, content, content_type? }
    */
   auth.post('/api/send', requireAgent, (req, res) => {
-    const { to, content, content_type } = req.body;
-    if (!to || !content) {
-      res.status(400).json({ error: 'to and content are required' });
+    const { to, content, content_type, parts } = req.body;
+
+    // Validate parts if provided
+    let partsJson: string | null = null;
+    if (parts !== undefined) {
+      const partsError = validateParts(parts);
+      if (partsError) {
+        res.status(400).json({ error: partsError });
+        return;
+      }
+      partsJson = JSON.stringify(parts);
+    }
+
+    // Resolve content: explicit content, or auto-generate from parts
+    const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
+
+    if (!to || !resolvedContent) {
+      res.status(400).json({ error: 'to and content (or parts) are required' });
       return;
     }
 
@@ -408,7 +1414,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    if (content.length > config.max_message_length) {
+    if (resolvedContent.length > config.max_message_length) {
       res.status(400).json({ error: `Message too long (max ${config.max_message_length} chars)` });
       return;
     }
@@ -425,21 +1431,78 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       });
     }
 
-    const msg = db.createMessage(channel.id, req.agent!.id, content, content_type || 'text');
+    const msg = db.createMessage(channel.id, req.agent!.id, resolvedContent, content_type || 'text', partsJson);
+
+    // Record catchup event for the target
+    db.recordCatchupEvent(req.agent!.org_id, target.id, 'channel_message_summary', {
+      channel_id: channel.id,
+      channel_name: channel.name ?? undefined,
+      count: 1,
+      last_at: msg.created_at,
+    });
 
     // Broadcast
     ws.broadcastMessage(channel.id, msg, req.agent!.name);
 
-    res.json({ channel_id: channel.id, message: msg });
+    res.json({ channel_id: channel.id, message: enrichMessage(msg) });
   });
+
+  // ─── Catchup (Offline Event Replay) ───────────────────────
+
+  /**
+   * GET /api/me/catchup — Get missed events since timestamp
+   * Query: since (required, ms timestamp), cursor?, limit?
+   */
+  auth.get('/api/me/catchup', requireAgent, (req, res) => {
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr ? parseInt(sinceStr) : NaN;
+    if (isNaN(since)) {
+      res.status(400).json({ error: 'since (timestamp) is required' });
+      return;
+    }
+
+    const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 50;
+    const limit = Math.min(Math.max(limitRaw, 1), 200);
+    const cursor = getQueryString(req.query.cursor);
+
+    const { events, has_more } = db.getCatchupEvents(req.agent!.id, since, limit, cursor);
+
+    const response: CatchupResponse = {
+      events,
+      has_more,
+    };
+
+    if (has_more && events.length > 0) {
+      response.cursor = events[events.length - 1].event_id;
+    }
+
+    res.json(response);
+  });
+
+  /**
+   * GET /api/me/catchup/count — Get count of missed events by type
+   * Query: since (required, ms timestamp)
+   */
+  auth.get('/api/me/catchup/count', requireAgent, (req, res) => {
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr ? parseInt(sinceStr) : NaN;
+    if (isNaN(since)) {
+      res.status(400).json({ error: 'since (timestamp) is required' });
+      return;
+    }
+
+    const counts: CatchupCountResponse = db.getCatchupCount(req.agent!.id, since);
+    res.json(counts);
+  });
+
+  // ─── Inbox ─────────────────────────────────────────────────
 
   /**
    * GET /api/inbox — Get new messages since timestamp
    * Query: since (timestamp, required)
    */
   auth.get('/api/inbox', requireAgent, (req, res) => {
-    const sinceStr = Array.isArray(req.query.since) ? req.query.since[0] : req.query.since;
-    const since = parseInt(sinceStr as string);
+    const since = parseInt(getQueryString(req.query.since) || '');
     if (isNaN(since)) {
       res.status(400).json({ error: 'since (timestamp) is required' });
       return;
@@ -447,11 +1510,147 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const messages = db.getNewMessages(req.agent!.id, since);
     const enriched = messages.map(m => {
-      const sender = db.getAgentById(m.sender_id);
-      return { ...m, sender_name: sender?.name || 'unknown' };
+      const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched);
+  });
+
+  // ─── Files ───────────────────────────────────────────────
+
+  const filesDir = path.join(config.data_dir, 'files');
+  fs.mkdirSync(filesDir, { recursive: true });
+
+  const upload = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => cb(null, filesDir),
+      filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        cb(null, `${crypto.randomUUID()}${ext}`);
+      },
+    }),
+    limits: {
+      fileSize: config.max_file_size_mb * 1024 * 1024,
+    },
+  });
+
+  /**
+   * POST /api/files/upload — Upload a file (multipart/form-data)
+   * Auth: agent token
+   * Returns: { id, name, mime_type, size, url, created_at }
+   */
+  auth.post('/api/files/upload', requireAgent, upload.single('file'), (req, res) => {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'No file provided (field name must be "file")' });
+      return;
+    }
+
+    const orgId = req.agent!.org_id;
+
+    // Enforce daily upload quota
+    const dailyBytes = db.getDailyUploadBytes(orgId);
+    const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
+    if (dailyBytes + file.size > dailyLimitBytes) {
+      // Clean up the uploaded file since we're rejecting it
+      try { fs.unlinkSync(file.path); } catch { /* temp file may already be gone */ }
+      const usedMb = Math.round(dailyBytes / 1024 / 1024);
+      res.status(429).json({
+        error: `Daily upload quota exceeded (${usedMb}MB / ${config.file_upload_mb_per_day}MB used today)`,
+      });
+      return;
+    }
+
+    const relativePath = `files/${file.filename}`;
+
+    const record = db.createFile(
+      orgId,
+      req.agent!.id,
+      file.originalname,
+      file.mimetype || null,
+      file.size,
+      relativePath,
+    );
+
+    res.json({
+      id: record.id,
+      name: record.name,
+      mime_type: record.mime_type,
+      size: record.size,
+      url: `/api/files/${record.id}`,
+      created_at: record.created_at,
+    });
+  });
+
+  /**
+   * GET /api/files/:id — Download a file
+   * Auth: agent token or org API key
+   * Org-scoped: only agents/admins in the same org can download
+   */
+  auth.get('/api/files/:id', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+
+    const record = db.getFile(req.params.id as string);
+    if (!record) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+
+    if (record.org_id !== orgId) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    const diskPath = path.resolve(config.data_dir, record.path);
+    // Path traversal guard: ensure resolved path stays inside data_dir
+    if (!diskPath.startsWith(path.resolve(config.data_dir) + path.sep)) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+    if (!fs.existsSync(diskPath)) {
+      res.status(404).json({ error: 'File not found on disk' });
+      return;
+    }
+
+    res.setHeader('Content-Type', record.mime_type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(record.name)}"`);
+    res.setHeader('Content-Length', record.size);
+
+    const stream = fs.createReadStream(diskPath);
+    stream.pipe(res);
+  });
+
+  /**
+   * GET /api/files/:id/info — Get file metadata
+   * Auth: agent token or org API key
+   * Org-scoped access check
+   */
+  auth.get('/api/files/:id/info', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+
+    const record = db.getFileInfo(req.params.id as string);
+    if (!record) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+
+    if (record.org_id !== orgId) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    res.json({
+      id: record.id,
+      name: record.name,
+      mime_type: record.mime_type,
+      size: record.size,
+      uploader_id: record.uploader_id,
+      url: `/api/files/${record.id}`,
+      created_at: record.created_at,
+    });
   });
 
   // Mount authenticated routes
