@@ -723,6 +723,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       };
     });
 
+    res.setHeader('ETag', `"${thread.revision}"`);
     res.json({ ...thread, participants });
   });
 
@@ -868,6 +869,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         thread,
       });
 
+      res.setHeader('ETag', `"${thread.revision}"`);
       res.json(thread);
     } catch (error: any) {
       res.status(400).json({ error: error.message || 'Failed to create thread' });
@@ -909,6 +911,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       };
     });
 
+    res.setHeader('ETag', `"${thread.revision}"`);
     res.json({ ...thread, participants });
   });
 
@@ -919,6 +922,20 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.patch('/api/threads/:id', requireAgent, (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
+
+    // Optimistic concurrency: If-Match header carries expected revision
+    let expectedRevision: number | undefined;
+    const ifMatch = req.headers['if-match'];
+    if (ifMatch) {
+      // Strip surrounding quotes: "3" → 3
+      const raw = typeof ifMatch === 'string' ? ifMatch.replace(/^"|"$/g, '') : '';
+      const parsed = parseInt(raw, 10);
+      if (isNaN(parsed)) {
+        res.status(400).json({ error: 'Invalid If-Match header; expected a revision number' });
+        return;
+      }
+      expectedRevision = parsed;
+    }
 
     const { status: statusInput, close_reason, context, topic } = req.body;
     if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined) {
@@ -982,11 +999,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const changes: string[] = [];
     let updated: Thread | undefined = thread;
+    // Revision check applies only to the first DB update; subsequent updates in the same
+    // PATCH are trusted (the first write proves we held the correct revision).
+    let revCheck = expectedRevision;
 
     try {
       if (status !== undefined) {
         const previousStatus = thread.status;
-        updated = db.updateThreadStatus(thread.id, status, closeReason);
+        updated = db.updateThreadStatus(thread.id, status, closeReason, revCheck);
+        revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found' });
           return;
@@ -1016,7 +1037,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       if (context !== undefined) {
-        updated = db.updateThreadContext(thread.id, contextJson ?? null);
+        updated = db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
+        revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found' });
           return;
@@ -1025,7 +1047,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       if (topic !== undefined) {
-        updated = db.updateThreadTopic(thread.id, topic.trim());
+        updated = db.updateThreadTopic(thread.id, topic.trim(), revCheck);
+        revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found' });
           return;
@@ -1033,6 +1056,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         changes.push('topic');
       }
     } catch (error: any) {
+      if (error.message === 'REVISION_CONFLICT') {
+        res.status(409).json({ error: 'Conflict: thread was modified concurrently' });
+        return;
+      }
       res.status(400).json({ error: error.message || 'Failed to update thread' });
       return;
     }
@@ -1043,6 +1070,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       changes,
     });
 
+    res.setHeader('ETag', `"${updated!.revision}"`);
     res.json(updated);
   });
 

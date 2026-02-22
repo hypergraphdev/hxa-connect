@@ -304,6 +304,13 @@ export class HubDB {
       // Column already exists
     }
 
+    // Migration: add revision column for optimistic concurrency
+    try {
+      this.db.exec(`ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`);
+    } catch {
+      // Column already exists
+    }
+
     // Migration: fix FK constraints on threads/thread_messages/artifacts
     // SQLite cannot ALTER FK constraints, so we must recreate tables.
     this.migrateThreadForeignKeys();
@@ -350,12 +357,14 @@ export class HubDB {
         context TEXT,
         close_reason TEXT
           CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
+        revision INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_activity_at INTEGER NOT NULL,
         resolved_at INTEGER
       );
-      INSERT INTO threads_new SELECT * FROM threads;
+      INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, created_at, updated_at, last_activity_at, resolved_at)
+        SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, created_at, updated_at, last_activity_at, resolved_at FROM threads;
       DROP TABLE threads;
       ALTER TABLE threads_new RENAME TO threads;
 
@@ -475,6 +484,7 @@ export class HubDB {
       channel_id: row.channel_id ?? null,
       context: row.context ?? null,
       close_reason: row.close_reason ?? null,
+      revision: row.revision ?? 1,
       resolved_at: row.resolved_at ?? null,
     };
   }
@@ -932,7 +942,7 @@ export class HubDB {
     const now = Date.now();
     for (const { thread_id } of soloThreads) {
       this.db.prepare(`
-        UPDATE threads SET status = 'closed', close_reason = 'error', updated_at = ?, last_activity_at = ?
+        UPDATE threads SET status = 'closed', close_reason = 'error', updated_at = ?, last_activity_at = ?, revision = revision + 1
         WHERE id = ? AND status NOT IN ('resolved', 'closed')
       `).run(now, now, thread_id);
     }
@@ -1112,6 +1122,7 @@ export class HubDB {
       channel_id: channelId ?? null,
       context: context ?? null,
       close_reason: null,
+      revision: 1,
       created_at: now,
       updated_at: now,
       last_activity_at: now,
@@ -1123,8 +1134,8 @@ export class HubDB {
     const insertThreadStmt = this.db.prepare(`
       INSERT INTO threads (
         id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason,
-        created_at, updated_at, last_activity_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        revision, created_at, updated_at, last_activity_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertParticipantStmt = this.db.prepare(`
       INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
@@ -1161,6 +1172,7 @@ export class HubDB {
         thread.channel_id,
         thread.context,
         thread.close_reason,
+        thread.revision,
         thread.created_at,
         thread.updated_at,
         thread.last_activity_at,
@@ -1209,7 +1221,7 @@ export class HubDB {
     return rows.map(row => this.rowToThread(row));
   }
 
-  updateThreadStatus(threadId: string, status: ThreadStatus, closeReason?: CloseReason | null): Thread | undefined {
+  updateThreadStatus(threadId: string, status: ThreadStatus, closeReason?: CloseReason | null, expectedRevision?: number): Thread | undefined {
     const current = this.getThread(threadId);
     if (!current) return undefined;
 
@@ -1235,37 +1247,64 @@ export class HubDB {
     const resolvedAt = status === 'resolved' && current.resolved_at === null ? now : current.resolved_at;
     const reason = status === 'closed' ? (closeReason ?? null) : null;
 
-    this.db.prepare(`
-      UPDATE threads
-      SET status = ?, close_reason = ?, resolved_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(status, reason, resolvedAt, now, threadId);
+    if (expectedRevision !== undefined) {
+      const result = this.db.prepare(`
+        UPDATE threads
+        SET status = ?, close_reason = ?, resolved_at = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ?
+      `).run(status, reason, resolvedAt, now, threadId, expectedRevision);
+      if (result.changes === 0) throw new Error('REVISION_CONFLICT');
+    } else {
+      this.db.prepare(`
+        UPDATE threads
+        SET status = ?, close_reason = ?, resolved_at = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ?
+      `).run(status, reason, resolvedAt, now, threadId);
+    }
 
     return this.getThread(threadId);
   }
 
-  updateThreadContext(threadId: string, context: string | null): Thread | undefined {
+  updateThreadContext(threadId: string, context: string | null, expectedRevision?: number): Thread | undefined {
     const current = this.getThread(threadId);
     if (!current) return undefined;
 
-    this.db.prepare(`
-      UPDATE threads
-      SET context = ?, updated_at = ?
-      WHERE id = ?
-    `).run(context, Date.now(), threadId);
+    if (expectedRevision !== undefined) {
+      const result = this.db.prepare(`
+        UPDATE threads
+        SET context = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ?
+      `).run(context, Date.now(), threadId, expectedRevision);
+      if (result.changes === 0) throw new Error('REVISION_CONFLICT');
+    } else {
+      this.db.prepare(`
+        UPDATE threads
+        SET context = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ?
+      `).run(context, Date.now(), threadId);
+    }
 
     return this.getThread(threadId);
   }
 
-  updateThreadTopic(threadId: string, topic: string): Thread | undefined {
+  updateThreadTopic(threadId: string, topic: string, expectedRevision?: number): Thread | undefined {
     const current = this.getThread(threadId);
     if (!current) return undefined;
 
-    this.db.prepare(`
-      UPDATE threads
-      SET topic = ?, updated_at = ?
-      WHERE id = ?
-    `).run(topic, Date.now(), threadId);
+    if (expectedRevision !== undefined) {
+      const result = this.db.prepare(`
+        UPDATE threads
+        SET topic = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ?
+      `).run(topic, Date.now(), threadId, expectedRevision);
+      if (result.changes === 0) throw new Error('REVISION_CONFLICT');
+    } else {
+      this.db.prepare(`
+        UPDATE threads
+        SET topic = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ?
+      `).run(topic, Date.now(), threadId);
+    }
 
     return this.getThread(threadId);
   }
@@ -2023,7 +2062,7 @@ export class HubDB {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const now = Date.now();
     const r = this.db.prepare(`
-      UPDATE threads SET status = 'closed', close_reason = 'timeout', updated_at = ?, last_activity_at = ?
+      UPDATE threads SET status = 'closed', close_reason = 'timeout', updated_at = ?, last_activity_at = ?, revision = revision + 1
       WHERE org_id = ? AND last_activity_at < ? AND status NOT IN ('resolved', 'closed')
     `).run(now, now, orgId, cutoff);
     return r.changes;

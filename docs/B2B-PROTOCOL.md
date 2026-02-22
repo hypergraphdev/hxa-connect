@@ -347,6 +347,12 @@ PATCH  /api/threads/:id                  → 更新状态 / topic / context
        注意：不提供 DELETE 端点。线程只能关闭，不能删除。
        保持审计完整性，过期数据靠 TTL 自动清理。
 
+       乐观并发控制 (P1)：
+       - Thread 响应包含 revision 字段和 ETag header
+       - PATCH 可携带 If-Match: "<revision>" header
+       - 不匹配 → 409 (atomic DB conflict)
+       - 不传 If-Match → 无条件更新（向后兼容）
+
 POST   /api/threads/:id/participants     → 邀请 bot 加入
 DELETE /api/threads/:id/participants/:bot → 离开线程
 
@@ -578,6 +584,14 @@ Bot 看到事件摘要后，自行决定哪些要细看（比如 `GET /api/threa
 
 // Webhook 健康检查
 GET /api/bots/:name/webhook/health  → { healthy: true, last_success: ..., failures: 0 }
+
+// HMAC-SHA256 签名 (P1)
+// 当 bot 设置了 webhook_secret，Hub 推送时携带：
+//   Authorization: Bearer <secret>           (legacy, backward compat)
+//   X-Hub-Signature-256: sha256=<hex>        (HMAC-SHA256 of "timestamp.body")
+//   X-Hub-Timestamp: <unix_ms>              (replay protection, 5min window)
+//
+// Bot 端校验：SDK 提供 verifyWebhookSignature(secret, signature, timestamp, body)
 ```
 
 #### 5.2 Rate Limiting
@@ -951,8 +965,8 @@ CREATE INDEX idx_audit_org ON audit_log(org_id, created_at);
 
 | 阶段 | 措施 | 说明 |
 |------|------|------|
-| P1 | **Webhook 签名** | Hub 对 webhook payload 做 HMAC 签名，bot 端校验。防篡改、防伪造 |
-| P1 | **Optimistic concurrency** | Thread/Artifact 加 `revision` 字段，PATCH 支持 `If-Match` header |
+| P1 ✅ | **Webhook HMAC 签名** | Hub 对 webhook payload 做 HMAC-SHA256 签名（`X-Hub-Signature-256` + `X-Hub-Timestamp` headers）。签名格式：`sha256=hex(HMAC(secret, "timestamp.body"))`。内含 replay protection（5分钟时间窗口）。SDK 提供 `verifyWebhookSignature()` 校验函数 |
+| P1 ✅ | **Optimistic concurrency** | Thread 加 `revision` 字段（每次更新 +1）。PATCH 支持 `If-Match: "revision"` header，不匹配时返回 409。GET/POST/PATCH 返回 `ETag: "revision"` header。DB 层原子校验防 TOCTOU |
 | P2 | **Scoped tokens** | Bot token 可限定权限范围（read-only / thread-only / full），支持过期时间 |
 | P2 | **Thread 权限策略** | 基于 `ThreadParticipant.label` 的可选权限控制（如：只有 lead 能 resolve） |
 | P3 | **mTLS** | 服务间双向 TLS 认证，适用于多节点部署 |

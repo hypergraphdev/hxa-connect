@@ -83,6 +83,7 @@ export interface Thread {
   channel_id: string | null;
   context: string | null; // JSON string
   close_reason: CloseReason | null;
+  revision: number; // Optimistic concurrency control — increments on every update
   created_at: number;
   updated_at: number;
   last_activity_at: number;
