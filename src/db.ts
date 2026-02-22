@@ -25,6 +25,9 @@ import type {
   OrgSettings,
   AuditAction,
   AuditEntry,
+  AgentToken,
+  TokenScope,
+  ThreadPermissionPolicy,
 } from './types.js';
 
 // ─── Database Layer ──────────────────────────────────────────
@@ -219,6 +222,19 @@ export class HubDB {
       );
       CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(org_id, action, created_at);
+
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        token TEXT UNIQUE NOT NULL,
+        scopes TEXT NOT NULL DEFAULT '["full"]',
+        label TEXT,
+        expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_tokens_agent ON agent_tokens(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
     `);
 
     // Migration: add admin_secret to existing orgs that don't have it
@@ -311,6 +327,20 @@ export class HubDB {
       // Column already exists
     }
 
+    // Migration: add permission_policy to threads (Security P2)
+    try {
+      this.db.exec(`ALTER TABLE threads ADD COLUMN permission_policy TEXT`);
+    } catch {
+      // Column already exists
+    }
+
+    // Migration: add default_thread_permission_policy to org_settings (Security P2)
+    try {
+      this.db.exec(`ALTER TABLE org_settings ADD COLUMN default_thread_permission_policy TEXT`);
+    } catch {
+      // Column already exists
+    }
+
     // Migration: fix FK constraints on threads/thread_messages/artifacts
     // SQLite cannot ALTER FK constraints, so we must recreate tables.
     this.migrateThreadForeignKeys();
@@ -358,13 +388,14 @@ export class HubDB {
         close_reason TEXT
           CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
         revision INTEGER NOT NULL DEFAULT 1,
+        permission_policy TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_activity_at INTEGER NOT NULL,
         resolved_at INTEGER
       );
-      INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, created_at, updated_at, last_activity_at, resolved_at)
-        SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, created_at, updated_at, last_activity_at, resolved_at FROM threads;
+      INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
+        SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
       DROP TABLE threads;
       ALTER TABLE threads_new RENAME TO threads;
 
@@ -484,6 +515,7 @@ export class HubDB {
       channel_id: row.channel_id ?? null,
       context: row.context ?? null,
       close_reason: row.close_reason ?? null,
+      permission_policy: row.permission_policy ?? null,
       revision: row.revision ?? 1,
       resolved_at: row.resolved_at ?? null,
     };
@@ -951,6 +983,170 @@ export class HubDB {
     this.db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
   }
 
+  // ─── Agent Token Operations (Scoped Tokens) ─────────────
+
+  createAgentToken(agentId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): AgentToken {
+    const token: AgentToken = {
+      id: crypto.randomUUID(),
+      agent_id: agentId,
+      token: `scoped_${crypto.randomBytes(24).toString('hex')}`,
+      scopes,
+      label: label ?? null,
+      expires_at: expiresAt ?? null,
+      created_at: Date.now(),
+      last_used_at: null,
+    };
+
+    this.db.prepare(`
+      INSERT INTO agent_tokens (id, agent_id, token, scopes, label, expires_at, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      token.id,
+      token.agent_id,
+      token.token,
+      JSON.stringify(token.scopes),
+      token.label,
+      token.expires_at,
+      token.created_at,
+      token.last_used_at,
+    );
+
+    return token;
+  }
+
+  getAgentTokenByToken(token: string): AgentToken | undefined {
+    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token = ?').get(token) as any;
+    if (!row) return undefined;
+    return this.rowToAgentToken(row);
+  }
+
+  listAgentTokens(agentId: string): AgentToken[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM agent_tokens WHERE agent_id = ? ORDER BY created_at DESC'
+    ).all(agentId) as any[];
+    return rows.map(row => this.rowToAgentToken(row));
+  }
+
+  revokeAgentToken(tokenId: string, agentId: string): boolean {
+    const result = this.db.prepare(
+      'DELETE FROM agent_tokens WHERE id = ? AND agent_id = ?'
+    ).run(tokenId, agentId);
+    return result.changes > 0;
+  }
+
+  touchAgentToken(tokenId: string): void {
+    this.db.prepare(
+      'UPDATE agent_tokens SET last_used_at = ? WHERE id = ?'
+    ).run(Date.now(), tokenId);
+  }
+
+  cleanupExpiredTokens(): number {
+    const result = this.db.prepare(
+      'DELETE FROM agent_tokens WHERE expires_at IS NOT NULL AND expires_at < ?'
+    ).run(Date.now());
+    return result.changes;
+  }
+
+  private rowToAgentToken(row: any): AgentToken {
+    let scopes: TokenScope[];
+    try {
+      scopes = JSON.parse(row.scopes);
+    } catch {
+      scopes = ['full'];
+    }
+    return {
+      id: row.id,
+      agent_id: row.agent_id,
+      token: row.token,
+      scopes,
+      label: row.label ?? null,
+      expires_at: row.expires_at ?? null,
+      created_at: row.created_at,
+      last_used_at: row.last_used_at ?? null,
+    };
+  }
+
+  // ─── Thread Permission Policy Operations ───────────────────
+
+  updateThreadPermissionPolicy(threadId: string, policy: string | null, expectedRevision?: number): Thread | undefined {
+    if (expectedRevision !== undefined) {
+      const result = this.db.prepare(`
+        UPDATE threads
+        SET permission_policy = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ?
+      `).run(policy, Date.now(), threadId, expectedRevision);
+      if (result.changes === 0) throw new Error('REVISION_CONFLICT');
+    } else {
+      this.db.prepare(`
+        UPDATE threads
+        SET permission_policy = ?, updated_at = ?, revision = revision + 1
+        WHERE id = ?
+      `).run(policy, Date.now(), threadId);
+    }
+    return this.getThread(threadId);
+  }
+
+  /**
+   * Check if a bot is allowed to perform an action on a thread based on permission policy.
+   * Returns true if allowed, false if denied.
+   */
+  checkThreadPermission(thread: Thread, botId: string, action: keyof ThreadPermissionPolicy): boolean {
+    // Parse thread-level policy
+    let policy: ThreadPermissionPolicy | null = null;
+    if (thread.permission_policy) {
+      try {
+        policy = JSON.parse(thread.permission_policy);
+      } catch {
+        // Invalid policy JSON — fail closed (deny action)
+        return false;
+      }
+    }
+
+    // If thread has a policy but the specific action is null/undefined, that means
+    // unrestricted for that action (per documented contract). Only fall back to org
+    // default when there is NO thread-level policy at all.
+    if (!policy) {
+      // No thread policy — check org default
+      const orgSettings = this.getOrgSettings(thread.org_id);
+      if (orgSettings.default_thread_permission_policy) {
+        try {
+          const orgPolicy = typeof orgSettings.default_thread_permission_policy === 'string'
+            ? JSON.parse(orgSettings.default_thread_permission_policy as string)
+            : orgSettings.default_thread_permission_policy;
+          if (orgPolicy[action] !== undefined && orgPolicy[action] !== null) {
+            policy = { [action]: orgPolicy[action] };
+          }
+        } catch {
+          // Invalid org policy — fail closed (deny action)
+          return false;
+        }
+      }
+    }
+
+    // No policy for this action — allow (backward compat)
+    if (!policy || !policy[action] || !Array.isArray(policy[action])) {
+      return true;
+    }
+
+    const allowedLabels = policy[action] as string[];
+
+    // "*" means any participant
+    if (allowedLabels.includes('*')) return true;
+
+    // "initiator" — check if the bot is the thread initiator
+    if (allowedLabels.includes('initiator') && thread.initiator_id === botId) return true;
+
+    // Check the bot's participant label
+    const participant = this.db.prepare(
+      'SELECT label FROM thread_participants WHERE thread_id = ? AND bot_id = ?'
+    ).get(thread.id, botId) as { label: string | null } | undefined;
+
+    if (!participant) return false;
+    if (!participant.label) return false;
+
+    return allowedLabels.includes(participant.label);
+  }
+
   // ─── Channel Operations ──────────────────────────────────
 
   createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Channel & { isNew?: boolean } {
@@ -1105,6 +1301,7 @@ export class HubDB {
     participantIds: string[],
     channelId?: string | null,
     context?: string | null,
+    permissionPolicy?: string | null,
   ): Thread {
     const uniqueParticipantIds = Array.from(new Set([initiatorId, ...participantIds]));
     if (uniqueParticipantIds.length > 20) {
@@ -1122,6 +1319,7 @@ export class HubDB {
       channel_id: channelId ?? null,
       context: context ?? null,
       close_reason: null,
+      permission_policy: permissionPolicy ?? null,
       revision: 1,
       created_at: now,
       updated_at: now,
@@ -1134,8 +1332,8 @@ export class HubDB {
     const insertThreadStmt = this.db.prepare(`
       INSERT INTO threads (
         id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason,
-        revision, created_at, updated_at, last_activity_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        permission_policy, revision, created_at, updated_at, last_activity_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertParticipantStmt = this.db.prepare(`
       INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
@@ -1172,6 +1370,7 @@ export class HubDB {
         thread.channel_id,
         thread.context,
         thread.close_reason,
+        thread.permission_policy,
         thread.revision,
         thread.created_at,
         thread.updated_at,
@@ -1847,6 +2046,14 @@ export class HubDB {
   getOrgSettings(orgId: string): OrgSettings {
     const row = this.db.prepare('SELECT * FROM org_settings WHERE org_id = ?').get(orgId) as any;
     if (row) {
+      let defaultPolicy: ThreadPermissionPolicy | null = null;
+      if (row.default_thread_permission_policy) {
+        try {
+          defaultPolicy = JSON.parse(row.default_thread_permission_policy);
+        } catch {
+          defaultPolicy = null;
+        }
+      }
       return {
         org_id: row.org_id,
         messages_per_minute_per_bot: row.messages_per_minute_per_bot,
@@ -1854,6 +2061,7 @@ export class HubDB {
         message_ttl_days: row.message_ttl_days ?? null,
         thread_auto_close_days: row.thread_auto_close_days ?? null,
         artifact_retention_days: row.artifact_retention_days ?? null,
+        default_thread_permission_policy: defaultPolicy,
         updated_at: row.updated_at,
       };
     }
@@ -1865,6 +2073,7 @@ export class HubDB {
       message_ttl_days: null,
       thread_auto_close_days: null,
       artifact_retention_days: null,
+      default_thread_permission_policy: null,
       updated_at: 0,
     };
   }
@@ -1879,18 +2088,26 @@ export class HubDB {
       message_ttl_days: updates.message_ttl_days !== undefined ? updates.message_ttl_days : current.message_ttl_days,
       thread_auto_close_days: updates.thread_auto_close_days !== undefined ? updates.thread_auto_close_days : current.thread_auto_close_days,
       artifact_retention_days: updates.artifact_retention_days !== undefined ? updates.artifact_retention_days : current.artifact_retention_days,
+      default_thread_permission_policy: updates.default_thread_permission_policy !== undefined
+        ? updates.default_thread_permission_policy
+        : current.default_thread_permission_policy,
       updated_at: now,
     };
 
+    const policyJson = merged.default_thread_permission_policy
+      ? JSON.stringify(merged.default_thread_permission_policy)
+      : null;
+
     this.db.prepare(`
-      INSERT INTO org_settings (org_id, messages_per_minute_per_bot, threads_per_hour_per_bot, message_ttl_days, thread_auto_close_days, artifact_retention_days, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO org_settings (org_id, messages_per_minute_per_bot, threads_per_hour_per_bot, message_ttl_days, thread_auto_close_days, artifact_retention_days, default_thread_permission_policy, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(org_id) DO UPDATE SET
         messages_per_minute_per_bot = excluded.messages_per_minute_per_bot,
         threads_per_hour_per_bot = excluded.threads_per_hour_per_bot,
         message_ttl_days = excluded.message_ttl_days,
         thread_auto_close_days = excluded.thread_auto_close_days,
         artifact_retention_days = excluded.artifact_retention_days,
+        default_thread_permission_policy = excluded.default_thread_permission_policy,
         updated_at = excluded.updated_at
     `).run(
       merged.org_id,
@@ -1899,6 +2116,7 @@ export class HubDB {
       merged.message_ttl_days,
       merged.thread_auto_close_days,
       merged.artifact_retention_days,
+      policyJson,
       merged.updated_at,
     );
 
@@ -2108,6 +2326,7 @@ export class HubDB {
     this.cleanupOldCatchupEvents(30);
     this.cleanupOldAuditLog(90);
     this.cleanupOldRateLimitEvents();
+    this.cleanupExpiredTokens();
   }
 
   close() {

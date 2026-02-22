@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
-import { authMiddleware, requireAgent, requireOrg } from './auth.js';
-import { validateParts, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings } from './types.js';
+import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
+import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 
 function parseJsonField<T>(value: string | null): T | null {
   if (!value) return null;
@@ -132,7 +132,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   }
 
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
-    if (!req.org) {
+    if (!req.org || req.authType !== 'org') {
       res.status(403).json({ error: 'Organization authentication required' });
       return false;
     }
@@ -364,7 +364,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * DELETE /api/me — Deregister self (agent unregisters itself)
    * Auth: Agent token
    */
-  auth.delete('/api/me', requireAgent, (req, res) => {
+  auth.delete('/api/me', requireAgent, requireScope('full'), (req, res) => {
     const agent = req.agent!;
     db.deleteAgent(agent.id);
 
@@ -383,7 +383,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/me — Get current agent info
    */
-  auth.get('/api/me', requireAgent, (req, res) => {
+  auth.get('/api/me', requireAgent, requireScope('read'), (req, res) => {
     const a = req.agent!;
     res.json(toAgentResponse(a));
   });
@@ -391,7 +391,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * PATCH /api/me/profile — Update current bot profile fields
    */
-  auth.patch('/api/me/profile', requireAgent, (req, res) => {
+  auth.patch('/api/me/profile', requireAgent, requireScope('profile'), (req, res) => {
     const {
       bio,
       role,
@@ -463,7 +463,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/peers — List other agents in my org (from agent perspective)
    */
-  auth.get('/api/peers', requireAgent, (req, res) => {
+  auth.get('/api/peers', requireAgent, requireScope('read'), (req, res) => {
     const agents = db.listAgents(req.agent!.org_id);
     res.json(agents
       .filter(a => a.id !== req.agent!.id)
@@ -471,12 +471,87 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     );
   });
 
+  // ─── Scoped Token Management ─────────────────────────────
+
+  /**
+   * POST /api/me/tokens — Create a scoped token
+   * Body: { scopes: TokenScope[], label?, expires_in?: number (ms) }
+   */
+  auth.post('/api/me/tokens', requireAgent, requireScope('full'), (req, res) => {
+    const { scopes, label, expires_in } = req.body;
+    if (!Array.isArray(scopes) || scopes.length === 0) {
+      res.status(400).json({ error: 'scopes must be a non-empty array' });
+      return;
+    }
+    for (const scope of scopes) {
+      if (!VALID_TOKEN_SCOPES.has(scope as TokenScope)) {
+        res.status(400).json({ error: `Invalid scope: ${scope}. Valid: full, read, thread, message, profile` });
+        return;
+      }
+    }
+    if (label !== undefined && label !== null && typeof label !== 'string') {
+      res.status(400).json({ error: 'label must be a string' });
+      return;
+    }
+    if (expires_in !== undefined && (typeof expires_in !== 'number' || expires_in <= 0)) {
+      res.status(400).json({ error: 'expires_in must be a positive number (milliseconds)' });
+      return;
+    }
+    const expiresAt = expires_in ? Date.now() + expires_in : null;
+    const token = db.createAgentToken(req.agent!.id, scopes as TokenScope[], label, expiresAt);
+
+    db.recordAudit(req.agent!.org_id, req.agent!.id, 'bot.token_create', 'token', token.id, {
+      scopes,
+      label: label ?? null,
+      expires_at: expiresAt,
+    });
+
+    res.json({
+      id: token.id,
+      token: token.token,
+      scopes: token.scopes,
+      label: token.label,
+      expires_at: token.expires_at,
+      created_at: token.created_at,
+      last_used_at: null,
+    });
+  });
+
+  /**
+   * GET /api/me/tokens — List my scoped tokens
+   */
+  auth.get('/api/me/tokens', requireAgent, requireScope('full'), (req, res) => {
+    const tokens = db.listAgentTokens(req.agent!.id);
+    res.json(tokens.map(t => ({
+      id: t.id,
+      scopes: t.scopes,
+      label: t.label,
+      expires_at: t.expires_at,
+      created_at: t.created_at,
+      last_used_at: t.last_used_at,
+      // Never return the actual token value in list
+    })));
+  });
+
+  /**
+   * DELETE /api/me/tokens/:id — Revoke a scoped token
+   */
+  auth.delete('/api/me/tokens/:id', requireAgent, requireScope('full'), (req, res) => {
+    const deleted = db.revokeAgentToken(req.params.id as string, req.agent!.id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Token not found' });
+      return;
+    }
+    db.recordAudit(req.agent!.org_id, req.agent!.id, 'bot.token_revoke', 'token', req.params.id as string);
+    res.json({ ok: true });
+  });
+
   /**
    * GET /api/bots — Discover bots in org
    * Query: role?, tag?, status?, q?
    * Auth: org API key or agent token
    */
-  auth.get('/api/bots', (req, res) => {
+  auth.get('/api/bots', requireScope('read'), (req, res) => {
     const orgId = requireOrgOrAgent(req, res);
     if (!orgId) return;
 
@@ -494,7 +569,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: agent token or org API key
    * Org-scoped: only check bots in the same org
    */
-  auth.get('/api/bots/:name/webhook/health', (req, res) => {
+  auth.get('/api/bots/:name/webhook/health', requireScope('read'), (req, res) => {
     const orgId = requireOrgOrAgent(req, res);
     if (!orgId) return;
 
@@ -524,7 +599,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/bots/:name/profile — Get full profile by bot name
    * Auth: org API key or agent token
    */
-  auth.get('/api/bots/:name/profile', (req, res) => {
+  auth.get('/api/bots/:name/profile', requireScope('read'), (req, res) => {
     const orgId = requireOrgOrAgent(req, res);
     if (!orgId) return;
 
@@ -583,7 +658,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * For agents: channels they're in
    * For org admins: all channels
    */
-  auth.get('/api/channels', (req, res) => {
+  auth.get('/api/channels', requireScope('read'), (req, res) => {
     if (req.agent) {
       res.json(db.listChannelsForAgent(req.agent.id));
     } else if (req.org) {
@@ -596,7 +671,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/channels/:id — Get channel details
    */
-  auth.get('/api/channels/:id', (req, res) => {
+  auth.get('/api/channels/:id', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
       res.status(404).json({ error: 'Channel not found' });
@@ -629,7 +704,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * POST /api/channels/:id/join — Join a group channel (agent)
    */
-  auth.post('/api/channels/:id/join', requireAgent, (req, res) => {
+  auth.post('/api/channels/:id/join', requireAgent, requireScope('message'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel || channel.type !== 'group') {
       res.status(404).json({ error: 'Group channel not found' });
@@ -776,10 +851,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads — Create a thread
    * Body: { topic, type?, participants?, channel_id?, context? }
    */
-  auth.post('/api/threads', requireAgent, (req, res) => {
+  auth.post('/api/threads', requireAgent, requireScope('thread'), (req, res) => {
     if (!checkThreadRateLimit(req, res)) return;
 
-    const { topic, type, participants, channel_id, context } = req.body;
+    const { topic, type, participants, channel_id, context, permission_policy } = req.body;
     const orgId = req.agent!.org_id;
 
     if (!topic || typeof topic !== 'string') {
@@ -839,6 +914,29 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
     }
 
+    // Validate and serialize permission_policy
+    let policyJson: string | null = null;
+    if (permission_policy !== undefined && permission_policy !== null) {
+      if (typeof permission_policy !== 'object') {
+        res.status(400).json({ error: 'permission_policy must be an object' });
+        return;
+      }
+      const policyKeys = Object.keys(permission_policy);
+      const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+      for (const key of policyKeys) {
+        if (!validPolicyKeys.has(key)) {
+          res.status(400).json({ error: `permission_policy has invalid key: ${key}` });
+          return;
+        }
+        const val = permission_policy[key];
+        if (val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
+          res.status(400).json({ error: `permission_policy.${key} must be an array of strings or null` });
+          return;
+        }
+      }
+      policyJson = JSON.stringify(permission_policy);
+    }
+
     try {
       const thread = db.createThread(
         orgId,
@@ -848,6 +946,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         resolvedParticipantIds,
         resolvedChannelId,
         contextJson,
+        policyJson,
       );
 
       // Audit (rate limit event already recorded atomically in checkThreadRateLimit)
@@ -880,7 +979,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/threads — List my threads
    * Query: status?
    */
-  auth.get('/api/threads', requireAgent, (req, res) => {
+  auth.get('/api/threads', requireAgent, requireScope('read'), (req, res) => {
     const statusRaw = getQueryString(req.query.status);
     if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
       res.status(400).json({ error: 'Invalid status filter' });
@@ -895,7 +994,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/threads/:id — Thread details with participants
    */
-  auth.get('/api/threads/:id', requireAgent, (req, res) => {
+  auth.get('/api/threads/:id', requireAgent, requireScope('read'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -919,7 +1018,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * PATCH /api/threads/:id — Update thread status/context/topic
    * Body: { status?, close_reason?, context?, topic? }
    */
-  auth.patch('/api/threads/:id', requireAgent, (req, res) => {
+  auth.patch('/api/threads/:id', requireAgent, requireScope('thread'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -937,10 +1036,41 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       expectedRevision = parsed;
     }
 
-    const { status: statusInput, close_reason, context, topic } = req.body;
-    if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined) {
+    const { status: statusInput, close_reason, context, topic, permission_policy: permPolicyInput } = req.body;
+    if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined && permPolicyInput === undefined) {
       res.status(400).json({ error: 'No updatable fields provided' });
       return;
+    }
+
+    // Only the thread initiator can change permission_policy
+    if (permPolicyInput !== undefined && thread.initiator_id !== req.agent!.id) {
+      res.status(403).json({ error: 'Only the thread initiator can change permission_policy' });
+      return;
+    }
+
+    // Validate permission_policy if provided
+    let permPolicyJson: string | null | undefined;
+    if (permPolicyInput !== undefined) {
+      if (permPolicyInput === null) {
+        permPolicyJson = null;
+      } else if (typeof permPolicyInput === 'object') {
+        const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+        for (const key of Object.keys(permPolicyInput)) {
+          if (!validPolicyKeys.has(key)) {
+            res.status(400).json({ error: `permission_policy has invalid key: ${key}` });
+            return;
+          }
+          const val = permPolicyInput[key];
+          if (val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
+            res.status(400).json({ error: `permission_policy.${key} must be an array of strings or null` });
+            return;
+          }
+        }
+        permPolicyJson = JSON.stringify(permPolicyInput);
+      } else {
+        res.status(400).json({ error: 'permission_policy must be an object or null' });
+        return;
+      }
     }
 
     // Block all mutations on terminal threads (status transitions handled separately in updateThreadStatus)
@@ -994,6 +1124,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           res.status(400).json({ error: 'context must be JSON-serializable' });
           return;
         }
+      }
+    }
+
+    // Thread permission policy check for status changes
+    if (status !== undefined) {
+      const policyAction = status === 'resolved' ? 'resolve' as const
+        : status === 'closed' ? 'close' as const
+        : null;
+      if (policyAction && !db.checkThreadPermission(thread, req.agent!.id, policyAction)) {
+        db.recordAudit(thread.org_id, req.agent!.id, 'thread.permission_denied', 'thread', thread.id, {
+          action: policyAction,
+          status,
+        });
+        res.status(403).json({
+          error: `Permission denied: your label does not allow '${policyAction}' on this thread`,
+        });
+        return;
       }
     }
 
@@ -1055,6 +1202,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         }
         changes.push('topic');
       }
+
+      if (permPolicyJson !== undefined) {
+        updated = db.updateThreadPermissionPolicy(thread.id, permPolicyJson, revCheck);
+        revCheck = undefined; // consumed
+        if (!updated) {
+          res.status(404).json({ error: 'Thread not found' });
+          return;
+        }
+        changes.push('permission_policy');
+      }
     } catch (error: any) {
       if (error.message === 'REVISION_CONFLICT') {
         res.status(409).json({ error: 'Conflict: thread was modified concurrently' });
@@ -1078,12 +1235,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/participants — Invite bot (id or name)
    * Body: { bot_id, label? }
    */
-  auth.post('/api/threads/:id/participants', requireAgent, (req, res) => {
+  auth.post('/api/threads/:id/participants', requireAgent, requireScope('thread'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
     if (thread.status === 'resolved' || thread.status === 'closed') {
       res.status(409).json({ error: 'Thread is in terminal state; no participant changes allowed' });
+      return;
+    }
+
+    // Permission policy check for invite
+    if (!db.checkThreadPermission(thread, req.agent!.id, 'invite')) {
+      res.status(403).json({ error: 'Permission denied: your label does not allow inviting participants' });
       return;
     }
 
@@ -1104,6 +1267,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const alreadyParticipant = db.isParticipant(thread.id, bot.id);
+
+    // Prevent label relabeling via invite — only new participants can have labels set.
+    // Relabeling existing participants would bypass label-based permission policies.
+    if (alreadyParticipant && label !== undefined) {
+      res.status(409).json({ error: 'Participant already exists; cannot change label via invite' });
+      return;
+    }
+
     try {
       const participant = db.addParticipant(thread.id, bot.id, label);
 
@@ -1138,7 +1309,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * DELETE /api/threads/:id/participants/:bot — Leave/remove participant (id or name)
    */
-  auth.delete('/api/threads/:id/participants/:bot', requireAgent, (req, res) => {
+  auth.delete('/api/threads/:id/participants/:bot', requireAgent, requireScope('thread'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1150,6 +1321,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const target = resolveAgent(thread.org_id, req.params.bot as string);
     if (!target) {
       res.status(404).json({ error: `Agent not found: ${req.params.bot}` });
+      return;
+    }
+
+    // Permission policy check for remove (skip if leaving self)
+    if (target.id !== req.agent!.id && !db.checkThreadPermission(thread, req.agent!.id, 'remove')) {
+      res.status(403).json({ error: 'Permission denied: your label does not allow removing participants' });
       return;
     }
 
@@ -1181,7 +1358,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/messages — Send a thread message
    * Body: { content, content_type?, metadata? }
    */
-  auth.post('/api/threads/:id/messages', requireAgent, (req, res) => {
+  auth.post('/api/threads/:id/messages', requireAgent, requireScope('thread'), (req, res) => {
     if (!checkMessageRateLimit(req, res)) return;
 
     const thread = requireThreadParticipant(req, res, req.params.id as string);
@@ -1272,7 +1449,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/threads/:id/messages — Get thread messages
    * Query: limit?, before?
    */
-  auth.get('/api/threads/:id/messages', requireAgent, (req, res) => {
+  auth.get('/api/threads/:id/messages', requireAgent, requireScope('read'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1293,7 +1470,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/artifacts — Add new artifact (new key only)
    * Use PATCH to update existing artifacts with new versions.
    */
-  auth.post('/api/threads/:id/artifacts', requireAgent, (req, res) => {
+  auth.post('/api/threads/:id/artifacts', requireAgent, requireScope('thread'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1398,7 +1575,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * PATCH /api/threads/:id/artifacts/:key — Update artifact (new version)
    */
-  auth.patch('/api/threads/:id/artifacts/:key', requireAgent, (req, res) => {
+  auth.patch('/api/threads/:id/artifacts/:key', requireAgent, requireScope('thread'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1471,7 +1648,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/threads/:id/artifacts — List latest artifact version for each key
    */
-  auth.get('/api/threads/:id/artifacts', requireAgent, (req, res) => {
+  auth.get('/api/threads/:id/artifacts', requireAgent, requireScope('read'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1481,7 +1658,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/threads/:id/artifacts/:key/versions — List all versions for a key
    */
-  auth.get('/api/threads/:id/artifacts/:key/versions', requireAgent, (req, res) => {
+  auth.get('/api/threads/:id/artifacts/:key/versions', requireAgent, requireScope('read'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1500,7 +1677,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/channels/:id/messages — Send a message to a channel
    * Body: { content, content_type? }
    */
-  auth.post('/api/channels/:id/messages', requireAgent, (req, res) => {
+  auth.post('/api/channels/:id/messages', requireAgent, requireScope('message'), (req, res) => {
     if (!checkMessageRateLimit(req, res)) return;
 
     const channel = db.getChannel(req.params.id as string);
@@ -1566,7 +1743,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/channels/:id/messages — Get messages from a channel
    * Query: limit?, before? (timestamp)
    */
-  auth.get('/api/channels/:id/messages', (req, res) => {
+  auth.get('/api/channels/:id/messages', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
       res.status(404).json({ error: 'Channel not found' });
@@ -1602,7 +1779,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/send — Quick send: DM an agent by name/id (auto-creates channel)
    * Body: { to, content, content_type? }
    */
-  auth.post('/api/send', requireAgent, (req, res) => {
+  auth.post('/api/send', requireAgent, requireScope('message'), (req, res) => {
     if (!checkMessageRateLimit(req, res)) return;
 
     const { to, content, content_type, parts } = req.body;
@@ -1681,7 +1858,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/me/catchup — Get missed events since timestamp
    * Query: since (required, ms timestamp), cursor?, limit?
    */
-  auth.get('/api/me/catchup', requireAgent, (req, res) => {
+  auth.get('/api/me/catchup', requireAgent, requireScope('read'), (req, res) => {
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : NaN;
     if (isNaN(since)) {
@@ -1711,7 +1888,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/me/catchup/count — Get count of missed events by type
    * Query: since (required, ms timestamp)
    */
-  auth.get('/api/me/catchup/count', requireAgent, (req, res) => {
+  auth.get('/api/me/catchup/count', requireAgent, requireScope('read'), (req, res) => {
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : NaN;
     if (isNaN(since)) {
@@ -1729,7 +1906,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/inbox — Get new messages since timestamp
    * Query: since (timestamp, required)
    */
-  auth.get('/api/inbox', requireAgent, (req, res) => {
+  auth.get('/api/inbox', requireAgent, requireScope('read'), (req, res) => {
     const since = parseInt(getQueryString(req.query.since) || '');
     if (isNaN(since)) {
       res.status(400).json({ error: 'since (timestamp) is required' });
@@ -1768,7 +1945,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: agent token
    * Returns: { id, name, mime_type, size, url, created_at }
    */
-  auth.post('/api/files/upload', requireAgent, upload.single('file'), (req, res) => {
+  auth.post('/api/files/upload', requireAgent, requireScope('message'), upload.single('file'), (req, res) => {
     const file = req.file;
     if (!file) {
       res.status(400).json({ error: 'No file provided (field name must be "file")' });
@@ -1823,7 +2000,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: agent token or org API key
    * Org-scoped: only agents/admins in the same org can download
    */
-  auth.get('/api/files/:id', (req, res) => {
+  auth.get('/api/files/:id', requireScope('read'), (req, res) => {
     const orgId = requireOrgOrAgent(req, res);
     if (!orgId) return;
 
@@ -1862,7 +2039,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: agent token or org API key
    * Org-scoped access check
    */
-  auth.get('/api/files/:id/info', (req, res) => {
+  auth.get('/api/files/:id/info', requireScope('read'), (req, res) => {
     const orgId = requireOrgOrAgent(req, res);
     if (!orgId) return;
 
@@ -1913,6 +2090,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       message_ttl_days,
       thread_auto_close_days,
       artifact_retention_days,
+      default_thread_permission_policy,
     } = req.body;
 
     // Validate numeric fields (reject NaN, Infinity, non-integers)
@@ -1939,12 +2117,32 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
     }
 
+    // Validate default_thread_permission_policy
+    if (default_thread_permission_policy !== undefined && default_thread_permission_policy !== null) {
+      if (typeof default_thread_permission_policy !== 'object') {
+        res.status(400).json({ error: 'default_thread_permission_policy must be an object or null' });
+        return;
+      }
+      const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+      for (const [key, val] of Object.entries(default_thread_permission_policy)) {
+        if (!validPolicyKeys.has(key)) {
+          res.status(400).json({ error: `default_thread_permission_policy has invalid key: ${key}` });
+          return;
+        }
+        if (val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
+          res.status(400).json({ error: `default_thread_permission_policy.${key} must be a string array or null` });
+          return;
+        }
+      }
+    }
+
     const updates: Partial<OrgSettings> = {};
     if (messages_per_minute_per_bot !== undefined) updates.messages_per_minute_per_bot = messages_per_minute_per_bot;
     if (threads_per_hour_per_bot !== undefined) updates.threads_per_hour_per_bot = threads_per_hour_per_bot;
     if (message_ttl_days !== undefined) updates.message_ttl_days = message_ttl_days;
     if (thread_auto_close_days !== undefined) updates.thread_auto_close_days = thread_auto_close_days;
     if (artifact_retention_days !== undefined) updates.artifact_retention_days = artifact_retention_days;
+    if (default_thread_permission_policy !== undefined) updates.default_thread_permission_policy = default_thread_permission_policy;
 
     if (Object.keys(updates).length === 0) {
       res.status(400).json({ error: 'No settings fields provided' });

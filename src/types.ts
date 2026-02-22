@@ -83,6 +83,7 @@ export interface Thread {
   channel_id: string | null;
   context: string | null; // JSON string
   close_reason: CloseReason | null;
+  permission_policy: string | null; // JSON string of ThreadPermissionPolicy
   revision: number; // Optimistic concurrency control — increments on every update
   created_at: number;
   updated_at: number;
@@ -167,6 +168,55 @@ export interface CatchupCountResponse {
   total: number;
 }
 
+// ─── Scoped Tokens ──────────────────────────────────────────
+
+/** Token permission scopes. 'full' implies all other scopes. */
+export type TokenScope = 'full' | 'read' | 'thread' | 'message' | 'profile';
+
+export const VALID_TOKEN_SCOPES = new Set<TokenScope>(['full', 'read', 'thread', 'message', 'profile']);
+
+/** Mapping from operations to required scopes (any one grants access). */
+export const SCOPE_REQUIREMENTS: Record<string, TokenScope[]> = {
+  // Full access (token management, self-delete)
+  full: ['full'],
+  // Read operations (GET)
+  read: ['full', 'read'],
+  // Thread operations (create/update threads, thread messages, artifacts)
+  thread: ['full', 'thread'],
+  // Channel messaging
+  message: ['full', 'message'],
+  // Profile update
+  profile: ['full', 'profile'],
+};
+
+export interface AgentToken {
+  id: string;
+  agent_id: string;
+  token: string;
+  scopes: TokenScope[];
+  label: string | null;
+  expires_at: number | null;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+// ─── Thread Permission Policies ─────────────────────────────
+
+/**
+ * Per-thread permission policy based on participant labels.
+ * Each field is an array of labels that are allowed to perform the action.
+ * Special values:
+ * - "*" means any participant (default behavior)
+ * - "initiator" matches the thread initiator regardless of label
+ * If a field is omitted or null, the action is unrestricted (any participant).
+ */
+export interface ThreadPermissionPolicy {
+  resolve?: string[] | null;   // Who can set status to 'resolved'
+  close?: string[] | null;     // Who can set status to 'closed'
+  invite?: string[] | null;    // Who can invite new participants
+  remove?: string[] | null;    // Who can remove participants
+}
+
 // ─── Org Settings / Rate Limiting ────────────────────────────
 
 export interface OrgSettings {
@@ -176,6 +226,7 @@ export interface OrgSettings {
   message_ttl_days: number | null;
   thread_auto_close_days: number | null;
   artifact_retention_days: number | null;
+  default_thread_permission_policy: ThreadPermissionPolicy | null;
   updated_at: number;
 }
 
@@ -183,7 +234,9 @@ export interface OrgSettings {
 
 export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update'
+  | 'bot.token_create' | 'bot.token_revoke'
   | 'thread.create' | 'thread.status_changed' | 'thread.invite'
+  | 'thread.permission_denied'
   | 'message.send'
   | 'artifact.add' | 'artifact.update'
   | 'file.upload'

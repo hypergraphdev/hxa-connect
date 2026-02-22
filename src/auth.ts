@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { HubDB } from './db.js';
-import type { Agent, Org } from './types.js';
+import type { Agent, Org, TokenScope } from './types.js';
+import { SCOPE_REQUIREMENTS } from './types.js';
 
 // Extend Express Request to include auth context
 declare global {
@@ -9,6 +10,10 @@ declare global {
       agent?: Agent;
       org?: Org;
       authType?: 'agent' | 'org';
+      /** Token scopes for the current request. Primary agent tokens have ['full']. */
+      tokenScopes?: TokenScope[];
+      /** ID of the scoped token used (null if primary agent token or org key). */
+      scopedTokenId?: string;
     }
   }
 }
@@ -26,7 +31,7 @@ function extractToken(req: Request): string | undefined {
 
 /**
  * Middleware: Authenticate as agent (via agent token) or org admin (via org API key)
- * Sets req.agent and/or req.org
+ * Sets req.agent, req.org, and req.tokenScopes
  */
 export function authMiddleware(db: HubDB) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -37,16 +42,40 @@ export function authMiddleware(db: HubDB) {
       return;
     }
 
-    // Try agent token first
+    // Try primary agent token first
     const agent = db.getAgentByToken(token);
     if (agent) {
       req.agent = agent;
       req.org = db.getOrgById(agent.org_id);
       req.authType = 'agent';
+      req.tokenScopes = ['full'];
       // Update last seen
       db.setAgentOnline(agent.id, true);
       next();
       return;
+    }
+
+    // Try scoped agent token
+    const scopedToken = db.getAgentTokenByToken(token);
+    if (scopedToken) {
+      // Check expiration
+      if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
+        res.status(401).json({ error: 'Token expired' });
+        return;
+      }
+      const scopedAgent = db.getAgentById(scopedToken.agent_id);
+      if (scopedAgent) {
+        req.agent = scopedAgent;
+        req.org = db.getOrgById(scopedAgent.org_id);
+        req.authType = 'agent';
+        req.tokenScopes = scopedToken.scopes;
+        req.scopedTokenId = scopedToken.id;
+        // Update last seen on agent and token
+        db.setAgentOnline(scopedAgent.id, true);
+        db.touchAgentToken(scopedToken.id);
+        next();
+        return;
+      }
     }
 
     // Try org API key
@@ -77,9 +106,33 @@ export function requireAgent(req: Request, res: Response, next: NextFunction) {
  * Middleware: Require org admin authentication
  */
 export function requireOrg(req: Request, res: Response, next: NextFunction) {
-  if (!req.org) {
+  if (!req.org || req.authType !== 'org') {
     res.status(403).json({ error: 'Organization authentication required' });
     return;
   }
   next();
+}
+
+/**
+ * Middleware factory: Require a specific scope on the current token.
+ * The operation name maps to SCOPE_REQUIREMENTS in types.ts.
+ */
+export function requireScope(operation: keyof typeof SCOPE_REQUIREMENTS) {
+  const allowedScopes = SCOPE_REQUIREMENTS[operation];
+  return (req: Request, res: Response, next: NextFunction) => {
+    // Org-level auth bypasses scope checks
+    if (req.authType === 'org') {
+      next();
+      return;
+    }
+    const scopes = req.tokenScopes ?? ['full'];
+    const hasScope = scopes.some(s => allowedScopes.includes(s));
+    if (!hasScope) {
+      res.status(403).json({
+        error: `Insufficient token scope. Required: ${allowedScopes.join(' or ')}`,
+      });
+      return;
+    }
+    next();
+  };
 }

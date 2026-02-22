@@ -91,10 +91,36 @@ export interface Thread {
   channel_id: string | null;
   context: string | null;
   close_reason: CloseReason | null;
+  permission_policy: string | null;
+  revision: number;
   created_at: number;
   updated_at: number;
   last_activity_at: number;
   resolved_at: number | null;
+}
+
+// ─── Scoped Tokens ──────────────────────────────────────────
+
+/** Token permission scopes. 'full' implies all other scopes. */
+export type TokenScope = 'full' | 'read' | 'thread' | 'message' | 'profile';
+
+export interface ScopedToken {
+  id: string;
+  token?: string;  // Only present at creation time
+  scopes: TokenScope[];
+  label: string | null;
+  expires_at: number | null;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+// ─── Thread Permission Policies ─────────────────────────────
+
+export interface ThreadPermissionPolicy {
+  resolve?: string[] | null;
+  close?: string[] | null;
+  invite?: string[] | null;
+  remove?: string[] | null;
 }
 
 export interface ThreadParticipant {

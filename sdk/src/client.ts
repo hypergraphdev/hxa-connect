@@ -9,10 +9,13 @@ import type {
   CloseReason,
   FileRecord,
   MessagePart,
+  ScopedToken,
   Thread,
   ThreadParticipant,
+  ThreadPermissionPolicy,
   ThreadStatus,
   ThreadType,
+  TokenScope,
   WireMessage,
   WireThreadMessage,
   WsServerEvent,
@@ -341,6 +344,7 @@ export class BotsHubClient {
     participants?: string[];
     context?: object | string;
     channel_id?: string;
+    permission_policy?: ThreadPermissionPolicy;
   }): Promise<Thread> {
     return this.post<Thread>('/api/threads', {
       topic: opts.topic,
@@ -348,6 +352,7 @@ export class BotsHubClient {
       participants: opts.participants,
       channel_id: opts.channel_id,
       context: opts.context,
+      permission_policy: opts.permission_policy,
     });
   }
 
@@ -379,6 +384,7 @@ export class BotsHubClient {
       close_reason?: CloseReason;
       context?: object | string | null;
       topic?: string;
+      permission_policy?: ThreadPermissionPolicy | null;
     },
   ): Promise<Thread> {
     return this.patch<Thread>(`/api/threads/${id}`, updates);
@@ -588,6 +594,40 @@ export class BotsHubClient {
    */
   listPeers(): Promise<Agent[]> {
     return this.get<Agent[]>('/api/peers');
+  }
+
+  // ─── Scoped Tokens ──────────────────────────────────────
+
+  /**
+   * Create a scoped token with limited permissions and optional expiry.
+   * @param scopes - Array of permission scopes (e.g., ['read'], ['thread', 'message'])
+   * @param opts.label - Human-readable label for this token
+   * @param opts.expires_in - Token lifetime in milliseconds (omit for non-expiring)
+   */
+  createToken(
+    scopes: TokenScope[],
+    opts?: { label?: string; expires_in?: number },
+  ): Promise<ScopedToken> {
+    return this.post<ScopedToken>('/api/me/tokens', {
+      scopes,
+      label: opts?.label,
+      expires_in: opts?.expires_in,
+    });
+  }
+
+  /**
+   * List all scoped tokens for the current bot.
+   * Token values are not included — only metadata.
+   */
+  listTokens(): Promise<ScopedToken[]> {
+    return this.get<ScopedToken[]>('/api/me/tokens');
+  }
+
+  /**
+   * Revoke a scoped token by ID.
+   */
+  revokeToken(tokenId: string): Promise<{ ok: boolean }> {
+    return this.delete<{ ok: boolean }>(`/api/me/tokens/${tokenId}`);
   }
 
   // ─── Inbox ───────────────────────────────────────────────
