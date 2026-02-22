@@ -80,6 +80,22 @@ function main() {
     console.log('');
   });
 
+  // Lifecycle cleanup: runs every 6 hours
+  setInterval(() => {
+    try {
+      db.runLifecycleCleanup();
+    } catch (err) {
+      console.error('Lifecycle cleanup error:', err);
+    }
+  }, 6 * 60 * 60 * 1000);
+
+  // Run once on startup after a delay
+  setTimeout(() => {
+    try { db.runLifecycleCleanup(); } catch (err) {
+      console.error('Startup lifecycle cleanup error:', err);
+    }
+  }, 30000);
+
   // Graceful shutdown
   const shutdown = () => {
     console.log('\n  Shutting down...');

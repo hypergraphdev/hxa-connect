@@ -100,6 +100,13 @@ export class HubWS {
             return;
           }
 
+          // Atomic rate limit check + record
+          const rateCheck = this.db.checkAndRecordRateLimit(client.orgId, client.agentId, 'message');
+          if (!rateCheck.allowed) {
+            this.send(client, { type: 'error', code: 'rate_limited', message: `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, retry_after: rateCheck.retryAfter });
+            return;
+          }
+
           // Validate and handle parts
           let partsJson: string | null = null;
           if (data.parts && Array.isArray(data.parts)) {
@@ -138,6 +145,9 @@ export class HubWS {
           const contentType = data.content_type || 'text';
           const msg = this.db.createMessage(data.channel_id, client.agentId, content, contentType, partsJson);
           const agent = this.db.getAgentById(client.agentId);
+
+          // Audit (rate limit event already recorded atomically above)
+          this.db.recordAudit(client.orgId, client.agentId, 'message.send', 'channel_message', msg.id, { channel_id: data.channel_id, via: 'ws' });
 
           // Record catchup events for channel members except sender
           const channel = this.db.getChannel(data.channel_id);

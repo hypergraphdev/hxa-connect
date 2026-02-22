@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg } from './auth.js';
-import { validateParts, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse } from './types.js';
+import { validateParts, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings } from './types.js';
 
 function parseJsonField<T>(value: string | null): T | null {
   if (!value) return null;
@@ -129,6 +129,45 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (req.org) return req.org.id;
     res.status(403).json({ error: 'Authentication required' });
     return undefined;
+  }
+
+  function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
+    if (!req.org) {
+      res.status(403).json({ error: 'Organization authentication required' });
+      return false;
+    }
+    const adminSecret = req.headers['x-admin-secret'] as string;
+    if (!adminSecret || !db.verifyOrgAdminSecret(req.org.id, adminSecret)) {
+      res.status(403).json({ error: 'Org admin secret required' });
+      return false;
+    }
+    return true;
+  }
+
+  function checkMessageRateLimit(req: import('express').Request, res: import('express').Response): boolean {
+    if (!req.agent) return true; // org-level requests don't have per-bot rate limits
+    const result = db.checkAndRecordRateLimit(req.agent.org_id, req.agent.id, 'message');
+    if (!result.allowed) {
+      res.status(429).set('Retry-After', String(result.retryAfter)).json({
+        error: 'Rate limit exceeded: messages per minute',
+        retry_after: result.retryAfter,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  function checkThreadRateLimit(req: import('express').Request, res: import('express').Response): boolean {
+    if (!req.agent) return true;
+    const result = db.checkAndRecordRateLimit(req.agent.org_id, req.agent.id, 'thread');
+    if (!result.allowed) {
+      res.status(429).set('Retry-After', String(result.retryAfter)).json({
+        error: 'Rate limit exceeded: threads per hour',
+        retry_after: result.retryAfter,
+      });
+      return false;
+    }
+    return true;
   }
 
   function resolveAgent(orgId: string, idOrName: unknown): Agent | undefined {
@@ -265,6 +304,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
 
+    // Audit
+    db.recordAudit(req.org!.id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name });
+
     // Broadcast agent online to all org viewers (Web UI etc.)
     ws.broadcastToOrg(req.org!.id, {
       type: 'agent_online',
@@ -306,6 +348,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     db.deleteAgent(agent.id);
 
+    // Audit
+    db.recordAudit(req.org!.id, agent.id, 'bot.delete', 'agent', agent.id, { name: agent.name });
+
     // Broadcast agent offline
     ws.broadcastToOrg(agent.org_id, {
       type: 'agent_offline',
@@ -322,6 +367,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.delete('/api/me', requireAgent, (req, res) => {
     const agent = req.agent!;
     db.deleteAgent(agent.id);
+
+    // Audit
+    db.recordAudit(agent.org_id, agent.id, 'bot.delete', 'agent', agent.id, { name: agent.name, self: true });
 
     // Broadcast agent offline
     ws.broadcastToOrg(agent.org_id, {
@@ -403,6 +451,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }
+
+    // Audit
+    const changedFields = Object.keys(fields).filter(k => (fields as any)[k] !== undefined);
+    db.recordAudit(req.agent!.org_id, req.agent!.id, 'bot.profile_update', 'agent', req.agent!.id, { fields: changedFields });
 
     req.agent = updated;
     res.json(toAgentResponse(updated));
@@ -513,6 +565,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const channel = db.createChannel(orgId, type, memberIds, name);
 
+    // Audit
+    db.recordAudit(orgId, null, 'channel.create', 'channel', channel.id, { type, name: name ?? null, members: memberIds });
+
     // Broadcast channel creation
     ws.broadcastToOrg(orgId, {
       type: 'channel_created',
@@ -607,6 +662,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     db.deleteChannel(channel.id);
 
+    // Audit
+    db.recordAudit(req.org!.id, null, 'channel.delete', 'channel', channel.id, { name: channel.name });
+
     // Broadcast channel deletion
     ws.broadcastToOrg(req.org!.id, {
       type: 'channel_deleted' as any,
@@ -616,6 +674,98 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json({ ok: true, message: `Channel deleted` });
   });
 
+  // ─── Org Admin Thread Endpoints ──────────────────────────
+
+  /**
+   * GET /api/org/threads — List all threads in the org
+   * Query: status? (filter by thread status)
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.get('/api/org/threads', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const statusRaw = getQueryString(req.query.status);
+    if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
+      res.status(400).json({ error: 'Invalid status filter' });
+      return;
+    }
+
+    const status = statusRaw as ThreadStatus | undefined;
+    const threads = db.listThreadsForOrg(req.org!.id, status);
+    res.json(threads);
+  });
+
+  /**
+   * GET /api/org/threads/:id — Thread detail with participants
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.get('/api/org/threads/:id', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const thread = db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== req.org!.id) {
+      res.status(404).json({ error: 'Thread not found' });
+      return;
+    }
+
+    const participants = db.getParticipants(thread.id).map(p => {
+      const bot = db.getAgentById(p.bot_id);
+      return {
+        bot_id: p.bot_id,
+        name: bot?.name,
+        display_name: bot?.display_name,
+        online: bot?.online,
+        label: p.label,
+        joined_at: p.joined_at,
+      };
+    });
+
+    res.json({ ...thread, participants });
+  });
+
+  /**
+   * GET /api/org/threads/:id/messages — Thread messages (enriched with parts)
+   * Query: limit?, before?
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.get('/api/org/threads/:id/messages', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const thread = db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== req.org!.id) {
+      res.status(404).json({ error: 'Thread not found' });
+      return;
+    }
+
+    const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
+    const beforeStr = getQueryString(req.query.before);
+    const before = beforeStr ? parseInt(beforeStr) : undefined;
+
+    const messages = db.getThreadMessages(thread.id, limit, before);
+    const enriched = messages.map(m => {
+      const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+    });
+
+    res.json(enriched.reverse());
+  });
+
+  /**
+   * GET /api/org/threads/:id/artifacts — Thread artifacts
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.get('/api/org/threads/:id/artifacts', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const thread = db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== req.org!.id) {
+      res.status(404).json({ error: 'Thread not found' });
+      return;
+    }
+
+    res.json(db.listArtifacts(thread.id));
+  });
+
   // ─── Threads ─────────────────────────────────────────────
 
   /**
@@ -623,6 +773,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { topic, type?, participants?, channel_id?, context? }
    */
   auth.post('/api/threads', requireAgent, (req, res) => {
+    if (!checkThreadRateLimit(req, res)) return;
+
     const { topic, type, participants, channel_id, context } = req.body;
     const orgId = req.agent!.org_id;
 
@@ -693,6 +845,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         resolvedChannelId,
         contextJson,
       );
+
+      // Audit (rate limit event already recorded atomically in checkThreadRateLimit)
+      db.recordAudit(orgId, req.agent!.id, 'thread.create', 'thread', thread.id, { topic, type: threadType });
 
       // Record catchup events: thread_invited for each participant (except initiator)
       const allParticipantIds = Array.from(new Set([req.agent!.id, ...resolvedParticipantIds]));
@@ -837,6 +992,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         if (status === 'closed') changes.push('close_reason');
         if (status === 'resolved') changes.push('resolved_at');
 
+        // Audit
+        db.recordAudit(thread.org_id, req.agent!.id, 'thread.status_changed', 'thread', thread.id, {
+          from: previousStatus,
+          to: status,
+          close_reason: closeReason ?? null,
+        });
+
         // Record catchup event for all participants
         const participants = db.getParticipants(thread.id);
         for (const p of participants) {
@@ -915,6 +1077,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       const participant = db.addParticipant(thread.id, bot.id, label);
 
       if (!alreadyParticipant) {
+        // Audit
+        db.recordAudit(thread.org_id, req.agent!.id, 'thread.invite', 'thread', thread.id, {
+          invited_bot_id: bot.id,
+          invited_bot_name: bot.name,
+        });
+
         // Record catchup event for the invited bot
         db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
           thread_id: thread.id,
@@ -983,6 +1151,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { content, content_type?, metadata? }
    */
   auth.post('/api/threads/:id/messages', requireAgent, (req, res) => {
+    if (!checkMessageRateLimit(req, res)) return;
+
     const thread = requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
@@ -1042,6 +1212,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     );
 
     const enriched = enrichThreadMessage(message);
+
+    // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
+    db.recordAudit(thread.org_id, req.agent!.id, 'message.send', 'thread_message', message.id, { thread_id: thread.id });
 
     // Record catchup events for all participants except the sender
     const threadParticipants = db.getParticipants(thread.id);
@@ -1160,6 +1333,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         mime_type === undefined ? undefined : (mime_type ?? null),
       );
 
+      // Audit
+      db.recordAudit(thread.org_id, req.agent!.id, 'artifact.add', 'artifact', artifact.id, {
+        thread_id: thread.id,
+        artifact_key: artifact.artifact_key,
+        version: artifact.version,
+      });
+
       // Record catchup events for all participants except the contributor
       const participants = db.getParticipants(thread.id);
       for (const p of participants) {
@@ -1226,6 +1406,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         return;
       }
 
+      // Audit
+      db.recordAudit(thread.org_id, req.agent!.id, 'artifact.update', 'artifact', artifact.id, {
+        thread_id: thread.id,
+        artifact_key: artifact.artifact_key,
+        version: artifact.version,
+      });
+
       // Record catchup events for all participants except the contributor
       const participants = db.getParticipants(thread.id);
       for (const p of participants) {
@@ -1283,6 +1470,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { content, content_type? }
    */
   auth.post('/api/channels/:id/messages', requireAgent, (req, res) => {
+    if (!checkMessageRateLimit(req, res)) return;
+
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
       res.status(404).json({ error: 'Channel not found' });
@@ -1320,6 +1509,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const msg = db.createMessage(channel.id, req.agent!.id, resolvedContent, content_type || 'text', partsJson);
+
+    // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
+    db.recordAudit(channel.org_id, req.agent!.id, 'message.send', 'channel_message', msg.id, { channel_id: channel.id });
 
     // Record catchup events for all channel members except the sender
     const members = db.getChannelMembers(channel.id);
@@ -1380,6 +1572,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { to, content, content_type? }
    */
   auth.post('/api/send', requireAgent, (req, res) => {
+    if (!checkMessageRateLimit(req, res)) return;
+
     const { to, content, content_type, parts } = req.body;
 
     // Validate parts if provided
@@ -1432,6 +1626,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const msg = db.createMessage(channel.id, req.agent!.id, resolvedContent, content_type || 'text', partsJson);
+
+    // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
+    db.recordAudit(req.agent!.org_id, req.agent!.id, 'message.send', 'channel_message', msg.id, { channel_id: channel.id, to: target.id });
 
     // Record catchup event for the target
     db.recordCatchupEvent(req.agent!.org_id, target.id, 'channel_message_summary', {
@@ -1573,6 +1770,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       relativePath,
     );
 
+    // Audit
+    db.recordAudit(orgId, req.agent!.id, 'file.upload', 'file', record.id, {
+      name: record.name,
+      mime_type: record.mime_type,
+      size: record.size,
+    });
+
     res.json({
       id: record.id,
       name: record.name,
@@ -1651,6 +1855,104 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       url: `/api/files/${record.id}`,
       created_at: record.created_at,
     });
+  });
+
+  // ─── Org Settings (Admin) ──────────────────────────────────
+
+  /**
+   * GET /api/org/settings — Get org settings
+   * Auth: Org API Key + X-Admin-Secret
+   */
+  auth.get('/api/org/settings', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    res.json(db.getOrgSettings(req.org!.id));
+  });
+
+  /**
+   * PATCH /api/org/settings — Update org settings
+   * Auth: Org API Key + X-Admin-Secret
+   * Body: partial OrgSettings fields
+   */
+  auth.patch('/api/org/settings', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const {
+      messages_per_minute_per_bot,
+      threads_per_hour_per_bot,
+      message_ttl_days,
+      thread_auto_close_days,
+      artifact_retention_days,
+    } = req.body;
+
+    // Validate numeric fields (reject NaN, Infinity, non-integers)
+    const numericFields: Record<string, unknown> = {
+      messages_per_minute_per_bot,
+      threads_per_hour_per_bot,
+    };
+    for (const [key, val] of Object.entries(numericFields)) {
+      if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || !Number.isInteger(val) || val < 1)) {
+        res.status(400).json({ error: `${key} must be a positive integer` });
+        return;
+      }
+    }
+
+    const nullableFields: Record<string, unknown> = {
+      message_ttl_days,
+      thread_auto_close_days,
+      artifact_retention_days,
+    };
+    for (const [key, val] of Object.entries(nullableFields)) {
+      if (val !== undefined && val !== null && (typeof val !== 'number' || !Number.isFinite(val) || !Number.isInteger(val) || val < 1)) {
+        res.status(400).json({ error: `${key} must be a positive integer or null` });
+        return;
+      }
+    }
+
+    const updates: Partial<OrgSettings> = {};
+    if (messages_per_minute_per_bot !== undefined) updates.messages_per_minute_per_bot = messages_per_minute_per_bot;
+    if (threads_per_hour_per_bot !== undefined) updates.threads_per_hour_per_bot = threads_per_hour_per_bot;
+    if (message_ttl_days !== undefined) updates.message_ttl_days = message_ttl_days;
+    if (thread_auto_close_days !== undefined) updates.thread_auto_close_days = thread_auto_close_days;
+    if (artifact_retention_days !== undefined) updates.artifact_retention_days = artifact_retention_days;
+
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: 'No settings fields provided' });
+      return;
+    }
+
+    const settings = db.updateOrgSettings(req.org!.id, updates);
+
+    // Audit
+    db.recordAudit(req.org!.id, null, 'settings.update', 'org_settings', req.org!.id, updates);
+
+    res.json(settings);
+  });
+
+  // ─── Audit Log (Admin) ───────────────────────────────────
+
+  /**
+   * GET /api/audit — Query audit log
+   * Auth: Org API Key + X-Admin-Secret
+   * Query: since?, action?, target_type?, target_id?, bot_id?, limit?
+   */
+  auth.get('/api/audit', requireOrg, (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr ? parseInt(sinceStr) : undefined;
+    if (since !== undefined && isNaN(since)) {
+      res.status(400).json({ error: 'since must be a valid timestamp' });
+      return;
+    }
+    const action = getQueryString(req.query.action);
+    const target_type = getQueryString(req.query.target_type);
+    const target_id = getQueryString(req.query.target_id);
+    const bot_id = getQueryString(req.query.bot_id);
+    const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 50;
+    const limit = Math.min(Math.max(limitRaw, 1), 200);
+
+    const entries = db.getAuditLog(req.org!.id, { since, action, target_type, target_id, bot_id, limit });
+    res.json(entries);
   });
 
   // Mount authenticated routes
