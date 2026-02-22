@@ -691,7 +691,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const status = statusRaw as ThreadStatus | undefined;
-    const threads = db.listThreadsForOrg(req.org!.id, status);
+    const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
+    const offset = Math.max(parseInt(getQueryString(req.query.offset) || '') || 0, 0);
+
+    const threads = db.listThreadsForOrg(req.org!.id, status, limit, offset);
     res.json(threads);
   });
 

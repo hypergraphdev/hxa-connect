@@ -1182,14 +1182,14 @@ export class HubDB {
     return this.rowToThread(row);
   }
 
-  listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200): Thread[] {
+  listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200, offset = 0): Thread[] {
     const base = 'SELECT * FROM threads WHERE org_id = ?';
     const query = status
-      ? `${base} AND status = ? ORDER BY last_activity_at DESC LIMIT ?`
-      : `${base} ORDER BY last_activity_at DESC LIMIT ?`;
+      ? `${base} AND status = ? ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`
+      : `${base} ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`;
     const rows = status
-      ? (this.db.prepare(query).all(orgId, status, limit) as any[])
-      : (this.db.prepare(query).all(orgId, limit) as any[]);
+      ? (this.db.prepare(query).all(orgId, status, limit, offset) as any[])
+      : (this.db.prepare(query).all(orgId, limit, offset) as any[]);
     return rows.map(row => this.rowToThread(row));
   }
 

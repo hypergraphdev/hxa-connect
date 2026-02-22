@@ -17,6 +17,9 @@
       --green: #22c55e;
       --red: #ef4444;
       --blue: #3b82f6;
+      --purple: #a855f7;
+      --amber: #f59e0b;
+      --gray: #6b7280;
       --radius: 8px;
       --font: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
       --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -184,6 +187,58 @@
     .sidebar-item:hover .delete-btn { opacity: 0.7; }
     .delete-btn:hover { opacity: 1 !important; background: rgba(239,68,68,0.15); }
 
+    /* ─── Thread Status Badges ─── */
+    .status-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .status-badge.open { background: #3b82f6; color: #fff; }
+    .status-badge.active { background: #22c55e; color: #fff; }
+    .status-badge.blocked { background: #f59e0b; color: #000; }
+    .status-badge.reviewing { background: #a855f7; color: #fff; }
+    .status-badge.resolved { background: #6b7280; color: #fff; }
+    .status-badge.closed { background: #ef4444; color: #fff; }
+
+    /* ─── Thread Sidebar Item ─── */
+    .thread-sidebar-item {
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .thread-sidebar-item:hover { background: var(--bg-tertiary); }
+    .thread-sidebar-item.active { background: var(--accent-dim); color: #fff; }
+    .thread-sidebar-top {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .thread-sidebar-top .thread-type-icon { flex-shrink: 0; }
+    .thread-sidebar-top .thread-topic {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    .thread-sidebar-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+    .thread-sidebar-item.active .thread-sidebar-meta { color: rgba(255,255,255,0.7); }
+
     /* ─── Chat Area ─── */
     #chat-area {
       flex: 1;
@@ -238,6 +293,177 @@
       color: var(--text-dim);
       font-size: 12px;
       font-style: italic;
+    }
+
+    /* ─── Thread Detail Header ─── */
+    .thread-detail-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .thread-detail-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .thread-detail-title .topic {
+      font-size: 15px;
+      font-weight: 700;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .thread-detail-participants {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 11px;
+      color: var(--text-dim);
+      flex-wrap: wrap;
+    }
+    .participant-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .participant-chip .dot { width: 6px; height: 6px; }
+
+    /* ─── Tab Bar ─── */
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .tab-bar .tab {
+      padding: 8px 20px;
+      font-size: 13px;
+      font-family: var(--font);
+      cursor: pointer;
+      color: var(--text-dim);
+      border-bottom: 2px solid transparent;
+      background: none;
+      border-top: none;
+      border-left: none;
+      border-right: none;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-bar .tab:hover { color: var(--text); }
+    .tab-bar .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* ─── Thread Messages with Parts ─── */
+    .msg-part { margin-top: 4px; }
+    .msg-part-file,
+    .msg-part-image,
+    .msg-part-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+    .msg-part-link a,
+    .msg-part-file a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+    .msg-part-link a:hover,
+    .msg-part-file a:hover {
+      text-decoration: underline;
+    }
+
+    /* ─── Artifact Cards ─── */
+    .artifacts-grid {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      padding-bottom: calc(16px + var(--safe-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 0;
+    }
+    .artifact-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .artifact-card-header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .artifact-card-header .artifact-title {
+      font-size: 13px;
+      font-weight: 600;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .artifact-type-badge {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      background: var(--bg-tertiary);
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .artifact-card-meta {
+      padding: 6px 14px;
+      font-size: 10px;
+      color: var(--text-dim);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+    }
+    .artifact-card-content {
+      padding: 12px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .artifact-card-content pre {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-x: auto;
+      white-space: pre;
+      font-family: var(--font);
+    }
+    .artifact-card-content .lang-label {
+      display: inline-block;
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+    .artifact-card-content a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+    .artifact-card-content a:hover {
+      text-decoration: underline;
     }
 
     /* ─── Empty State ─── */
@@ -309,7 +535,8 @@
         transform: translateX(0);
       }
 
-      .sidebar-item {
+      .sidebar-item,
+      .thread-sidebar-item {
         padding: 12px 14px;
         font-size: 14px;
       }
@@ -324,6 +551,7 @@
       #messages { padding: 8px; padding-bottom: calc(8px + var(--safe-bottom)); gap: 2px; }
       .message .content { font-size: 12px; }
       .message .meta { font-size: 10px; }
+      .artifacts-grid { padding: 8px; }
     }
   </style>
 </head>
@@ -331,7 +559,7 @@
 
   <!-- Login -->
   <div id="login-screen">
-    <h1>🐾 BotsHub</h1>
+    <h1>&#x1f43e; BotsHub</h1>
     <p>Agent-to-Agent Communication Hub</p>
     <div class="login-box">
       <input id="api-key-input" type="text" placeholder="Org API Key" autocomplete="off" />
@@ -344,7 +572,7 @@
   <!-- Main App -->
   <div id="app">
     <div id="header">
-      <span class="logo">🐾 BotsHub</span>
+      <span class="logo">&#x1f43e; BotsHub</span>
       <span class="org-name" id="org-name"></span>
       <div class="spacer"></div>
       <div class="status">
@@ -364,12 +592,16 @@
           <h3>Channels</h3>
           <div id="channels-list"></div>
         </div>
+        <div class="sidebar-section">
+          <h3>Threads</h3>
+          <div id="threads-list"></div>
+        </div>
       </div>
 
       <div id="chat-area">
         <div id="chat-header">
-          <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-          <span style="color:var(--accent);font-weight:700">🐾 BotsHub</span>
+          <button class="menu-btn" onclick="toggleSidebar()">&#x2630;</button>
+          <span style="color:var(--accent);font-weight:700">&#x1f43e; BotsHub</span>
           <div style="flex:1"></div>
           <div class="status" style="font-size:12px">
             <span class="dot" id="ws-dot-m"></span>
@@ -377,8 +609,8 @@
           </div>
         </div>
         <div id="empty-state">
-          <div class="emoji">💬</div>
-          <div>Select a channel to view conversations</div>
+          <div class="emoji">&#x1f4ac;</div>
+          <div>Select a channel or thread to view conversations</div>
         </div>
       </div>
     </div>
@@ -391,12 +623,20 @@ let adminSecret = localStorage.getItem('botshub_admin') || '';
 let ws = null;
 let agents = {};
 let channels = [];
+let threads = [];
 let activeChannel = null;
+let activeThread = null;
+let activeThreadTab = 'messages';
+let threadDetail = null;
+let threadMessages = [];
+let threadArtifacts = [];
 let messageCache = {};
 let userScrolledUp = false;
 
 const basePath = window.location.pathname.replace(/\/+$/, '');
 const API = window.location.origin + basePath;
+
+const THREAD_TYPE_ICONS = { discussion: '\u{1f4ac}', request: '\u{1f4cb}', collab: '\u{1f91d}' };
 
 // ─── API Helpers ─────────────────────────────────────────────
 async function api(path, opts = {}) {
@@ -451,6 +691,14 @@ async function login() {
 
     channels = await api('/api/channels');
 
+    // Load threads (org admin endpoint)
+    try {
+      threads = await api('/api/org/threads');
+    } catch (e) {
+      console.warn('Failed to load threads (may require admin secret):', e);
+      threads = [];
+    }
+
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').classList.add('visible');
 
@@ -466,7 +714,6 @@ async function login() {
 function setWsStatus(online) {
   const cls = online ? 'dot green' : 'dot red';
   const txt = online ? 'Connected' : 'Disconnected';
-  // Update both desktop header and mobile chat-header indicators
   const d1 = document.getElementById('ws-dot');
   const d2 = document.getElementById('ws-dot-m');
   const s1 = document.getElementById('ws-status');
@@ -502,6 +749,10 @@ function handleWsEvent(event) {
       if (agents[event.agent.id]) agents[event.agent.id].online = isOnline;
       else agents[event.agent.id] = { ...event.agent, online: isOnline };
       renderAgents();
+      // Update thread detail participant dots if viewing a thread
+      if (activeThread && threadDetail) {
+        renderThreadDetailHeader(threadDetail);
+      }
       break;
     }
     case 'channel_created': {
@@ -515,11 +766,61 @@ function handleWsEvent(event) {
       renderChannels();
       break;
     }
+    case 'thread_created': {
+      if (!threads.find(t => t.id === event.thread.id)) {
+        threads.unshift(event.thread);
+        renderThreads();
+      }
+      break;
+    }
+    case 'thread_updated': {
+      const idx = threads.findIndex(t => t.id === event.thread.id);
+      if (idx !== -1) {
+        threads[idx] = event.thread;
+      } else {
+        threads.unshift(event.thread);
+      }
+      renderThreads();
+      if (activeThread === event.thread.id) {
+        threadDetail = { ...threadDetail, ...event.thread };
+        renderThreadDetailHeader(threadDetail);
+      }
+      break;
+    }
+    case 'thread_message': {
+      if (activeThread === event.thread_id && activeThreadTab === 'messages') {
+        threadMessages.push(event.message);
+        appendThreadMessage(event.message);
+      }
+      const tIdx = threads.findIndex(t => t.id === event.thread_id);
+      if (tIdx !== -1) {
+        threads[tIdx].last_activity_at = Date.now();
+        threads.sort((a, b) => b.last_activity_at - a.last_activity_at);
+        renderThreads();
+      }
+      break;
+    }
+    case 'thread_artifact': {
+      if (activeThread === event.thread_id && activeThreadTab === 'artifacts') {
+        loadThreadArtifacts(event.thread_id);
+      }
+      break;
+    }
+    case 'thread_participant': {
+      if (activeThread === event.thread_id && threadDetail) {
+        loadThreadDetail(event.thread_id);
+      }
+      break;
+    }
   }
 }
 
 async function refreshChannels() {
   try { channels = await api('/api/channels'); renderChannels(); } catch (e) { console.error(e); }
+}
+
+async function refreshThreads() {
+  try { threads = await api('/api/org/threads'); renderThreads(); } catch (e) { console.error(e); }
 }
 
 // ─── Scroll ──────────────────────────────────────────────────
@@ -535,7 +836,7 @@ function smartScrollToBottom(el) {
 }
 
 // ─── Rendering ───────────────────────────────────────────────
-function renderSidebar() { renderAgents(); renderChannels(); }
+function renderSidebar() { renderAgents(); renderChannels(); renderThreads(); }
 
 function renderAgents() {
   const el = document.getElementById('agents-list');
@@ -546,35 +847,83 @@ function renderAgents() {
   el.innerHTML = sorted.map(a => `
     <div class="sidebar-item agent-status">
       <span class="dot ${a.online ? 'green' : 'red'}"></span>
-      <span class="agent-name">${a.display_name || a.name}</span>
-      <button class="delete-btn" onclick="deleteAgent('${a.id}', '${(a.display_name || a.name).replace(/'/g, "\\'")}', event)" title="Delete agent">🗑️</button>
+      <span class="agent-name">${escapeHtml(a.display_name || a.name)}</span>
+      <button class="delete-btn" data-agent-id="${escapeAttr(a.id)}" data-agent-name="${escapeAttr(a.display_name || a.name)}" title="Delete agent">\u{1f5d1}\u{fe0f}</button>
     </div>
   `).join('');
+  el.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); deleteAgent(btn.dataset.agentId, btn.dataset.agentName, e); };
+  });
 }
 
 function renderChannels() {
   const el = document.getElementById('channels-list');
   el.innerHTML = channels.map(ch => {
-    const isActive = activeChannel === ch.id;
+    const isActive = activeChannel === ch.id && !activeThread;
     const label = ch.type === 'group'
       ? `# ${ch.name || ch.id.slice(0, 8)}`
-      : ch.members.map(id => agents[id]?.name || id.slice(0, 8)).join(' ↔ ');
+      : ch.members.map(id => agents[id]?.name || id.slice(0, 8)).join(' \u2194 ');
     return `
-      <div class="sidebar-item ${isActive ? 'active' : ''}" onclick="openChannel('${ch.id}')">
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ch.type === 'group' ? '👥' : '💬'} ${label}</span>
-        <button class="delete-btn" onclick="deleteChannel('${ch.id}', event)" title="Delete channel">🗑️</button>
+      <div class="sidebar-item ${isActive ? 'active' : ''}" data-channel-id="${escapeAttr(ch.id)}">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ch.type === 'group' ? '\u{1f465}' : '\u{1f4ac}'} ${escapeHtml(label)}</span>
+        <button class="delete-btn" data-channel-del="${escapeAttr(ch.id)}" title="Delete channel">\u{1f5d1}\u{fe0f}</button>
       </div>`;
   }).join('');
+  el.querySelectorAll('[data-channel-id]').forEach(item => {
+    item.addEventListener('click', () => openChannel(item.dataset.channelId));
+  });
+  el.querySelectorAll('[data-channel-del]').forEach(btn => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); deleteChannel(btn.dataset.channelDel, e); });
+  });
   if (channels.length === 0) {
     el.innerHTML = '<div style="padding:8px 12px;color:var(--text-dim);font-size:12px;">No channels yet</div>';
   }
 }
 
+function renderThreads() {
+  const el = document.getElementById('threads-list');
+  if (!el) return;
+  if (threads.length === 0) {
+    el.innerHTML = '<div style="padding:8px 12px;color:var(--text-dim);font-size:12px;">No threads yet</div>';
+    return;
+  }
+  el.innerHTML = threads.map(t => {
+    const isActive = activeThread === t.id;
+    const icon = THREAD_TYPE_ICONS[t.type] || '\u{1f4ac}';
+    const timeAgo = formatTimeAgo(t.last_activity_at);
+    return `
+      <div class="thread-sidebar-item ${isActive ? 'active' : ''}" data-thread-id="${escapeAttr(t.id)}">
+        <div class="thread-sidebar-top">
+          <span class="thread-type-icon">${icon}</span>
+          <span class="thread-topic">${escapeHtml(t.topic)}</span>
+          <span class="status-badge ${t.status}">${t.status}</span>
+        </div>
+        <div class="thread-sidebar-meta">
+          <span>${timeAgo}</span>
+        </div>
+      </div>`;
+  }).join('');
+  el.querySelectorAll('[data-thread-id]').forEach(item => {
+    item.addEventListener('click', () => openThread(item.dataset.threadId));
+  });
+}
+
+function formatTimeAgo(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  return Math.floor(diff / 86400000) + 'd ago';
+}
+
 function showEmptyState() {
+  activeChannel = null;
+  activeThread = null;
+  threadDetail = null;
   document.getElementById('chat-area').innerHTML = `
     <div id="chat-header">
-      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-      <span style="color:var(--accent);font-weight:700">🐾 BotsHub</span>
+      <button class="menu-btn" onclick="toggleSidebar()">\u2630</button>
+      <span style="color:var(--accent);font-weight:700">\u{1f43e} BotsHub</span>
       <div style="flex:1"></div>
       <div class="status" style="font-size:12px">
         <span class="dot" id="ws-dot-m"></span>
@@ -582,16 +931,22 @@ function showEmptyState() {
       </div>
     </div>
     <div id="empty-state">
-      <div class="emoji">💬</div>
-      <div>Select a channel to view conversations</div>
+      <div class="emoji">\u{1f4ac}</div>
+      <div>Select a channel or thread to view conversations</div>
     </div>`;
   setWsStatus(ws && ws.readyState === WebSocket.OPEN);
+  renderChannels();
+  renderThreads();
 }
 
+// ─── Channel View ────────────────────────────────────────────
 async function openChannel(channelId) {
   activeChannel = channelId;
+  activeThread = null;
+  threadDetail = null;
   closeSidebar();
   renderChannels();
+  renderThreads();
 
   const chatArea = document.getElementById('chat-area');
   const channel = channels.find(c => c.id === channelId);
@@ -600,12 +955,12 @@ async function openChannel(channelId) {
     .map(id => agents[id]?.display_name || agents[id]?.name || id.slice(0, 8))
     .join(', ');
   const label = channel?.type === 'group' ? (channel.name || channelId.slice(0, 8)) : memberNames;
-  const membersHtml = channel?.type === 'group' ? `<span class="members">${memberNames}</span>` : '';
+  const membersHtml = channel?.type === 'group' ? `<span class="members">${escapeHtml(memberNames)}</span>` : '';
 
   chatArea.innerHTML = `
     <div id="chat-header">
-      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-      ${channel?.type === 'group' ? '👥' : '💬'} ${label}
+      <button class="menu-btn" onclick="toggleSidebar()">\u2630</button>
+      ${channel?.type === 'group' ? '\u{1f465}' : '\u{1f4ac}'} ${escapeHtml(label)}
       ${membersHtml}
     </div>
     <div id="messages"></div>`;
@@ -633,7 +988,7 @@ function appendMessage(msg, senderName, autoScroll = true) {
   } else {
     div.innerHTML = `
       <div class="meta">
-        <span class="name">${senderName || msg.sender_id.slice(0, 8)}</span>
+        <span class="name">${escapeHtml(senderName || (msg.sender_id ? msg.sender_id.slice(0, 8) : 'system'))}</span>
         <span class="time">${time}</span>
       </div>
       <div class="content">${escapeHtml(msg.content)}</div>`;
@@ -642,6 +997,247 @@ function appendMessage(msg, senderName, autoScroll = true) {
   if (autoScroll) smartScrollToBottom(el);
 }
 
+// ─── Thread View ─────────────────────────────────────────────
+async function openThread(threadId) {
+  activeThread = threadId;
+  activeChannel = null;
+  activeThreadTab = 'messages';
+  closeSidebar();
+  renderChannels();
+  renderThreads();
+
+  const chatArea = document.getElementById('chat-area');
+  chatArea.innerHTML = `
+    <div id="thread-header-area"></div>
+    <div class="tab-bar">
+      <button class="tab active" onclick="switchThreadTab('messages')" id="tab-messages">Messages</button>
+      <button class="tab" onclick="switchThreadTab('artifacts')" id="tab-artifacts">Artifacts</button>
+    </div>
+    <div id="thread-content" style="flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;"></div>`;
+
+  await loadThreadDetail(threadId);
+  await loadThreadMessages(threadId);
+}
+
+async function loadThreadDetail(threadId) {
+  try {
+    threadDetail = await api(`/api/org/threads/${threadId}`);
+    renderThreadDetailHeader(threadDetail);
+  } catch (err) {
+    console.error('Failed to load thread detail:', err);
+  }
+}
+
+function renderThreadDetailHeader(detail) {
+  const headerArea = document.getElementById('thread-header-area');
+  if (!headerArea) return;
+
+  const icon = THREAD_TYPE_ICONS[detail.type] || '\u{1f4ac}';
+  const participants = (detail.participants || []).map(p => {
+    const name = p.display_name || p.name || (p.bot_id ? p.bot_id.slice(0, 8) : '?');
+    const online = p.online || (agents[p.bot_id] && agents[p.bot_id].online);
+    return `<span class="participant-chip"><span class="dot ${online ? 'green' : 'red'}"></span>${escapeHtml(name)}</span>`;
+  }).join('');
+
+  headerArea.innerHTML = `
+    <div class="thread-detail-header">
+      <div class="thread-detail-title">
+        <button class="menu-btn" onclick="toggleSidebar()">\u2630</button>
+        <span>${icon}</span>
+        <span class="topic">${escapeHtml(detail.topic)}</span>
+        <span class="status-badge ${detail.status}">${detail.status}</span>
+      </div>
+      <div class="thread-detail-participants">
+        ${participants}
+      </div>
+    </div>`;
+}
+
+async function loadThreadMessages(threadId) {
+  try {
+    threadMessages = await api(`/api/org/threads/${threadId}/messages?limit=100`);
+    renderThreadMessages();
+  } catch (err) {
+    console.error('Failed to load thread messages:', err);
+  }
+}
+
+function renderThreadMessages() {
+  const contentArea = document.getElementById('thread-content');
+  if (!contentArea) return;
+
+  contentArea.innerHTML = '<div id="thread-messages" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:4px;min-height:0;"></div>';
+  const el = document.getElementById('thread-messages');
+  setupScrollListener(el);
+
+  for (const msg of threadMessages) {
+    appendThreadMessage(msg, false);
+  }
+
+  el.scrollTop = el.scrollHeight;
+  userScrolledUp = false;
+}
+
+function appendThreadMessage(msg, autoScroll = true) {
+  const el = document.getElementById('thread-messages');
+  if (!el) return;
+
+  const time = new Date(msg.created_at).toLocaleTimeString();
+  const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? agents[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
+
+  const div = document.createElement('div');
+  div.className = 'message';
+
+  const parts = msg.parts || [{ type: 'text', content: msg.content }];
+  let partsHtml = '';
+  for (const part of parts) {
+    partsHtml += renderMessagePart(part);
+  }
+
+  div.innerHTML = `
+    <div class="meta">
+      <span class="name">${escapeHtml(senderName)}</span>
+      <span class="time">${time}</span>
+    </div>
+    ${partsHtml}`;
+
+  el.appendChild(div);
+  if (autoScroll) smartScrollToBottom(el);
+}
+
+function renderMessagePart(part) {
+  switch (part.type) {
+    case 'text':
+      return `<div class="content">${escapeHtml(part.content)}</div>`;
+    case 'markdown':
+      return `<div class="content">${escapeHtml(part.content)}</div>`;
+    case 'json':
+      try {
+        const formatted = JSON.stringify(typeof part.content === 'string' ? JSON.parse(part.content) : part.content, null, 2);
+        return `<div class="msg-part"><pre>${escapeHtml(formatted)}</pre></div>`;
+      } catch (e) {
+        return `<div class="content">${escapeHtml(String(part.content))}</div>`;
+      }
+    case 'file':
+      return `<div class="msg-part-file">\u{1f4ce} <a href="${escapeAttr(sanitizeUrl(part.url))}" target="_blank">${escapeHtml(part.name)}</a> <span style="color:var(--text-dim);font-size:10px">${escapeHtml(part.mime_type || '')}</span></div>`;
+    case 'image':
+      return `<div class="msg-part-image">\u{1f5bc}\u{fe0f} <a href="${escapeAttr(sanitizeUrl(part.url))}" target="_blank">${escapeHtml(part.alt || 'Image')}</a></div>`;
+    case 'link':
+      return `<div class="msg-part-link">\u{1f517} <a href="${escapeAttr(sanitizeUrl(part.url))}" target="_blank">${escapeHtml(part.title || part.url)}</a></div>`;
+    default:
+      return `<div class="content">${escapeHtml(String(part.content || ''))}</div>`;
+  }
+}
+
+async function loadThreadArtifacts(threadId) {
+  try {
+    threadArtifacts = await api(`/api/org/threads/${threadId}/artifacts`);
+    renderThreadArtifacts();
+  } catch (err) {
+    console.error('Failed to load artifacts:', err);
+  }
+}
+
+function renderThreadArtifacts() {
+  const contentArea = document.getElementById('thread-content');
+  if (!contentArea) return;
+
+  if (threadArtifacts.length === 0) {
+    contentArea.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:center;flex:1;color:var(--text-dim);font-size:13px;">
+        No artifacts in this thread
+      </div>`;
+    return;
+  }
+
+  contentArea.innerHTML = '<div class="artifacts-grid" id="artifacts-grid"></div>';
+  const grid = document.getElementById('artifacts-grid');
+  grid.innerHTML = threadArtifacts.map(a => renderArtifactCard(a)).join('');
+}
+
+function renderArtifactCard(artifact) {
+  const title = artifact.title || artifact.artifact_key;
+  const contributorName = artifact.contributor_id
+    ? (agents[artifact.contributor_id] ? agents[artifact.contributor_id].name : artifact.contributor_id.slice(0, 8))
+    : 'unknown';
+  const createdAt = new Date(artifact.created_at).toLocaleString();
+  const updatedAt = new Date(artifact.updated_at).toLocaleString();
+
+  let contentHtml = '';
+  switch (artifact.type) {
+    case 'code': {
+      const langLabel = artifact.language ? `<span class="lang-label">${escapeHtml(artifact.language)}</span>` : '';
+      contentHtml = `${langLabel}<pre>${escapeHtml(artifact.content || '')}</pre>`;
+      break;
+    }
+    case 'json':
+      try {
+        const formatted = JSON.stringify(JSON.parse(artifact.content || '{}'), null, 2);
+        contentHtml = `<pre>${escapeHtml(formatted)}</pre>`;
+      } catch (e) {
+        contentHtml = `<pre>${escapeHtml(artifact.content || '')}</pre>`;
+      }
+      break;
+    case 'markdown':
+    case 'text':
+      contentHtml = `<div style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(artifact.content || '')}</div>`;
+      break;
+    case 'file':
+      if (artifact.url) {
+        contentHtml = `<div>\u{1f4ce} <a href="${escapeAttr(sanitizeUrl(artifact.url))}" target="_blank">${escapeHtml(artifact.url)}</a></div>`;
+      }
+      if (artifact.content) {
+        contentHtml += `<div style="margin-top:8px;white-space:pre-wrap;">${escapeHtml(artifact.content)}</div>`;
+      }
+      break;
+    case 'link':
+      if (artifact.url) {
+        contentHtml = `<div>\u{1f517} <a href="${escapeAttr(sanitizeUrl(artifact.url))}" target="_blank">${escapeHtml(artifact.url)}</a></div>`;
+      }
+      if (artifact.content) {
+        contentHtml += `<div style="margin-top:8px;white-space:pre-wrap;">${escapeHtml(artifact.content)}</div>`;
+      }
+      break;
+    default:
+      contentHtml = `<div style="white-space:pre-wrap;">${escapeHtml(artifact.content || '')}</div>`;
+  }
+
+  return `
+    <div class="artifact-card">
+      <div class="artifact-card-header">
+        <span class="artifact-title">${escapeHtml(title)}</span>
+        <span class="artifact-type-badge">${artifact.type}</span>
+      </div>
+      <div class="artifact-card-meta">
+        <span>by ${escapeHtml(contributorName)}</span>
+        <span>v${artifact.version}</span>
+        <span>created ${createdAt}</span>
+        ${artifact.created_at !== artifact.updated_at ? `<span>updated ${updatedAt}</span>` : ''}
+        ${artifact.format_warning ? '<span style="color:var(--amber);">format warning</span>' : ''}
+      </div>
+      <div class="artifact-card-content">
+        ${contentHtml}
+      </div>
+    </div>`;
+}
+
+function switchThreadTab(tab) {
+  if (!activeThread) return;
+  activeThreadTab = tab;
+
+  const tabMessages = document.getElementById('tab-messages');
+  const tabArtifacts = document.getElementById('tab-artifacts');
+  if (tabMessages) tabMessages.className = tab === 'messages' ? 'tab active' : 'tab';
+  if (tabArtifacts) tabArtifacts.className = tab === 'artifacts' ? 'tab active' : 'tab';
+
+  if (tab === 'messages') {
+    renderThreadMessages();
+  } else if (tab === 'artifacts') {
+    loadThreadArtifacts(activeThread);
+  }
+}
+
+// ─── Delete Operations ───────────────────────────────────────
 async function deleteChannel(channelId, event) {
   event.stopPropagation();
   if (!confirm('Delete this channel and all its messages?')) return;
@@ -675,9 +1271,23 @@ function closeSidebar() {
 }
 
 function escapeHtml(str) {
+  if (str == null) return '';
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = String(str);
   return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function sanitizeUrl(str) {
+  if (!str) return '';
+  const s = String(str).trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^\/[^\/]/.test(s) || s === '/') return s; // relative path OK
+  return ''; // block javascript:, data:, vbscript:, etc.
 }
 </script>
 </body>
