@@ -355,6 +355,9 @@ export class HubDB {
       this.db.prepare('UPDATE orgs SET admin_secret = ? WHERE id = ?').run(secret, org.id);
       console.log(`  🔐 Generated admin_secret for org ${org.id}`);
     }
+
+    // Migration: hash any existing plaintext tokens (S4 security migration)
+    this.migrateHashTokens();
   }
 
   private migrateThreadForeignKeys() {
@@ -480,6 +483,43 @@ export class HubDB {
 
     this.db.pragma('foreign_keys = ON');
     console.log('  ✅ Files FK migration complete');
+  }
+
+  /**
+   * Migration: hash any existing plaintext agent tokens and scoped tokens.
+   * Plaintext tokens have a known prefix (agent_ or scoped_).
+   * SHA-256 hashes are 64-char hex strings with no such prefix.
+   * After this migration runs, all tokens in DB are SHA-256 hashes.
+   */
+  private migrateHashTokens() {
+    // Migrate agents.token
+    const agentRows = this.db.prepare(`SELECT id, token FROM agents`).all() as { id: string; token: string }[];
+    let agentMigrated = 0;
+    for (const row of agentRows) {
+      // Plaintext agent tokens start with "agent_"; hashes are 64-char hex
+      if (row.token.startsWith('agent_')) {
+        const hash = HubDB.hashToken(row.token);
+        this.db.prepare('UPDATE agents SET token = ? WHERE id = ?').run(hash, row.id);
+        agentMigrated++;
+      }
+    }
+    if (agentMigrated > 0) {
+      console.log(`  🔐 Hashed ${agentMigrated} plaintext agent token(s)`);
+    }
+
+    // Migrate agent_tokens.token
+    const scopedRows = this.db.prepare(`SELECT id, token FROM agent_tokens`).all() as { id: string; token: string }[];
+    let scopedMigrated = 0;
+    for (const row of scopedRows) {
+      if (row.token.startsWith('agent_') || row.token.startsWith('scoped_')) {
+        const hash = HubDB.hashToken(row.token);
+        this.db.prepare('UPDATE agent_tokens SET token = ? WHERE id = ?').run(hash, row.id);
+        scopedMigrated++;
+      }
+    }
+    if (scopedMigrated > 0) {
+      console.log(`  🔐 Hashed ${scopedMigrated} plaintext scoped token(s)`);
+    }
   }
 
   private rowToOrg(row: any): Org {
@@ -653,6 +693,16 @@ export class HubDB {
     return (this.db.prepare('SELECT * FROM orgs ORDER BY created_at').all() as any[]).map(r => this.rowToOrg(r));
   }
 
+  // ─── Token Hashing Utilities ─────────────────────────────
+
+  /**
+   * Hash a token with SHA-256 for secure storage.
+   * The plaintext token is never persisted in the DB.
+   */
+  static hashToken(token: string): string {
+    return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
+  }
+
   // ─── Agent Operations ────────────────────────────────────
 
   registerAgent(
@@ -663,7 +713,7 @@ export class HubDB {
     webhookUrl?: string | null,
     webhookSecret?: string | null,
     profile?: AgentProfileInput,
-  ): { agent: Agent; created: boolean } {
+  ): { agent: Agent; created: boolean; plaintextToken: string | null } {
     // Check if agent already exists → return existing token
     const existing = this.db.prepare(
       'SELECT * FROM agents WHERE org_id = ? AND name = ?'
@@ -752,15 +802,16 @@ export class HubDB {
       if (!updated) {
         throw new Error('Agent update failed');
       }
-      return { agent: updated, created: false };
+      return { agent: updated, created: false, plaintextToken: null };
     }
 
+    const plaintextToken = `agent_${crypto.randomBytes(24).toString('hex')}`;
     const agent: Agent = {
       id: crypto.randomUUID(),
       org_id: orgId,
       name,
       display_name: displayName ?? null,
-      token: `agent_${crypto.randomBytes(24).toString('hex')}`,
+      token: plaintextToken, // will be hashed before INSERT; caller receives plaintext
       metadata: metadata === undefined ? null : (metadata === null ? null : JSON.stringify(metadata)),
       webhook_url: webhookUrl ?? null,
       webhook_secret: webhookSecret ?? null,
@@ -781,6 +832,8 @@ export class HubDB {
       created_at: now,
     };
 
+    const tokenHash = HubDB.hashToken(agent.token);
+
     this.db.prepare(
       `INSERT INTO agents (
         id, org_id, name, display_name, token, metadata, webhook_url, webhook_secret,
@@ -792,7 +845,7 @@ export class HubDB {
       agent.org_id,
       agent.name,
       agent.display_name,
-      agent.token,
+      tokenHash, // Store hash, not plaintext
       agent.metadata,
       agent.webhook_url,
       agent.webhook_secret,
@@ -813,7 +866,7 @@ export class HubDB {
       agent.created_at,
     );
 
-    return { agent, created: true };
+    return { agent, created: true, plaintextToken };
   }
 
   updateProfile(agentId: string, fields: AgentProfileInput): Agent | undefined {
@@ -881,7 +934,8 @@ export class HubDB {
   }
 
   getAgentByToken(token: string): Agent | undefined {
-    const row = this.db.prepare('SELECT * FROM agents WHERE token = ?').get(token) as any;
+    const tokenHash = HubDB.hashToken(token);
+    const row = this.db.prepare('SELECT * FROM agents WHERE token = ?').get(tokenHash) as any;
     if (!row) return undefined;
     return this.rowToAgent(row);
   }
@@ -986,10 +1040,11 @@ export class HubDB {
   // ─── Agent Token Operations (Scoped Tokens) ─────────────
 
   createAgentToken(agentId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): AgentToken {
+    const plaintextToken = `scoped_${crypto.randomBytes(24).toString('hex')}`;
     const token: AgentToken = {
       id: crypto.randomUUID(),
       agent_id: agentId,
-      token: `scoped_${crypto.randomBytes(24).toString('hex')}`,
+      token: plaintextToken, // returned to caller; stored as hash
       scopes,
       label: label ?? null,
       expires_at: expiresAt ?? null,
@@ -997,13 +1052,15 @@ export class HubDB {
       last_used_at: null,
     };
 
+    const tokenHash = HubDB.hashToken(plaintextToken);
+
     this.db.prepare(`
       INSERT INTO agent_tokens (id, agent_id, token, scopes, label, expires_at, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       token.id,
       token.agent_id,
-      token.token,
+      tokenHash, // Store hash, not plaintext
       JSON.stringify(token.scopes),
       token.label,
       token.expires_at,
@@ -1011,11 +1068,13 @@ export class HubDB {
       token.last_used_at,
     );
 
+    // Return with plaintext token so caller can return it once
     return token;
   }
 
   getAgentTokenByToken(token: string): AgentToken | undefined {
-    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token = ?').get(token) as any;
+    const tokenHash = HubDB.hashToken(token);
+    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token = ?').get(tokenHash) as any;
     if (!row) return undefined;
     return this.rowToAgentToken(row);
   }

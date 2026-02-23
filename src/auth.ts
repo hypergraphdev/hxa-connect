@@ -14,6 +14,8 @@ declare global {
       tokenScopes?: TokenScope[];
       /** ID of the scoped token used (null if primary agent token or org key). */
       scopedTokenId?: string;
+      /** The raw plaintext token from the request (for ws-ticket exchange). */
+      rawToken?: string;
     }
   }
 }
@@ -41,6 +43,9 @@ export function authMiddleware(db: HubDB) {
       res.status(401).json({ error: 'Missing authentication token' });
       return;
     }
+
+    // Store raw token for downstream handlers (e.g. ws-ticket exchange)
+    req.rawToken = token;
 
     // Try primary agent token first
     const agent = db.getAgentByToken(token);

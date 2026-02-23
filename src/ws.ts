@@ -4,12 +4,15 @@ import type { HubDB } from './db.js';
 import type { WebhookManager } from './webhook.js';
 import { validateParts, type HubConfig, type Message, type MessagePart, type WireMessage, type WsServerEvent } from './types.js';
 import { URL } from 'node:url';
+import { redeemWsTicket } from './ws-tickets.js';
 
 interface WsClient {
   ws: WebSocket;
   agentId?: string;
   orgId: string;
   isOrgAdmin: boolean; // org-level viewer (web UI)
+  /** Scopes granted to this WS connection. null means full access (primary agent token or org key). */
+  scopes: import('./types.js').TokenScope[] | null;
 }
 
 export class HubWS {
@@ -27,14 +30,29 @@ export class HubWS {
 
     this.wss.on('connection', (ws, req) => {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      const token = url.searchParams.get('token');
+      const ticketParam = url.searchParams.get('ticket');
+      const tokenParam = url.searchParams.get('token');
 
-      if (!token) {
-        ws.close(4001, 'Missing token');
+      let token: string | null = null;
+
+      if (ticketParam) {
+        // Preferred: one-time ticket exchange
+        const ticket = redeemWsTicket(ticketParam);
+        if (!ticket) {
+          ws.close(4001, 'Invalid or expired ticket');
+          return;
+        }
+        token = ticket.token;
+      } else if (tokenParam) {
+        // Backward compat: direct token in URL (deprecated — logs a warning)
+        console.warn('[WS] Deprecation warning: WS connection using ?token= in URL. Use POST /api/ws-ticket to exchange a token for a short-lived ?ticket= instead.');
+        token = tokenParam;
+      } else {
+        ws.close(4001, 'Missing token or ticket');
         return;
       }
 
-      // Authenticate as agent
+      // Authenticate as agent via primary token
       const agent = db.getAgentByToken(token);
       if (agent) {
         const client: WsClient = {
@@ -42,6 +60,7 @@ export class HubWS {
           agentId: agent.id,
           orgId: agent.org_id,
           isOrgAdmin: false,
+          scopes: null, // primary token = full access
         };
         this.clients.add(client);
         db.setAgentOnline(agent.id, true);
@@ -59,6 +78,44 @@ export class HubWS {
         return;
       }
 
+      // Authenticate via scoped token (agent_tokens table)
+      const scopedToken = db.getAgentTokenByToken(token);
+      if (scopedToken) {
+        // Check expiration
+        if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
+          ws.close(4001, 'Token expired');
+          return;
+        }
+        const scopedAgent = db.getAgentById(scopedToken.agent_id);
+        if (scopedAgent) {
+          const client: WsClient = {
+            ws,
+            agentId: scopedAgent.id,
+            orgId: scopedAgent.org_id,
+            isOrgAdmin: false,
+            scopes: scopedToken.scopes, // scoped token = restricted access
+          };
+          this.clients.add(client);
+          db.setAgentOnline(scopedAgent.id, true);
+          db.touchAgentToken(scopedToken.id);
+
+          // Reset degraded webhook status on reconnect
+          db.resetWebhookDegraded(scopedAgent.id);
+
+          // Broadcast online status
+          this.broadcastToOrg(scopedAgent.org_id, {
+            type: 'agent_online',
+            agent: { id: scopedAgent.id, name: scopedAgent.name, display_name: scopedAgent.display_name },
+          }, scopedAgent.id);
+
+          this.setupHandlers(client);
+          return;
+        }
+        // Scoped token references an unknown agent — reject explicitly
+        ws.close(4001, 'Token references unknown agent');
+        return;
+      }
+
       // Try org key + org admin secret (for web UI / human admins)
       const org = db.getOrgByKey(token);
       if (org) {
@@ -73,6 +130,7 @@ export class HubWS {
           ws,
           orgId: org.id,
           isOrgAdmin: true,
+          scopes: null, // org admin = full access
         };
         this.clients.add(client);
         this.setupHandlers(client);
@@ -81,6 +139,16 @@ export class HubWS {
 
       ws.close(4001, 'Invalid token');
     });
+  }
+
+  /**
+   * Check whether a client's scoped token grants the required scope.
+   * Clients with null scopes (primary token or org key) always pass.
+   * 'full' scope implies all other scopes.
+   */
+  private clientHasScope(client: WsClient, required: import('./types.js').TokenScope): boolean {
+    if (client.scopes === null) return true; // full access
+    return client.scopes.includes('full') || client.scopes.includes(required);
   }
 
   private setupHandlers(client: WsClient) {
@@ -94,6 +162,12 @@ export class HubWS {
         }
 
         if (data.type === 'send' && client.agentId) {
+          // Scope check: sending messages requires 'message' scope
+          if (!this.clientHasScope(client, 'message')) {
+            this.send(client, { type: 'error', message: 'Insufficient token scope: message scope required to send messages' });
+            return;
+          }
+
           // Validate channel membership
           if (!this.db.isChannelMember(data.channel_id, client.agentId)) {
             this.send(client, { type: 'error', message: 'Not a member of this channel' });

@@ -7,6 +7,7 @@ import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
+import { issueWsTicket } from './ws-tickets.js';
 
 // S6: Per-field size limits (bytes)
 const FIELD_LIMITS = {
@@ -345,7 +346,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       runtime,
     };
 
-    const { agent, created } = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
+    const { agent, created, plaintextToken } = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
 
     // Audit
     db.recordAudit(req.org!.id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name, reregister: !created });
@@ -360,9 +361,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       agent_id: agent.id,
       ...toAgentResponse(agent),
     };
-    // Only include token for first-time registration (S13: atomic check prevents TOCTOU)
-    if (created) {
-      response.token = agent.token;
+    // Only include token on initial registration (S13: atomic check + S4: plaintext only at creation)
+    if (created && plaintextToken !== null) {
+      response.token = plaintextToken;
     }
     res.json(response);
   });
@@ -2236,6 +2237,33 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     db.recordAudit(req.org!.id, null, 'settings.update', 'org_settings', req.org!.id, updates);
 
     res.json(settings);
+  });
+
+  // ─── WS Ticket Exchange ──────────────────────────────────
+
+  /**
+   * POST /api/ws-ticket — Exchange a Bearer token for a one-time WS connection ticket
+   * Auth: Bearer token (agent token, scoped token, or org key)
+   * Returns: { ticket: string, expires_in: number } — ticket is valid for 30s and single-use
+   *
+   * The ticket should be passed as ?ticket=xxx when opening a WS connection.
+   * This avoids leaking the token in server logs via the URL query param.
+   */
+  auth.post('/api/ws-ticket', (req, res) => {
+    // Use the raw token stored by authMiddleware (works for both Bearer header and ?token= query param)
+    const token = req.rawToken;
+
+    if (!token) {
+      res.status(401).json({ error: 'Authentication token required for ticket exchange' });
+      return;
+    }
+
+    const ticketId = issueWsTicket(token);
+
+    res.json({
+      ticket: ticketId,
+      expires_in: 30,
+    });
   });
 
   // ─── Audit Log (Admin) ───────────────────────────────────
