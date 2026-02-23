@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { URL } from 'node:url';
 import type { HubDB } from './db.js';
+import { webhookLogger } from './logger.js';
 
 /**
  * Compute HMAC-SHA256 signature for a webhook payload.
@@ -121,14 +122,14 @@ export class WebhookManager {
     try {
       parsed = new URL(webhookUrl);
     } catch {
-      console.log(`  \u274c Webhook ${agentId}: invalid URL at delivery time`);
+      webhookLogger.warn({ agentId }, 'Invalid webhook URL at delivery time');
       return false;
     }
     const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
     try {
       const { address } = await lookup(hostname);
       if (isPrivateIP(address)) {
-        console.log(`  \u274c Webhook ${agentId}: blocked — resolved to private IP at delivery time`);
+        webhookLogger.warn({ agentId }, 'Blocked webhook — resolved to private IP at delivery time');
         return false;
       }
     } catch {
@@ -169,15 +170,15 @@ export class WebhookManager {
           return true;
         }
 
-        console.log(`  \u26a0\ufe0f Webhook ${agentId} attempt ${attempt + 1}: ${res.status}`);
+        webhookLogger.warn({ agentId, attempt: attempt + 1, status: res.status }, 'Webhook delivery attempt failed');
       } catch (err: any) {
-        console.log(`  \u26a0\ufe0f Webhook ${agentId} attempt ${attempt + 1}: ${err.message}`);
+        webhookLogger.warn({ agentId, attempt: attempt + 1, err: err.message }, 'Webhook delivery attempt error');
       }
     }
 
     // All retries failed
     this.db.recordWebhookFailure(agentId);
-    console.log(`  \u274c Webhook ${agentId}: all retries failed`);
+    webhookLogger.error({ agentId }, 'Webhook delivery failed after all retries');
     return false;
   }
 }

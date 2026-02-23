@@ -9,6 +9,7 @@ import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
 import { DEFAULT_CONFIG, type HubConfig } from './types.js';
+import { logger, generateRequestId } from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,7 +54,7 @@ function loadConfig(): HubConfig {
 
 function main() {
   const config = loadConfig();
-  const isDev = process.env.NODE_ENV === 'development';
+  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
 
   // S1: BOTSHUB_ADMIN_SECRET is required in non-dev environments
   if (!config.admin_secret && !isDev) {
@@ -88,6 +89,12 @@ function main() {
   }));
   app.use(express.json({ limit: '1mb' }));
 
+  // Request ID correlation
+  app.use((req, _res, next) => {
+    req.requestId = (req.headers['x-request-id'] as string) || generateRequestId();
+    next();
+  });
+
   // Serve web UI (resolve to project root /web, not /src or /dist)
   const webDir = path.resolve(__dirname, '..', 'web');
   app.use(express.static(webDir));
@@ -100,12 +107,28 @@ function main() {
 
   // JSON 404 for unmatched API routes (must come before SPA catch-all)
   app.all('/api/*', (_req, res) => {
-    res.status(404).json({ error: 'Not found' });
+    res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
   });
 
   // Fallback: serve index.html for SPA routing (non-API paths only)
   app.get('*', (_req, res) => {
     res.sendFile(path.join(webDir, 'index.html'));
+  });
+
+  // O4: Global error handler — must be 4-arity to be recognized by Express
+  app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error({ err, requestId: req.requestId, method: req.method, path: req.path }, 'Unhandled error');
+
+    // Never return HTML — always JSON
+    const status = (err as any).status || (err as any).statusCode || 500;
+    const response: { error: string; code: string; stack?: string } = {
+      error: isDev ? err.message : 'Internal server error',
+      code: 'INTERNAL_ERROR',
+    };
+    if (isDev && err.stack) {
+      response.stack = err.stack;
+    }
+    res.status(status).json(response);
   });
 
   // Start server
@@ -123,14 +146,14 @@ function main() {
     try {
       db.runLifecycleCleanup();
     } catch (err) {
-      console.error('Lifecycle cleanup error:', err);
+      logger.error({ err }, 'Lifecycle cleanup error');
     }
   }, 6 * 60 * 60 * 1000);
 
   // Run once on startup after a delay
   setTimeout(() => {
     try { db.runLifecycleCleanup(); } catch (err) {
-      console.error('Startup lifecycle cleanup error:', err);
+      logger.error({ err }, 'Startup lifecycle cleanup error');
     }
   }, 30000);
 

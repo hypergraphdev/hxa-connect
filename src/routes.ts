@@ -9,6 +9,7 @@ import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.j
 import { validateWebhookUrl } from './webhook.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
+// routeLogger available for future use: import { routeLogger } from './logger.js';
 
 // S6: Per-field size limits (bytes)
 const FIELD_LIMITS = {
@@ -148,13 +149,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
     if (!token) {
-      res.status(401).json({ error: 'Admin authentication required' });
+      res.status(401).json({ error: 'Admin authentication required', code: 'AUTH_REQUIRED' });
       return false;
     }
     const expected = Buffer.from(config.admin_secret, 'utf8');
     const actual = Buffer.from(token, 'utf8');
     if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
-      res.status(401).json({ error: 'Admin authentication required' });
+      res.status(401).json({ error: 'Admin authentication required', code: 'AUTH_REQUIRED' });
       return false;
     }
     return true;
@@ -163,18 +164,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   function requireOrgOrAgent(req: import('express').Request, res: import('express').Response): string | undefined {
     if (req.agent) return req.agent.org_id;
     if (req.org) return req.org.id;
-    res.status(403).json({ error: 'Authentication required' });
+    res.status(403).json({ error: 'Authentication required', code: 'FORBIDDEN' });
     return undefined;
   }
 
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
     if (!req.org || req.authType !== 'org') {
-      res.status(403).json({ error: 'Organization authentication required' });
+      res.status(403).json({ error: 'Organization authentication required', code: 'FORBIDDEN' });
       return false;
     }
     const adminSecret = req.headers['x-admin-secret'] as string;
     if (!adminSecret || !db.verifyOrgAdminSecret(req.org.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required' });
+      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
       return false;
     }
     return true;
@@ -186,6 +187,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!result.allowed) {
       res.status(429).set('Retry-After', String(result.retryAfter)).json({
         error: 'Rate limit exceeded: messages per minute',
+        code: 'RATE_LIMITED',
         retry_after: result.retryAfter,
       });
       return false;
@@ -199,6 +201,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!result.allowed) {
       res.status(429).set('Retry-After', String(result.retryAfter)).json({
         error: 'Rate limit exceeded: threads per hour',
+        code: 'RATE_LIMITED',
         retry_after: result.retryAfter,
       });
       return false;
@@ -221,15 +224,24 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     req: import('express').Request,
     res: import('express').Response,
     threadId: string,
+    opts?: { rejectTerminal?: boolean },
   ): Thread | undefined {
     const thread = db.getThread(threadId);
     if (!thread) {
-      res.status(404).json({ error: 'Thread not found' });
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return undefined;
+    }
+
+    // O9: Check terminal state BEFORE participant membership so that
+    // non-participants get "thread is closed" rather than "not a participant"
+    // when the thread is in a terminal state.
+    if (opts?.rejectTerminal && (thread.status === 'resolved' || thread.status === 'closed')) {
+      res.status(409).json({ error: `Thread is ${thread.status}; operation not allowed`, code: 'THREAD_CLOSED' });
       return undefined;
     }
 
     if (!req.agent || !db.isParticipant(thread.id, req.agent.id)) {
-      res.status(403).json({ error: 'Not a participant of this thread' });
+      res.status(403).json({ error: 'Not a participant of this thread', code: 'FORBIDDEN' });
       return undefined;
     }
 
@@ -250,7 +262,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!requireAdmin(req, res)) return;
     const { name, persist_messages } = req.body;
     if (!name) {
-      res.status(400).json({ error: 'name is required' });
+      res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
       return;
     }
     const org = db.createOrg(name, persist_messages ?? config.default_persist);
@@ -301,12 +313,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     } = req.body;
 
     if (!name) {
-      res.status(400).json({ error: 'name is required' });
+      res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
       return;
     }
 
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)' });
+      res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -398,13 +410,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Require org admin secret
     const adminSecret = req.headers['x-admin-secret'] as string;
     if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required' });
+      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
       return;
     }
 
     const agent = db.getAgentById(req.params.id as string);
     if (!agent || agent.org_id !== req.org!.id) {
-      res.status(404).json({ error: 'Agent not found' });
+      res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -485,7 +497,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     };
 
     if (Object.values(fields).every(v => v === undefined)) {
-      res.status(400).json({ error: 'No profile fields provided' });
+      res.status(400).json({ error: 'No profile fields provided', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -517,7 +529,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const updated = db.updateProfile(req.agent!.id, fields);
     if (!updated) {
-      res.status(404).json({ error: 'Agent not found' });
+      res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -608,7 +620,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.delete('/api/me/tokens/:id', requireAgent, requireScope('full'), (req, res) => {
     const deleted = db.revokeAgentToken(req.params.id as string, req.agent!.id);
     if (!deleted) {
-      res.status(404).json({ error: 'Token not found' });
+      res.status(404).json({ error: 'Token not found', code: 'NOT_FOUND' });
       return;
     }
     db.recordAudit(req.agent!.org_id, req.agent!.id, 'bot.token_revoke', 'token', req.params.id as string);
@@ -644,7 +656,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const bot = db.getAgentByName(orgId, req.params.name as string);
     if (!bot) {
-      res.status(404).json({ error: 'Bot not found' });
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -674,7 +686,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const bot = db.getAgentByName(orgId, req.params.name as string);
     if (!bot) {
-      res.status(404).json({ error: 'Bot not found' });
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -738,7 +750,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     } else if (req.org) {
       res.json(db.listChannelsForOrg(req.org.id));
     } else {
-      res.status(403).json({ error: 'Authentication required' });
+      res.status(403).json({ error: 'Authentication required', code: 'FORBIDDEN' });
     }
   });
 
@@ -748,17 +760,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.get('/api/channels/:id', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
-      res.status(404).json({ error: 'Channel not found' });
+      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
     }
 
     // Check access
     if (req.agent && !db.isChannelMember(channel.id, req.agent.id)) {
-      res.status(403).json({ error: 'Not a member of this channel' });
+      res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
     if (req.org && channel.org_id !== req.org.id) {
-      res.status(403).json({ error: 'Channel not in your org' });
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
       return;
     }
 
@@ -781,11 +793,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.post('/api/channels/:id/join', requireAgent, requireScope('message'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel || channel.type !== 'group') {
-      res.status(404).json({ error: 'Group channel not found' });
+      res.status(404).json({ error: 'Group channel not found', code: 'NOT_FOUND' });
       return;
     }
     if (channel.org_id !== req.agent!.org_id) {
-      res.status(403).json({ error: 'Channel not in your org' });
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
       return;
     }
     db.addChannelMember(channel.id, req.agent!.id);
@@ -799,13 +811,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.delete('/api/channels/:id', requireOrg, (req, res) => {
     const adminSecret = req.headers['x-admin-secret'] as string;
     if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required' });
+      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
       return;
     }
 
     const channel = db.getChannel(req.params.id as string);
     if (!channel || channel.org_id !== req.org!.id) {
-      res.status(404).json({ error: 'Channel not found' });
+      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -856,7 +868,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const thread = db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== req.org!.id) {
-      res.status(404).json({ error: 'Thread not found' });
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -886,7 +898,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const thread = db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== req.org!.id) {
-      res.status(404).json({ error: 'Thread not found' });
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -918,7 +930,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const thread = db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== req.org!.id) {
-      res.status(404).json({ error: 'Thread not found' });
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -938,7 +950,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const orgId = req.agent!.org_id;
 
     if (!topic || typeof topic !== 'string') {
-      res.status(400).json({ error: 'topic is required' });
+      res.status(400).json({ error: 'topic is required', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -1140,13 +1152,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const { status: statusInput, close_reason, context, topic, permission_policy: permPolicyInput } = req.body;
     if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined && permPolicyInput === undefined) {
-      res.status(400).json({ error: 'No updatable fields provided' });
+      res.status(400).json({ error: 'No updatable fields provided', code: 'VALIDATION_ERROR' });
       return;
     }
 
     // Only the thread initiator can change permission_policy
     if (permPolicyInput !== undefined && thread.initiator_id !== req.agent!.id) {
-      res.status(403).json({ error: 'Only the thread initiator can change permission_policy' });
+      res.status(403).json({ error: 'Only the thread initiator can change permission_policy', code: 'FORBIDDEN' });
       return;
     }
 
@@ -1177,7 +1189,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Block all mutations on terminal threads (status transitions handled separately in updateThreadStatus)
     if ((thread.status === 'resolved' || thread.status === 'closed') && statusInput === undefined) {
-      res.status(409).json({ error: 'Thread is in terminal state; no updates allowed' });
+      res.status(409).json({ error: 'Thread is in terminal state; no updates allowed', code: 'THREAD_CLOSED' });
       return;
     }
 
@@ -1241,6 +1253,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         });
         res.status(403).json({
           error: `Permission denied: your label does not allow '${policyAction}' on this thread`,
+          code: 'FORBIDDEN',
         });
         return;
       }
@@ -1258,7 +1271,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         updated = db.updateThreadStatus(thread.id, status, closeReason, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
-          res.status(404).json({ error: 'Thread not found' });
+          res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
           return;
         }
         changes.push('status');
@@ -1289,7 +1302,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         updated = db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
-          res.status(404).json({ error: 'Thread not found' });
+          res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
           return;
         }
         changes.push('context');
@@ -1299,7 +1312,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         updated = db.updateThreadTopic(thread.id, topic.trim(), revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
-          res.status(404).json({ error: 'Thread not found' });
+          res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
           return;
         }
         changes.push('topic');
@@ -1309,14 +1322,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         updated = db.updateThreadPermissionPolicy(thread.id, permPolicyJson, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
-          res.status(404).json({ error: 'Thread not found' });
+          res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
           return;
         }
         changes.push('permission_policy');
       }
     } catch (error: any) {
       if (error.message === 'REVISION_CONFLICT') {
-        res.status(409).json({ error: 'Conflict: thread was modified concurrently' });
+        res.status(409).json({ error: 'Conflict: thread was modified concurrently', code: 'REVISION_CONFLICT' });
         return;
       }
       res.status(400).json({ error: error.message || 'Failed to update thread' });
@@ -1338,17 +1351,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { bot_id, label? }
    */
   auth.post('/api/threads/:id/participants', requireAgent, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
-
-    if (thread.status === 'resolved' || thread.status === 'closed') {
-      res.status(409).json({ error: 'Thread is in terminal state; no participant changes allowed' });
-      return;
-    }
 
     // Permission policy check for invite
     if (!db.checkThreadPermission(thread, req.agent!.id, 'invite')) {
-      res.status(403).json({ error: 'Permission denied: your label does not allow inviting participants' });
+      res.status(403).json({ error: 'Permission denied: your label does not allow inviting participants', code: 'FORBIDDEN' });
       return;
     }
 
@@ -1415,13 +1423,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * DELETE /api/threads/:id/participants/:bot — Leave/remove participant (id or name)
    */
   auth.delete('/api/threads/:id/participants/:bot', requireAgent, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
-
-    if (thread.status === 'resolved' || thread.status === 'closed') {
-      res.status(409).json({ error: 'Thread is in terminal state; no participant changes allowed' });
-      return;
-    }
 
     const target = resolveAgent(thread.org_id, req.params.bot as string);
     if (!target) {
@@ -1431,12 +1434,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Permission policy check for remove (skip if leaving self)
     if (target.id !== req.agent!.id && !db.checkThreadPermission(thread, req.agent!.id, 'remove')) {
-      res.status(403).json({ error: 'Permission denied: your label does not allow removing participants' });
+      res.status(403).json({ error: 'Permission denied: your label does not allow removing participants', code: 'FORBIDDEN' });
       return;
     }
 
     if (!db.isParticipant(thread.id, target.id)) {
-      res.status(404).json({ error: 'Bot is not a participant in this thread' });
+      res.status(404).json({ error: 'Bot is not a participant in this thread', code: 'NOT_FOUND' });
       return;
     }
 
@@ -1482,13 +1485,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.post('/api/threads/:id/messages', requireAgent, requireScope('thread'), (req, res) => {
     if (!checkMessageRateLimit(req, res)) return;
 
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
-
-    if (thread.status === 'resolved' || thread.status === 'closed') {
-      res.status(409).json({ error: 'Thread is in terminal state; no new messages allowed' });
-      return;
-    }
 
     const { content, content_type, metadata, parts } = req.body;
 
@@ -1512,7 +1510,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Resolve content: explicit content, or auto-generate from parts
     const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
     if (!resolvedContent || typeof resolvedContent !== 'string') {
-      res.status(400).json({ error: 'content or parts is required' });
+      res.status(400).json({ error: 'content or parts is required', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -1608,13 +1606,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Use PATCH to update existing artifacts with new versions.
    */
   auth.post('/api/threads/:id/artifacts', requireAgent, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
-
-    if (thread.status === 'resolved' || thread.status === 'closed') {
-      res.status(409).json({ error: 'Thread is in terminal state; no new artifacts allowed' });
-      return;
-    }
 
     const {
       artifact_key,
@@ -1713,13 +1706,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * PATCH /api/threads/:id/artifacts/:key — Update artifact (new version)
    */
   auth.patch('/api/threads/:id/artifacts/:key', requireAgent, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
-
-    if (thread.status === 'resolved' || thread.status === 'closed') {
-      res.status(409).json({ error: 'Thread is in terminal state; no artifact updates allowed' });
-      return;
-    }
 
     const key = req.params.key as string;
     if (!key || !ARTIFACT_KEY_PATTERN.test(key)) {
@@ -1747,7 +1735,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       );
 
       if (!artifact) {
-        res.status(404).json({ error: 'Artifact not found' });
+        res.status(404).json({ error: 'Artifact not found', code: 'NOT_FOUND' });
         return;
       }
 
@@ -1819,12 +1807,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
-      res.status(404).json({ error: 'Channel not found' });
+      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
     }
 
     if (!db.isChannelMember(channel.id, req.agent!.id)) {
-      res.status(403).json({ error: 'Not a member of this channel' });
+      res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
 
@@ -1850,7 +1838,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Resolve content: explicit content, or auto-generate from parts
     const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
     if (!resolvedContent) {
-      res.status(400).json({ error: 'content or parts is required' });
+      res.status(400).json({ error: 'content or parts is required', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -1889,17 +1877,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.get('/api/channels/:id/messages', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
     if (!channel) {
-      res.status(404).json({ error: 'Channel not found' });
+      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
     }
 
     // Check access
     if (req.agent && !db.isChannelMember(channel.id, req.agent.id)) {
-      res.status(403).json({ error: 'Not a member of this channel' });
+      res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
     if (req.org && channel.org_id !== req.org.id) {
-      res.status(403).json({ error: 'Channel not in your org' });
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
       return;
     }
 
@@ -2100,7 +2088,25 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: agent token
    * Returns: { id, name, mime_type, size, url, created_at }
    */
-  auth.post('/api/files/upload', requireAgent, requireScope('message'), upload.single('file'), (req, res) => {
+  auth.post('/api/files/upload', requireAgent, requireScope('message'), (req, res, next) => {
+    // O5: Wrap multer middleware to catch MulterError and return JSON
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        if (err instanceof multer.MulterError) {
+          if (err.code === 'LIMIT_FILE_SIZE') {
+            res.status(413).json({ error: `File too large (max ${config.max_file_size_mb}MB)`, code: 'FILE_TOO_LARGE' });
+            return;
+          }
+          res.status(400).json({ error: err.message, code: 'UPLOAD_ERROR' });
+          return;
+        }
+        // Non-multer error (e.g. disk failure)
+        next(err);
+        return;
+      }
+      next();
+    });
+  }, (req, res) => {
     const file = req.file;
     if (!file) {
       res.status(400).json({ error: 'No file provided (field name must be "file")' });
@@ -2128,6 +2134,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       const usedMb = Math.round(result.dailyBytes / 1024 / 1024);
       res.status(429).json({
         error: `Daily upload quota exceeded (${usedMb}MB / ${config.file_upload_mb_per_day}MB used today)`,
+        code: 'RATE_LIMITED',
       });
       return;
     }
@@ -2162,23 +2169,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const record = db.getFile(req.params.id as string);
     if (!record) {
-      res.status(404).json({ error: 'File not found' });
+      res.status(404).json({ error: 'File not found', code: 'NOT_FOUND' });
       return;
     }
 
     if (record.org_id !== orgId) {
-      res.status(403).json({ error: 'Access denied' });
+      res.status(403).json({ error: 'Access denied', code: 'FORBIDDEN' });
       return;
     }
 
     const diskPath = path.resolve(config.data_dir, record.path);
     // Path traversal guard: ensure resolved path stays inside data_dir
     if (!diskPath.startsWith(path.resolve(config.data_dir) + path.sep)) {
-      res.status(403).json({ error: 'Access denied' });
+      res.status(403).json({ error: 'Access denied', code: 'FORBIDDEN' });
       return;
     }
     if (!fs.existsSync(diskPath)) {
-      res.status(404).json({ error: 'File not found on disk' });
+      res.status(404).json({ error: 'File not found on disk', code: 'NOT_FOUND' });
       return;
     }
 
@@ -2201,12 +2208,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const record = db.getFileInfo(req.params.id as string);
     if (!record) {
-      res.status(404).json({ error: 'File not found' });
+      res.status(404).json({ error: 'File not found', code: 'NOT_FOUND' });
       return;
     }
 
     if (record.org_id !== orgId) {
-      res.status(403).json({ error: 'Access denied' });
+      res.status(403).json({ error: 'Access denied', code: 'FORBIDDEN' });
       return;
     }
 
@@ -2301,7 +2308,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (default_thread_permission_policy !== undefined) updates.default_thread_permission_policy = default_thread_permission_policy;
 
     if (Object.keys(updates).length === 0) {
-      res.status(400).json({ error: 'No settings fields provided' });
+      res.status(400).json({ error: 'No settings fields provided', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -2328,7 +2335,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const token = req.rawToken;
 
     if (!token) {
-      res.status(401).json({ error: 'Authentication token required for ticket exchange' });
+      res.status(401).json({ error: 'Authentication token required for ticket exchange', code: 'AUTH_REQUIRED' });
       return;
     }
 

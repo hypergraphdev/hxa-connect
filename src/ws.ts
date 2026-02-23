@@ -5,6 +5,7 @@ import type { WebhookManager } from './webhook.js';
 import { validateParts, type HubConfig, type Message, type MessagePart, type WireMessage, type WsServerEvent } from './types.js';
 import { URL } from 'node:url';
 import { redeemWsTicket } from './ws-tickets.js';
+import { wsLogger } from './logger.js';
 
 interface WsClient {
   ws: WebSocket;
@@ -45,7 +46,7 @@ export class HubWS {
         token = ticket.token;
       } else if (tokenParam) {
         // Backward compat: direct token in URL (deprecated — logs a warning)
-        console.warn('[WS] Deprecation warning: WS connection using ?token= in URL. Use POST /api/ws-ticket to exchange a token for a short-lived ?ticket= instead.');
+        wsLogger.warn('Deprecation: WS connection using ?token= in URL. Use POST /api/ws-ticket instead.');
         token = tokenParam;
       } else {
         ws.close(4001, 'Missing token or ticket');
@@ -299,7 +300,7 @@ export class HubWS {
       if (agentId === message.sender_id) continue;
       const agent = this.db.getAgentById(agentId);
       if (agent?.webhook_url) {
-        console.log(`  \ud83d\udce4 Webhook \u2192 ${agent.name} (${agent.webhook_url})`);
+        wsLogger.info({ agentName: agent.name }, 'Webhook dispatch for channel message');
         // Fire-and-forget — retries happen in background
         void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
       }
@@ -376,7 +377,7 @@ export class HubWS {
       const agent = this.db.getAgentById(agentId);
       if (!agent?.webhook_url) continue;
 
-      console.log(`  \ud83d\udce4 Thread webhook \u2192 ${agent.name} (${agent.webhook_url})`);
+      wsLogger.info({ agentName: agent.name }, 'Webhook dispatch for thread event');
       // Fire-and-forget — retries happen in background
       void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
     }

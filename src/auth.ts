@@ -16,6 +16,8 @@ declare global {
       scopedTokenId?: string;
       /** The raw plaintext token from the request (for ws-ticket exchange). */
       rawToken?: string;
+      /** Unique request ID for log correlation. */
+      requestId?: string;
     }
   }
 }
@@ -40,7 +42,7 @@ export function authMiddleware(db: HubDB) {
     const token = extractToken(req);
 
     if (!token) {
-      res.status(401).json({ error: 'Missing authentication token' });
+      res.status(401).json({ error: 'Missing authentication token', code: 'AUTH_REQUIRED' });
       return;
     }
 
@@ -65,7 +67,7 @@ export function authMiddleware(db: HubDB) {
     if (scopedToken) {
       // Check expiration
       if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
-        res.status(401).json({ error: 'Token expired' });
+        res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
         return;
       }
       const scopedAgent = db.getAgentById(scopedToken.agent_id);
@@ -92,7 +94,7 @@ export function authMiddleware(db: HubDB) {
       return;
     }
 
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
   };
 }
 
@@ -101,7 +103,7 @@ export function authMiddleware(db: HubDB) {
  */
 export function requireAgent(req: Request, res: Response, next: NextFunction) {
   if (!req.agent) {
-    res.status(403).json({ error: 'Agent authentication required' });
+    res.status(403).json({ error: 'Agent authentication required', code: 'FORBIDDEN' });
     return;
   }
   next();
@@ -112,7 +114,7 @@ export function requireAgent(req: Request, res: Response, next: NextFunction) {
  */
 export function requireOrg(req: Request, res: Response, next: NextFunction) {
   if (!req.org || req.authType !== 'org') {
-    res.status(403).json({ error: 'Organization authentication required' });
+    res.status(403).json({ error: 'Organization authentication required', code: 'FORBIDDEN' });
     return;
   }
   next();
@@ -135,6 +137,7 @@ export function requireScope(operation: keyof typeof SCOPE_REQUIREMENTS) {
     if (!hasScope) {
       res.status(403).json({
         error: `Insufficient token scope. Required: ${allowedScopes.join(' or ')}`,
+        code: 'INSUFFICIENT_SCOPE',
       });
       return;
     }
