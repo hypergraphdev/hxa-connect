@@ -3,6 +3,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
@@ -134,6 +135,11 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
 
 const MAX_THREAD_TAGS = 10;
 const THREAD_STATUSES = new Set<ThreadStatus>(['active', 'blocked', 'reviewing', 'resolved', 'closed']);
+
+// Read version from package.json at startup
+const __routes_dirname = path.dirname(fileURLToPath(import.meta.url));
+const pkgJson = JSON.parse(fs.readFileSync(path.resolve(__routes_dirname, '..', 'package.json'), 'utf8'));
+const SERVER_VERSION: string = pkgJson.version;
 const CLOSE_REASONS = new Set<CloseReason>(['manual', 'timeout', 'error']);
 const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code', 'file', 'link']);
 const ARTIFACT_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
@@ -247,6 +253,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     return thread;
   }
+
+  /**
+   * GET /api/version — Public server version info
+   */
+  router.get('/api/version', (_req, res) => {
+    res.json({ version: SERVER_VERSION, server: 'botshub' });
+  });
 
   /**
    * POST /api/orgs — Create an organization
@@ -2116,8 +2129,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const orgId = req.agent!.org_id;
     const relativePath = `files/${file.filename}`;
     const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
+    const settings = db.getOrgSettings(orgId);
+    const perBotDailyLimitBytes = settings.file_upload_mb_per_day_per_bot * 1024 * 1024;
 
-    // Atomically check quota and create file record in a single transaction
+    // Atomically check quota (org-level + per-bot) and create file record
     const result = db.createFileWithQuotaCheck(
       orgId,
       req.agent!.id,
@@ -2126,14 +2141,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       file.size,
       relativePath,
       dailyLimitBytes,
+      perBotDailyLimitBytes,
     );
 
     if (!result.ok) {
       // Clean up the uploaded file since we're rejecting it
       try { fs.unlinkSync(file.path); } catch { /* temp file may already be gone */ }
       const usedMb = Math.round(result.dailyBytes / 1024 / 1024);
+      const limitMb = Math.round(result.limitBytes / 1024 / 1024);
+      const scope = result.reason === 'bot' ? 'Per-bot daily' : 'Org daily';
       res.status(429).json({
-        error: `Daily upload quota exceeded (${usedMb}MB / ${config.file_upload_mb_per_day}MB used today)`,
+        error: `${scope} upload quota exceeded (${usedMb}MB / ${limitMb}MB used today)`,
         code: 'RATE_LIMITED',
       });
       return;
@@ -2250,6 +2268,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const {
       messages_per_minute_per_bot,
       threads_per_hour_per_bot,
+      file_upload_mb_per_day_per_bot,
       message_ttl_days,
       thread_auto_close_days,
       artifact_retention_days,
@@ -2260,6 +2279,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const numericFields: Record<string, unknown> = {
       messages_per_minute_per_bot,
       threads_per_hour_per_bot,
+      file_upload_mb_per_day_per_bot,
     };
     for (const [key, val] of Object.entries(numericFields)) {
       if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || !Number.isInteger(val) || val < 1)) {
@@ -2302,6 +2322,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const updates: Partial<OrgSettings> = {};
     if (messages_per_minute_per_bot !== undefined) updates.messages_per_minute_per_bot = messages_per_minute_per_bot;
     if (threads_per_hour_per_bot !== undefined) updates.threads_per_hour_per_bot = threads_per_hour_per_bot;
+    if (file_upload_mb_per_day_per_bot !== undefined) updates.file_upload_mb_per_day_per_bot = file_upload_mb_per_day_per_bot;
     if (message_ttl_days !== undefined) updates.message_ttl_days = message_ttl_days;
     if (thread_auto_close_days !== undefined) updates.thread_auto_close_days = thread_auto_close_days;
     if (artifact_retention_days !== undefined) updates.artifact_retention_days = artifact_retention_days;

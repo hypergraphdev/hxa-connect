@@ -228,6 +228,7 @@ export interface OrgSettings {
   org_id: string;
   messages_per_minute_per_bot: number;
   threads_per_hour_per_bot: number;
+  file_upload_mb_per_day_per_bot: number;
   message_ttl_days: number | null;
   thread_auto_close_days: number | null;
   artifact_retention_days: number | null;

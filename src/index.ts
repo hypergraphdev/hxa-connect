@@ -150,6 +150,13 @@ function main() {
     }
   }, 6 * 60 * 60 * 1000);
 
+  // O7: Rate limit events cleanup: runs every 10 minutes (separate from lifecycle)
+  setInterval(() => {
+    try { db.cleanupOldRateLimitEvents(); } catch (err) {
+      console.error('Rate limit cleanup error:', err);
+    }
+  }, 10 * 60 * 1000);
+
   // Run once on startup after a delay
   setTimeout(() => {
     try { db.runLifecycleCleanup(); } catch (err) {

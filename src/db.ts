@@ -313,6 +313,9 @@ export class HubDB {
       }
     });
 
+    // Migration: add file_upload_mb_per_day_per_bot to org_settings (O6: per-bot file upload rate limit)
+    try { this.db.exec(`ALTER TABLE org_settings ADD COLUMN file_upload_mb_per_day_per_bot INTEGER DEFAULT 100`); } catch { /* exists */ }
+
     // Migration: transition any legacy 'open' threads to 'active' (P1: 5-state machine)
     this.db.prepare("UPDATE threads SET status = 'active' WHERE status = 'open'").run();
 
@@ -1105,10 +1108,10 @@ export class HubDB {
     ).run(Date.now(), tokenId);
   }
 
-  cleanupExpiredTokens(): number {
+  cleanupExpiredTokens(batchSize = 1000): number {
     const result = this.db.prepare(
-      'DELETE FROM agent_tokens WHERE expires_at IS NOT NULL AND expires_at < ?'
-    ).run(Date.now());
+      'DELETE FROM agent_tokens WHERE rowid IN (SELECT rowid FROM agent_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)'
+    ).run(Date.now(), batchSize);
     return result.changes;
   }
 
@@ -1955,8 +1958,9 @@ export class HubDB {
     return row.total;
   }
 
+
   /**
-   * Atomically check daily upload quota and create file record in a single transaction.
+   * Atomically check daily upload quota (org-level + per-bot) and create file record.
    * Prevents TOCTOU race where concurrent uploads both pass the quota check.
    */
   createFileWithQuotaCheck(
@@ -1967,13 +1971,17 @@ export class HubDB {
     size: number,
     diskPath: string,
     dailyLimitBytes: number,
-  ): { ok: true; file: FileRecord } | { ok: false; dailyBytes: number } {
+    perBotDailyLimitBytes: number,
+  ): { ok: true; file: FileRecord } | { ok: false; reason: 'org' | 'bot'; dailyBytes: number; limitBytes: number } {
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
     const dayStartMs = dayStart.getTime();
 
-    const getDailyStmt = this.db.prepare(
+    const getOrgDailyStmt = this.db.prepare(
       'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?'
+    );
+    const getBotDailyStmt = this.db.prepare(
+      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND uploader_id = ? AND created_at >= ?'
     );
     const insertStmt = this.db.prepare(`
       INSERT INTO files (id, org_id, uploader_id, name, mime_type, size, path, created_at)
@@ -1981,11 +1989,18 @@ export class HubDB {
     `);
 
     const txn = this.db.transaction(() => {
-      const row = getDailyStmt.get(orgId, dayStartMs) as { total: number };
-      const dailyBytes = row.total;
+      // Check org-level daily quota
+      const orgRow = getOrgDailyStmt.get(orgId, dayStartMs) as { total: number };
+      if (orgRow.total + size > dailyLimitBytes) {
+        return { ok: false as const, reason: 'org' as const, dailyBytes: orgRow.total, limitBytes: dailyLimitBytes };
+      }
 
-      if (dailyBytes + size > dailyLimitBytes) {
-        return { ok: false as const, dailyBytes };
+      // Check per-bot daily quota
+      if (perBotDailyLimitBytes > 0) {
+        const botRow = getBotDailyStmt.get(orgId, uploaderId, dayStartMs) as { total: number };
+        if (botRow.total + size > perBotDailyLimitBytes) {
+          return { ok: false as const, reason: 'bot' as const, dailyBytes: botRow.total, limitBytes: perBotDailyLimitBytes };
+        }
       }
 
       const file: FileRecord = {
@@ -2131,9 +2146,10 @@ export class HubDB {
     return counts;
   }
 
-  cleanupOldCatchupEvents(maxAgeDays: number) {
+  cleanupOldCatchupEvents(maxAgeDays: number, batchSize = 5000): number {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-    this.db.prepare('DELETE FROM catchup_events WHERE occurred_at < ?').run(cutoff);
+    const result = this.db.prepare('DELETE FROM catchup_events WHERE rowid IN (SELECT rowid FROM catchup_events WHERE occurred_at < ? LIMIT ?)').run(cutoff, batchSize);
+    return result.changes;
   }
 
   // ─── Webhook Status Operations ──────────────────────────
@@ -2205,6 +2221,7 @@ export class HubDB {
         org_id: row.org_id,
         messages_per_minute_per_bot: row.messages_per_minute_per_bot,
         threads_per_hour_per_bot: row.threads_per_hour_per_bot,
+        file_upload_mb_per_day_per_bot: row.file_upload_mb_per_day_per_bot ?? 100,
         message_ttl_days: row.message_ttl_days ?? null,
         thread_auto_close_days: row.thread_auto_close_days ?? null,
         artifact_retention_days: row.artifact_retention_days ?? null,
@@ -2217,6 +2234,7 @@ export class HubDB {
       org_id: orgId,
       messages_per_minute_per_bot: 60,
       threads_per_hour_per_bot: 30,
+      file_upload_mb_per_day_per_bot: 100,
       message_ttl_days: null,
       thread_auto_close_days: null,
       artifact_retention_days: null,
@@ -2232,6 +2250,7 @@ export class HubDB {
       org_id: orgId,
       messages_per_minute_per_bot: updates.messages_per_minute_per_bot ?? current.messages_per_minute_per_bot,
       threads_per_hour_per_bot: updates.threads_per_hour_per_bot ?? current.threads_per_hour_per_bot,
+      file_upload_mb_per_day_per_bot: updates.file_upload_mb_per_day_per_bot ?? current.file_upload_mb_per_day_per_bot,
       message_ttl_days: updates.message_ttl_days !== undefined ? updates.message_ttl_days : current.message_ttl_days,
       thread_auto_close_days: updates.thread_auto_close_days !== undefined ? updates.thread_auto_close_days : current.thread_auto_close_days,
       artifact_retention_days: updates.artifact_retention_days !== undefined ? updates.artifact_retention_days : current.artifact_retention_days,
@@ -2246,11 +2265,12 @@ export class HubDB {
       : null;
 
     this.db.prepare(`
-      INSERT INTO org_settings (org_id, messages_per_minute_per_bot, threads_per_hour_per_bot, message_ttl_days, thread_auto_close_days, artifact_retention_days, default_thread_permission_policy, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO org_settings (org_id, messages_per_minute_per_bot, threads_per_hour_per_bot, file_upload_mb_per_day_per_bot, message_ttl_days, thread_auto_close_days, artifact_retention_days, default_thread_permission_policy, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(org_id) DO UPDATE SET
         messages_per_minute_per_bot = excluded.messages_per_minute_per_bot,
         threads_per_hour_per_bot = excluded.threads_per_hour_per_bot,
+        file_upload_mb_per_day_per_bot = excluded.file_upload_mb_per_day_per_bot,
         message_ttl_days = excluded.message_ttl_days,
         thread_auto_close_days = excluded.thread_auto_close_days,
         artifact_retention_days = excluded.artifact_retention_days,
@@ -2260,6 +2280,7 @@ export class HubDB {
       merged.org_id,
       merged.messages_per_minute_per_bot,
       merged.threads_per_hour_per_bot,
+      merged.file_upload_mb_per_day_per_bot,
       merged.message_ttl_days,
       merged.thread_auto_close_days,
       merged.artifact_retention_days,
@@ -2316,9 +2337,10 @@ export class HubDB {
     return txn();
   }
 
-  cleanupOldRateLimitEvents(): void {
+  cleanupOldRateLimitEvents(batchSize = 10000): number {
     const cutoff = Date.now() - 3600000; // 1 hour
-    this.db.prepare('DELETE FROM rate_limit_events WHERE created_at < ?').run(cutoff);
+    const result = this.db.prepare('DELETE FROM rate_limit_events WHERE rowid IN (SELECT rowid FROM rate_limit_events WHERE created_at < ? LIMIT ?)').run(cutoff, batchSize);
+    return result.changes;
   }
 
   // ─── Audit Log Operations ─────────────────────────────────
@@ -2393,54 +2415,81 @@ export class HubDB {
     }));
   }
 
-  cleanupOldAuditLog(maxAgeDays: number): void {
+  cleanupOldAuditLog(maxAgeDays: number, batchSize = 5000): number {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-    this.db.prepare('DELETE FROM audit_log WHERE created_at < ?').run(cutoff);
+    const result = this.db.prepare('DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE created_at < ? LIMIT ?)').run(cutoff, batchSize);
+    return result.changes;
   }
 
   // ─── TTL / Lifecycle Cleanup Operations ────────────────────
 
-  cleanupExpiredMessages(orgId: string, ttlDays: number): number {
+  cleanupExpiredMessages(orgId: string, ttlDays: number, batchSize = 5000): number {
     const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
     let total = 0;
 
-    // Delete channel messages older than TTL
+    // Delete channel messages older than TTL (batched)
     const r1 = this.db.prepare(`
-      DELETE FROM messages WHERE channel_id IN (
-        SELECT id FROM channels WHERE org_id = ?
-      ) AND created_at < ?
-    `).run(orgId, cutoff);
+      DELETE FROM messages WHERE rowid IN (
+        SELECT messages.rowid FROM messages
+        JOIN channels ON channels.id = messages.channel_id
+        WHERE channels.org_id = ? AND messages.created_at < ?
+        LIMIT ?
+      )
+    `).run(orgId, cutoff, batchSize);
     total += r1.changes;
 
-    // Delete thread messages older than TTL (only in resolved/closed threads to preserve active context)
+    // Delete thread messages older than TTL (only in resolved/closed threads, batched)
     const r2 = this.db.prepare(`
-      DELETE FROM thread_messages WHERE thread_id IN (
-        SELECT id FROM threads WHERE org_id = ? AND status IN ('resolved', 'closed')
-      ) AND created_at < ?
-    `).run(orgId, cutoff);
+      DELETE FROM thread_messages WHERE rowid IN (
+        SELECT thread_messages.rowid FROM thread_messages
+        JOIN threads ON threads.id = thread_messages.thread_id
+        WHERE threads.org_id = ? AND threads.status IN ('resolved', 'closed')
+        AND thread_messages.created_at < ?
+        LIMIT ?
+      )
+    `).run(orgId, cutoff, batchSize);
     total += r2.changes;
 
     return total;
   }
 
-  autoCloseInactiveThreads(orgId: string, days: number): number {
+  autoCloseInactiveThreads(orgId: string, days: number, batchSize = 1000): number {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const now = Date.now();
     const r = this.db.prepare(`
       UPDATE threads SET status = 'closed', close_reason = 'timeout', updated_at = ?, last_activity_at = ?, revision = revision + 1
-      WHERE org_id = ? AND last_activity_at < ? AND status NOT IN ('resolved', 'closed')
-    `).run(now, now, orgId, cutoff);
+      WHERE rowid IN (
+        SELECT rowid FROM threads
+        WHERE org_id = ? AND last_activity_at < ? AND status NOT IN ('resolved', 'closed')
+        LIMIT ?
+      )
+    `).run(now, now, orgId, cutoff, batchSize);
     return r.changes;
   }
 
-  cleanupExpiredArtifacts(orgId: string, days: number): number {
+  cleanupExpiredArtifacts(orgId: string, days: number, batchSize = 5000): number {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const r = this.db.prepare(`
-      DELETE FROM artifacts WHERE thread_id IN (
-        SELECT id FROM threads WHERE org_id = ? AND status IN ('resolved', 'closed')
-      ) AND created_at < ?
-    `).run(orgId, cutoff);
+      DELETE FROM artifacts WHERE rowid IN (
+        SELECT artifacts.rowid FROM artifacts
+        JOIN threads ON threads.id = artifacts.thread_id
+        WHERE threads.org_id = ? AND threads.status IN ('resolved', 'closed')
+        AND artifacts.created_at < ?
+        LIMIT ?
+      )
+    `).run(orgId, cutoff, batchSize);
     return r.changes;
+  }
+
+  /** Repeat a batched cleanup until it returns fewer than batchSize rows. */
+  private drainBatch(fn: (batchSize: number) => number, batchSize: number): number {
+    let total = 0;
+    let deleted: number;
+    do {
+      deleted = fn(batchSize);
+      total += deleted;
+    } while (deleted >= batchSize);
+    return total;
   }
 
   runLifecycleCleanup(): void {
@@ -2450,17 +2499,17 @@ export class HubDB {
       const detail: Record<string, number> = {};
 
       if (settings.message_ttl_days !== null && settings.message_ttl_days > 0) {
-        const n = this.cleanupExpiredMessages(org.id, settings.message_ttl_days);
+        const n = this.drainBatch((bs) => this.cleanupExpiredMessages(org.id, settings.message_ttl_days!, bs), 5000);
         if (n > 0) detail.messages_deleted = n;
       }
 
       if (settings.thread_auto_close_days !== null && settings.thread_auto_close_days > 0) {
-        const n = this.autoCloseInactiveThreads(org.id, settings.thread_auto_close_days);
+        const n = this.drainBatch((bs) => this.autoCloseInactiveThreads(org.id, settings.thread_auto_close_days!, bs), 1000);
         if (n > 0) detail.threads_closed = n;
       }
 
       if (settings.artifact_retention_days !== null && settings.artifact_retention_days > 0) {
-        const n = this.cleanupExpiredArtifacts(org.id, settings.artifact_retention_days);
+        const n = this.drainBatch((bs) => this.cleanupExpiredArtifacts(org.id, settings.artifact_retention_days!, bs), 5000);
         if (n > 0) detail.artifacts_deleted = n;
       }
 
@@ -2469,11 +2518,11 @@ export class HubDB {
       }
     }
 
-    // Global cleanups
-    this.cleanupOldCatchupEvents(30);
-    this.cleanupOldAuditLog(90);
-    this.cleanupOldRateLimitEvents();
-    this.cleanupExpiredTokens();
+    // Global cleanups (all batched with drain loops)
+    this.drainBatch((bs) => this.cleanupOldCatchupEvents(30, bs), 5000);
+    this.drainBatch((bs) => this.cleanupOldAuditLog(90, bs), 5000);
+    this.drainBatch((bs) => this.cleanupOldRateLimitEvents(bs), 10000);
+    this.drainBatch((bs) => this.cleanupExpiredTokens(bs), 1000);
   }
 
   close() {
