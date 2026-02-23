@@ -1424,14 +1424,22 @@ export class HubDB {
     const current = this.getThread(threadId);
     if (!current) return undefined;
 
-    if (current.status === 'resolved' || current.status === 'closed') {
-      throw new Error('Thread is in terminal state and cannot be changed');
-    }
+    // Explicit allowed-transitions map per B2B-PROTOCOL.md design:
+    //   open → active ↔ blocked/reviewing → resolved
+    //   Any non-terminal state can → closed
+    //   resolved and closed are mutually exclusive terminals (不可互转)
+    const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+      open:      ['active', 'closed'],
+      active:    ['blocked', 'reviewing', 'resolved', 'closed'],
+      blocked:   ['active', 'closed'],
+      reviewing: ['active', 'resolved', 'closed'],
+      resolved:  [],
+      closed:    [],
+    };
 
-    // Forward-only status transitions: open → active → blocked/reviewing → resolved/closed
-    const STATUS_ORDER: Record<string, number> = { open: 0, active: 1, blocked: 2, reviewing: 2, resolved: 3, closed: 3 };
-    if ((STATUS_ORDER[status] ?? 0) < (STATUS_ORDER[current.status] ?? 0)) {
-      throw new Error(`Cannot transition from '${current.status}' to '${status}' (backward transition)`);
+    const allowed = ALLOWED_TRANSITIONS[current.status];
+    if (!allowed || !allowed.includes(status)) {
+      throw new Error(`Cannot transition from '${current.status}' to '${status}'`);
     }
 
     if (status === 'closed' && !closeReason) {
