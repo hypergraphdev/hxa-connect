@@ -1026,6 +1026,13 @@ export class HubDB {
     ).run(online ? 1 : 0, Date.now(), agentId);
   }
 
+  /** W3: Update last_seen without changing online status (for HTTP requests) */
+  touchAgentLastSeen(agentId: string) {
+    this.db.prepare(
+      'UPDATE agents SET last_seen_at = ? WHERE id = ?'
+    ).run(Date.now(), agentId);
+  }
+
   deleteAgent(agentId: string) {
     // Auto-close threads where this agent is the sole remaining participant
     // (ON DELETE CASCADE would orphan them, making them inaccessible via API)
@@ -2523,6 +2530,16 @@ export class HubDB {
     this.drainBatch((bs) => this.cleanupOldAuditLog(90, bs), 5000);
     this.drainBatch((bs) => this.cleanupOldRateLimitEvents(bs), 10000);
     this.drainBatch((bs) => this.cleanupExpiredTokens(bs), 1000);
+  }
+
+  /** O1: Lightweight DB health check */
+  isHealthy(): boolean {
+    try {
+      this.db.prepare('SELECT 1').get();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close() {

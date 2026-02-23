@@ -103,6 +103,21 @@ function main() {
   const server = createServer(app);
   const webhookManager = new WebhookManager(db);
   const hubWs = new HubWS(server, db, webhookManager, config);
+
+  // O1: Health endpoint (no auth, before router so it's always accessible)
+  app.get('/health', (_req, res) => {
+    const wsStats = hubWs.getHealthStats();
+    const dbOk = db.isHealthy();
+    const status = dbOk ? 'ok' : 'degraded';
+    res.status(dbOk ? 200 : 503).json({
+      status,
+      uptime_ms: wsStats.uptime_ms,
+      connected_clients: wsStats.connected_clients,
+      connected_agents: wsStats.connected_agents,
+      db: dbOk ? 'ok' : 'error',
+    });
+  });
+
   app.use(createRouter(db, hubWs, config));
 
   // JSON 404 for unmatched API routes (must come before SPA catch-all)
@@ -164,15 +179,32 @@ function main() {
     }
   }, 30000);
 
-  // Graceful shutdown
-  const shutdown = () => {
-    console.log('\n  Shutting down...');
+  // O2: Graceful shutdown — drain WS, stop HTTP, close DB
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('\n  Shutting down gracefully...');
+
+    // 1. Stop accepting new connections
     server.close();
+
+    // 2. Drain WS connections (sends close frames, waits up to 5s)
+    try {
+      await hubWs.shutdown();
+      console.log('  ✅ WebSocket connections drained');
+    } catch (err) {
+      console.error('  WebSocket shutdown error:', err);
+    }
+
+    // 3. Close database
     db.close();
+    console.log('  ✅ Database closed');
+
     process.exit(0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
 }
 
 main();

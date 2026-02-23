@@ -56,8 +56,9 @@ export function authMiddleware(db: HubDB) {
       req.org = db.getOrgById(agent.org_id);
       req.authType = 'agent';
       req.tokenScopes = ['full'];
-      // Update last seen
-      db.setAgentOnline(agent.id, true);
+      // W3: HTTP requests update last_seen but do NOT mark agent online.
+      // Online status is managed exclusively by WS connections.
+      db.touchAgentLastSeen(agent.id);
       next();
       return;
     }
@@ -77,8 +78,8 @@ export function authMiddleware(db: HubDB) {
         req.authType = 'agent';
         req.tokenScopes = scopedToken.scopes;
         req.scopedTokenId = scopedToken.id;
-        // Update last seen on agent and token
-        db.setAgentOnline(scopedAgent.id, true);
+        // W3: HTTP requests update last_seen but do NOT mark agent online.
+        db.touchAgentLastSeen(scopedAgent.id);
         db.touchAgentToken(scopedToken.id);
         next();
         return;
