@@ -2049,30 +2049,31 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const orgId = req.agent!.org_id;
-
-    // Enforce daily upload quota
-    const dailyBytes = db.getDailyUploadBytes(orgId);
-    const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
-    if (dailyBytes + file.size > dailyLimitBytes) {
-      // Clean up the uploaded file since we're rejecting it
-      try { fs.unlinkSync(file.path); } catch { /* temp file may already be gone */ }
-      const usedMb = Math.round(dailyBytes / 1024 / 1024);
-      res.status(429).json({
-        error: `Daily upload quota exceeded (${usedMb}MB / ${config.file_upload_mb_per_day}MB used today)`,
-      });
-      return;
-    }
-
     const relativePath = `files/${file.filename}`;
+    const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
 
-    const record = db.createFile(
+    // Atomically check quota and create file record in a single transaction
+    const result = db.createFileWithQuotaCheck(
       orgId,
       req.agent!.id,
       file.originalname,
       file.mimetype || null,
       file.size,
       relativePath,
+      dailyLimitBytes,
     );
+
+    if (!result.ok) {
+      // Clean up the uploaded file since we're rejecting it
+      try { fs.unlinkSync(file.path); } catch { /* temp file may already be gone */ }
+      const usedMb = Math.round(result.dailyBytes / 1024 / 1024);
+      res.status(429).json({
+        error: `Daily upload quota exceeded (${usedMb}MB / ${config.file_upload_mb_per_day}MB used today)`,
+      });
+      return;
+    }
+
+    const record = result.file;
 
     // Audit
     db.recordAudit(orgId, req.agent!.id, 'file.upload', 'file', record.id, {

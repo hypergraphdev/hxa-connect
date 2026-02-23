@@ -160,6 +160,7 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_thread_participants_bot ON thread_participants(bot_id);
       CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_artifacts_key ON artifacts(thread_id, artifact_key);
 
       CREATE TABLE IF NOT EXISTS files (
         id TEXT PRIMARY KEY,
@@ -182,6 +183,7 @@ export class HubDB {
         occurred_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_catchup_target ON catchup_events(target_bot_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_catchup_occurred ON catchup_events(occurred_at);
 
       CREATE TABLE IF NOT EXISTS webhook_status (
         agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
@@ -237,130 +239,89 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
     `);
 
-    // Migration: add admin_secret to existing orgs that don't have it
-    try {
-      this.db.exec(`ALTER TABLE orgs ADD COLUMN admin_secret TEXT`);
-    } catch {
-      // Column already exists
-    }
+    // ── Schema version tracking ──────────────────────────────
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_versions (
+        name TEXT PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      );
+    `);
 
-    // Migration: add profile fields to existing agents
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN bio TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN role TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN function TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN team TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN tags TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN languages TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN protocols TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN status_text TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN timezone TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN active_hours TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN version TEXT DEFAULT '1.0.0'`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN runtime TEXT`);
-    } catch {
-      // Column already exists
-    }
+    // Run versioned migrations — each only executes once
+    this.runMigration('001_add_admin_secret', () => {
+      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN admin_secret TEXT`); } catch { /* exists */ }
+    });
 
-    this.db.prepare(`UPDATE agents SET version = '1.0.0' WHERE version IS NULL OR version = ''`).run();
+    this.runMigration('002_add_agent_profile_fields', () => {
+      const cols = ['bio', 'role', '"function"', 'team', 'tags', 'languages', 'protocols',
+                    'status_text', 'timezone', 'active_hours'];
+      for (const col of cols) {
+        try { this.db.exec(`ALTER TABLE agents ADD COLUMN ${col === '"function"' ? '"function" TEXT' : col + ' TEXT'}`); } catch { /* exists */ }
+      }
+      try { this.db.exec(`ALTER TABLE agents ADD COLUMN version TEXT DEFAULT '1.0.0'`); } catch { /* exists */ }
+      try { this.db.exec(`ALTER TABLE agents ADD COLUMN runtime TEXT`); } catch { /* exists */ }
+      this.db.prepare(`UPDATE agents SET version = '1.0.0' WHERE version IS NULL OR version = ''`).run();
+    });
 
-    // Migration: add parts column to messages and thread_messages
-    try {
-      this.db.exec(`ALTER TABLE messages ADD COLUMN parts TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE thread_messages ADD COLUMN parts TEXT`);
-    } catch {
-      // Column already exists
-    }
+    this.runMigration('003_add_parts_column', () => {
+      try { this.db.exec(`ALTER TABLE messages ADD COLUMN parts TEXT`); } catch { /* exists */ }
+      try { this.db.exec(`ALTER TABLE thread_messages ADD COLUMN parts TEXT`); } catch { /* exists */ }
+    });
 
-    // Migration: add revision column for optimistic concurrency
-    try {
-      this.db.exec(`ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`);
-    } catch {
-      // Column already exists
-    }
+    this.runMigration('004_add_thread_revision', () => {
+      try { this.db.exec(`ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); } catch { /* exists */ }
+    });
 
-    // Migration: add permission_policy to threads (Security P2)
-    try {
-      this.db.exec(`ALTER TABLE threads ADD COLUMN permission_policy TEXT`);
-    } catch {
-      // Column already exists
-    }
-
-    // Migration: add default_thread_permission_policy to org_settings (Security P2)
-    try {
-      this.db.exec(`ALTER TABLE org_settings ADD COLUMN default_thread_permission_policy TEXT`);
-    } catch {
-      // Column already exists
-    }
+    this.runMigration('005_add_permission_policy', () => {
+      try { this.db.exec(`ALTER TABLE threads ADD COLUMN permission_policy TEXT`); } catch { /* exists */ }
+      try { this.db.exec(`ALTER TABLE org_settings ADD COLUMN default_thread_permission_policy TEXT`); } catch { /* exists */ }
+    });
 
     // Migration: fix FK constraints on threads/thread_messages/artifacts
     // SQLite cannot ALTER FK constraints, so we must recreate tables.
-    this.migrateThreadForeignKeys();
+    this.runMigration('008_fix_thread_foreign_keys', () => {
+      this.migrateThreadForeignKeys();
+    });
 
     // Migration: fix files.uploader_id NOT NULL → nullable for ON DELETE SET NULL
-    this.migrateFilesForeignKey();
+    this.runMigration('009_fix_files_foreign_key', () => {
+      this.migrateFilesForeignKey();
+    });
 
     // Generate admin_secret for orgs that don't have one
-    const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE admin_secret IS NULL').all() as any[];
-    for (const org of orgsWithoutSecret) {
-      const secret = crypto.randomBytes(24).toString('hex');
-      this.db.prepare('UPDATE orgs SET admin_secret = ? WHERE id = ?').run(secret, org.id);
-      console.log(`  🔐 Generated admin_secret for org ${org.id}`);
-    }
+    this.runMigration('006_generate_admin_secrets', () => {
+      const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE admin_secret IS NULL').all() as any[];
+      for (const org of orgsWithoutSecret) {
+        const secret = crypto.randomBytes(24).toString('hex');
+        this.db.prepare('UPDATE orgs SET admin_secret = ? WHERE id = ?').run(secret, org.id);
+        console.log(`  🔐 Generated admin_secret for org ${org.id}`);
+      }
+    });
 
     // Migration: transition any legacy 'open' threads to 'active' (P1: 5-state machine)
     this.db.prepare("UPDATE threads SET status = 'active' WHERE status = 'open'").run();
 
     // Migration: hash any existing plaintext tokens (S4 security migration)
-    this.migrateHashTokens();
+    this.runMigration('007_hash_plaintext_tokens', () => {
+      this.migrateHashTokens();
+    });
+  }
+
+  /**
+   * Run a named migration only if it hasn't been applied yet.
+   * Records the migration in schema_versions upon success.
+   */
+  private runMigration(name: string, fn: () => void): void {
+    const applied = this.db.prepare(
+      'SELECT 1 FROM schema_versions WHERE name = ?'
+    ).get(name);
+    if (applied) return;
+
+    fn();
+
+    this.db.prepare(
+      'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)'
+    ).run(name, Date.now());
   }
 
   private migrateThreadForeignKeys() {
@@ -378,81 +339,91 @@ export class HubDB {
     // when dropping parent tables (SQLite recommended practice for table recreation)
     this.db.pragma('foreign_keys = OFF');
 
-    this.db.exec(`BEGIN TRANSACTION;
-      -- threads: initiator_id NOT NULL → nullable, ON DELETE SET NULL; channel_id ON DELETE SET NULL
-      CREATE TABLE threads_new (
-        id TEXT PRIMARY KEY,
-        org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-        topic TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'discussion'
-          CHECK(type IN ('discussion', 'request', 'collab')),
-        status TEXT NOT NULL DEFAULT 'active'
-          CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
-        initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
-        context TEXT,
-        close_reason TEXT
-          CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
-        revision INTEGER NOT NULL DEFAULT 1,
-        permission_policy TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        last_activity_at INTEGER NOT NULL,
-        resolved_at INTEGER
-      );
-      INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
-        SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
-      DROP TABLE threads;
-      ALTER TABLE threads_new RENAME TO threads;
+    try {
+      this.db.exec(`
+        BEGIN TRANSACTION;
+        -- threads: initiator_id NOT NULL → nullable, ON DELETE SET NULL; channel_id ON DELETE SET NULL
+        CREATE TABLE threads_new (
+          id TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          topic TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'discussion'
+            CHECK(type IN ('discussion', 'request', 'collab')),
+          status TEXT NOT NULL DEFAULT 'active'
+            CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
+          initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
+          context TEXT,
+          close_reason TEXT
+            CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
+          revision INTEGER NOT NULL DEFAULT 1,
+          permission_policy TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_activity_at INTEGER NOT NULL,
+          resolved_at INTEGER
+        );
+        INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
+          SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
+        DROP TABLE threads;
+        ALTER TABLE threads_new RENAME TO threads;
 
-      -- thread_messages: sender_id NOT NULL → nullable, ON DELETE SET NULL
-      CREATE TABLE thread_messages_new (
-        id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        sender_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        content TEXT NOT NULL,
-        content_type TEXT DEFAULT 'text',
-        parts TEXT,
-        metadata TEXT,
-        created_at INTEGER NOT NULL
-      );
-      INSERT INTO thread_messages_new SELECT * FROM thread_messages;
-      DROP TABLE thread_messages;
-      ALTER TABLE thread_messages_new RENAME TO thread_messages;
+        -- thread_messages: sender_id NOT NULL → nullable, ON DELETE SET NULL
+        CREATE TABLE thread_messages_new (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+          sender_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          content TEXT NOT NULL,
+          content_type TEXT DEFAULT 'text',
+          parts TEXT,
+          metadata TEXT,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO thread_messages_new (id, thread_id, sender_id, content, content_type, parts, metadata, created_at)
+          SELECT id, thread_id, sender_id, content, content_type, parts, metadata, created_at FROM thread_messages;
+        DROP TABLE thread_messages;
+        ALTER TABLE thread_messages_new RENAME TO thread_messages;
 
-      -- artifacts: contributor_id NOT NULL → nullable, ON DELETE SET NULL
-      CREATE TABLE artifacts_new (
-        id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        artifact_key TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'text'
-          CHECK(type IN ('text', 'markdown', 'json', 'code', 'file', 'link')),
-        title TEXT,
-        content TEXT,
-        language TEXT,
-        url TEXT,
-        mime_type TEXT,
-        contributor_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        format_warning INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(thread_id, artifact_key, version)
-      );
-      INSERT INTO artifacts_new SELECT * FROM artifacts;
-      DROP TABLE artifacts;
-      ALTER TABLE artifacts_new RENAME TO artifacts;
+        -- artifacts: contributor_id NOT NULL → nullable, ON DELETE SET NULL
+        CREATE TABLE artifacts_new (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+          artifact_key TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'text'
+            CHECK(type IN ('text', 'markdown', 'json', 'code', 'file', 'link')),
+          title TEXT,
+          content TEXT,
+          language TEXT,
+          url TEXT,
+          mime_type TEXT,
+          contributor_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          format_warning INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(thread_id, artifact_key, version)
+        );
+        INSERT INTO artifacts_new (id, thread_id, artifact_key, type, title, content, language, url, mime_type, contributor_id, version, format_warning, created_at, updated_at)
+          SELECT id, thread_id, artifact_key, type, title, content, language, url, mime_type, contributor_id, version, format_warning, created_at, updated_at FROM artifacts;
+        DROP TABLE artifacts;
+        ALTER TABLE artifacts_new RENAME TO artifacts;
 
-      -- Recreate indexes (dropped with old tables)
-      CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
-      CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
-      CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
-      CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
-      CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
-    COMMIT;`);
+        -- Recreate indexes (dropped with old tables)
+        CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
+        CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
+        CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
+        CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_key ON artifacts(thread_id, artifact_key);
+      COMMIT;`);
 
-    this.db.pragma('foreign_keys = ON');
-    console.log('  ✅ Thread FK migration complete');
+      console.log('  ✅ Thread FK migration complete');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
+      throw err;
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
   }
 
   private migrateFilesForeignKey() {
@@ -466,26 +437,33 @@ export class HubDB {
 
     this.db.pragma('foreign_keys = OFF');
 
-    this.db.exec(`BEGIN TRANSACTION;
-      CREATE TABLE files_new (
-        id TEXT PRIMARY KEY,
-        org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-        uploader_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        name TEXT NOT NULL,
-        mime_type TEXT,
-        size INTEGER NOT NULL,
-        path TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      INSERT INTO files_new SELECT * FROM files;
-      DROP TABLE files;
-      ALTER TABLE files_new RENAME TO files;
+    try {
+      this.db.exec(`BEGIN TRANSACTION;
+        CREATE TABLE files_new (
+          id TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          uploader_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          name TEXT NOT NULL,
+          mime_type TEXT,
+          size INTEGER NOT NULL,
+          path TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO files_new (id, org_id, uploader_id, name, mime_type, size, path, created_at)
+          SELECT id, org_id, uploader_id, name, mime_type, size, path, created_at FROM files;
+        DROP TABLE files;
+        ALTER TABLE files_new RENAME TO files;
 
-      CREATE INDEX IF NOT EXISTS idx_files_org ON files(org_id, created_at);
-    COMMIT;`);
+        CREATE INDEX IF NOT EXISTS idx_files_org ON files(org_id, created_at);
+      COMMIT;`);
 
-    this.db.pragma('foreign_keys = ON');
-    console.log('  ✅ Files FK migration complete');
+      console.log('  ✅ Files FK migration complete');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
+      throw err;
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
   }
 
   /**
@@ -1720,30 +1698,12 @@ export class HubDB {
     mimeType?: string | null,
   ): Artifact {
     const now = Date.now();
-    const nextVersionRow = this.db.prepare(`
+    const normalized = this.normalizeJsonArtifactContent(type, content ?? null);
+
+    const getMaxVersionStmt = this.db.prepare(`
       SELECT MAX(version) as max_version FROM artifacts
       WHERE thread_id = ? AND artifact_key = ?
-    `).get(threadId, key) as { max_version: number | null };
-    const nextVersion = (nextVersionRow?.max_version ?? 0) + 1;
-
-    const normalized = this.normalizeJsonArtifactContent(type, content ?? null);
-    const artifact: Artifact = {
-      id: crypto.randomUUID(),
-      thread_id: threadId,
-      artifact_key: key,
-      type: normalized.type,
-      title: title ?? null,
-      content: normalized.content,
-      language: language ?? null,
-      url: url ?? null,
-      mime_type: mimeType ?? null,
-      contributor_id: contributorId,
-      version: nextVersion,
-      format_warning: normalized.format_warning,
-      created_at: now,
-      updated_at: now,
-    };
-
+    `);
     const insertArtifactStmt = this.db.prepare(`
       INSERT INTO artifacts (
         id, thread_id, artifact_key, type, title, content, language, url, mime_type,
@@ -1755,6 +1715,26 @@ export class HubDB {
     `);
 
     const tx = this.db.transaction(() => {
+      const nextVersionRow = getMaxVersionStmt.get(threadId, key) as { max_version: number | null };
+      const nextVersion = (nextVersionRow?.max_version ?? 0) + 1;
+
+      const artifact: Artifact = {
+        id: crypto.randomUUID(),
+        thread_id: threadId,
+        artifact_key: key,
+        type: normalized.type,
+        title: title ?? null,
+        content: normalized.content,
+        language: language ?? null,
+        url: url ?? null,
+        mime_type: mimeType ?? null,
+        contributor_id: contributorId,
+        version: nextVersion,
+        format_warning: normalized.format_warning,
+        created_at: now,
+        updated_at: now,
+      };
+
       insertArtifactStmt.run(
         artifact.id,
         artifact.thread_id,
@@ -1772,10 +1752,11 @@ export class HubDB {
         artifact.updated_at,
       );
       updateActivityStmt.run(now, threadId);
+
+      return artifact;
     });
 
-    tx();
-    return artifact;
+    return tx();
   }
 
   updateArtifact(
@@ -1785,50 +1766,20 @@ export class HubDB {
     content: string,
     title?: string | null,
   ): Artifact | undefined {
-    const latestRow = this.db.prepare(`
+    const getLatestStmt = this.db.prepare(`
       SELECT * FROM artifacts
       WHERE thread_id = ? AND artifact_key = ?
       ORDER BY version DESC
       LIMIT 1
-    `).get(threadId, key) as any;
-
-    if (!latestRow) return undefined;
-    const latest = this.rowToArtifact(latestRow);
-    const nextVersionRow = this.db.prepare(`
+    `);
+    const getMaxVersionStmt = this.db.prepare(`
       SELECT MAX(version) as max_version FROM artifacts
       WHERE thread_id = ? AND artifact_key = ?
-    `).get(threadId, key) as { max_version: number | null };
-    const nextVersion = (nextVersionRow?.max_version ?? latest.version) + 1;
-
-    // Use the original declared type for normalization so a downgraded JSON
-    // artifact can recover when valid JSON is submitted again.
-    // If v1 has format_warning, it was originally declared as 'json' but
-    // downgraded to 'text' due to malformed content — treat as 'json'.
-    const originalRow = this.db.prepare(`
+    `);
+    const getOriginalStmt = this.db.prepare(`
       SELECT type, format_warning FROM artifacts
       WHERE thread_id = ? AND artifact_key = ? AND version = 1
-    `).get(threadId, key) as { type: string; format_warning: number } | undefined;
-    const baseType = (originalRow?.format_warning ? 'json' : originalRow?.type ?? latest.type) as ArtifactType;
-
-    const now = Date.now();
-    const normalized = this.normalizeJsonArtifactContent(baseType, content);
-    const artifact: Artifact = {
-      id: crypto.randomUUID(),
-      thread_id: threadId,
-      artifact_key: key,
-      type: normalized.type,
-      title: title === undefined ? latest.title : (title ?? null),
-      content: normalized.content,
-      language: latest.language,
-      url: latest.url,
-      mime_type: latest.mime_type,
-      contributor_id: contributorId,
-      version: nextVersion,
-      format_warning: normalized.format_warning,
-      created_at: now,
-      updated_at: now,
-    };
-
+    `);
     const insertArtifactStmt = this.db.prepare(`
       INSERT INTO artifacts (
         id, thread_id, artifact_key, type, title, content, language, url, mime_type,
@@ -1840,6 +1791,39 @@ export class HubDB {
     `);
 
     const tx = this.db.transaction(() => {
+      const latestRow = getLatestStmt.get(threadId, key) as any;
+      if (!latestRow) return undefined;
+      const latest = this.rowToArtifact(latestRow);
+
+      const nextVersionRow = getMaxVersionStmt.get(threadId, key) as { max_version: number | null };
+      const nextVersion = (nextVersionRow?.max_version ?? latest.version) + 1;
+
+      // Use the original declared type for normalization so a downgraded JSON
+      // artifact can recover when valid JSON is submitted again.
+      // If v1 has format_warning, it was originally declared as 'json' but
+      // downgraded to 'text' due to malformed content — treat as 'json'.
+      const originalRow = getOriginalStmt.get(threadId, key) as { type: string; format_warning: number } | undefined;
+      const baseType = (originalRow?.format_warning ? 'json' : originalRow?.type ?? latest.type) as ArtifactType;
+
+      const now = Date.now();
+      const normalized = this.normalizeJsonArtifactContent(baseType, content);
+      const artifact: Artifact = {
+        id: crypto.randomUUID(),
+        thread_id: threadId,
+        artifact_key: key,
+        type: normalized.type,
+        title: title === undefined ? latest.title : (title ?? null),
+        content: normalized.content,
+        language: latest.language,
+        url: latest.url,
+        mime_type: latest.mime_type,
+        contributor_id: contributorId,
+        version: nextVersion,
+        format_warning: normalized.format_warning,
+        created_at: now,
+        updated_at: now,
+      };
+
       insertArtifactStmt.run(
         artifact.id,
         artifact.thread_id,
@@ -1857,10 +1841,11 @@ export class HubDB {
         artifact.updated_at,
       );
       updateActivityStmt.run(now, threadId);
+
+      return artifact;
     });
 
-    tx();
-    return artifact;
+    return tx();
   }
 
   getArtifact(threadId: string, key: string, version?: number): Artifact | undefined {
@@ -1945,6 +1930,57 @@ export class HubDB {
       'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?'
     ).get(orgId, dayStart.getTime()) as { total: number };
     return row.total;
+  }
+
+  /**
+   * Atomically check daily upload quota and create file record in a single transaction.
+   * Prevents TOCTOU race where concurrent uploads both pass the quota check.
+   */
+  createFileWithQuotaCheck(
+    orgId: string,
+    uploaderId: string,
+    name: string,
+    mimeType: string | null,
+    size: number,
+    diskPath: string,
+    dailyLimitBytes: number,
+  ): { ok: true; file: FileRecord } | { ok: false; dailyBytes: number } {
+    const dayStart = new Date();
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const dayStartMs = dayStart.getTime();
+
+    const getDailyStmt = this.db.prepare(
+      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?'
+    );
+    const insertStmt = this.db.prepare(`
+      INSERT INTO files (id, org_id, uploader_id, name, mime_type, size, path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const txn = this.db.transaction(() => {
+      const row = getDailyStmt.get(orgId, dayStartMs) as { total: number };
+      const dailyBytes = row.total;
+
+      if (dailyBytes + size > dailyLimitBytes) {
+        return { ok: false as const, dailyBytes };
+      }
+
+      const file: FileRecord = {
+        id: crypto.randomUUID(),
+        org_id: orgId,
+        uploader_id: uploaderId,
+        name,
+        mime_type: mimeType,
+        size,
+        path: diskPath,
+        created_at: Date.now(),
+      };
+
+      insertStmt.run(file.id, file.org_id, file.uploader_id, file.name, file.mime_type, file.size, file.path, file.created_at);
+      return { ok: true as const, file };
+    });
+
+    return txn();
   }
   // ─── Catchup Event Operations ─────────────────────────────
 
