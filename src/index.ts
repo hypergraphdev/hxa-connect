@@ -33,6 +33,15 @@ function loadConfig(): HubConfig {
 
 function main() {
   const config = loadConfig();
+  const isDev = process.env.NODE_ENV === 'development';
+
+  // S1: BOTSHUB_ADMIN_SECRET is required in non-dev environments
+  if (!config.admin_secret && !isDev) {
+    console.error('FATAL: BOTSHUB_ADMIN_SECRET is not set.');
+    console.error('This is required in non-development environments.');
+    console.error('Set NODE_ENV=development to bypass this check.');
+    process.exit(1);
+  }
 
   console.log(`
   ╔═══════════════════════════════════════╗
@@ -53,7 +62,7 @@ function main() {
   // Create Express app
   const app = express();
   app.use(cors({ origin: config.cors_origins }));
-  app.use(express.json());
+  app.use(express.json({ limit: '1mb' }));
 
   // Serve web UI (resolve to project root /web, not /src or /dist)
   const webDir = path.resolve(__dirname, '..', 'web');

@@ -663,7 +663,7 @@ export class HubDB {
     webhookUrl?: string | null,
     webhookSecret?: string | null,
     profile?: AgentProfileInput,
-  ): Agent {
+  ): { agent: Agent; created: boolean } {
     // Check if agent already exists → return existing token
     const existing = this.db.prepare(
       'SELECT * FROM agents WHERE org_id = ? AND name = ?'
@@ -752,7 +752,7 @@ export class HubDB {
       if (!updated) {
         throw new Error('Agent update failed');
       }
-      return updated;
+      return { agent: updated, created: false };
     }
 
     const agent: Agent = {
@@ -813,7 +813,7 @@ export class HubDB {
       agent.created_at,
     );
 
-    return agent;
+    return { agent, created: true };
   }
 
   updateProfile(agentId: string, fields: AgentProfileInput): Agent | undefined {

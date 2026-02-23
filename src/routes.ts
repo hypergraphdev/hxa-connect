@@ -8,6 +8,40 @@ import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 
+// S6: Per-field size limits (bytes)
+const FIELD_LIMITS = {
+  name: 128,
+  display_name: 256,
+  metadata: 16384,       // 16 KB
+  content_type: 128,
+  webhook_url: 2048,
+  bio: 1024,
+  role: 256,
+  function: 256,
+  team: 256,
+  status_text: 512,
+  timezone: 64,
+  active_hours: 256,
+  version: 64,
+  runtime: 128,
+  tags: 4096,            // 4 KB
+  languages: 2048,       // 2 KB
+  protocols: 16384,      // 16 KB
+} as const;
+
+function checkFieldLimits(fields: Record<string, unknown>, limits: Partial<typeof FIELD_LIMITS> = FIELD_LIMITS): string | null {
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null) continue;
+    const limit = (limits as Record<string, number>)[key];
+    if (!limit) continue;
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+    if (Buffer.byteLength(str, 'utf8') > limit) {
+      return `${key} exceeds size limit (${limit} bytes)`;
+    }
+  }
+  return null;
+}
+
 function parseJsonField<T>(value: string | null): T | null {
   if (!value) return null;
   try {
@@ -214,7 +248,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
     const org = db.createOrg(name, persist_messages ?? config.default_persist);
-    res.json(org);
+    const { admin_secret: _stripped, ...safeOrg } = org;
+    res.json(safeOrg);
   });
 
   /**
@@ -223,7 +258,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   router.get('/api/orgs', (req, res) => {
     if (!requireAdmin(req, res)) return;
-    res.json(db.listOrgs());
+    const orgs = db.listOrgs().map(({ api_key, admin_secret, ...safe }) => safe);
+    res.json(orgs);
   });
 
   // ─── Authenticated Routes ─────────────────────────────────
@@ -268,6 +304,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
+    // Per-field size limits
+    const fieldError = checkFieldLimits({ name, display_name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
+    if (fieldError) {
+      res.status(400).json({ error: fieldError });
+      return;
+    }
+
     // Validate profile field types
     const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime };
     for (const [key, val] of Object.entries(stringFields)) {
@@ -302,10 +345,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       runtime,
     };
 
-    const agent = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
+    const { agent, created } = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
 
     // Audit
-    db.recordAudit(req.org!.id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name });
+    db.recordAudit(req.org!.id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name, reregister: !created });
 
     // Broadcast agent online to all org viewers (Web UI etc.)
     ws.broadcastToOrg(req.org!.id, {
@@ -313,11 +356,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
     });
 
-    res.json({
+    const response: Record<string, unknown> = {
       agent_id: agent.id,
-      token: agent.token,
       ...toAgentResponse(agent),
-    });
+    };
+    // Only include token for first-time registration (S13: atomic check prevents TOCTOU)
+    if (created) {
+      response.token = agent.token;
+    }
+    res.json(response);
   });
 
   /**
@@ -424,6 +471,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     if (Object.values(fields).every(v => v === undefined)) {
       res.status(400).json({ error: 'No profile fields provided' });
+      return;
+    }
+
+    // Per-field size limits (S6)
+    const fieldError = checkFieldLimits({ bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
+    if (fieldError) {
+      res.status(400).json({ error: fieldError });
       return;
     }
 
@@ -624,6 +678,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     if (!type || !members || !Array.isArray(members) || members.length < 2) {
       res.status(400).json({ error: 'type and members (≥2) are required' });
+      return;
+    }
+
+    if (type === 'direct' && members.length !== 2) {
+      res.status(400).json({ error: 'Direct channels require exactly 2 members' });
       return;
     }
 
@@ -1371,6 +1430,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const { content, content_type, metadata, parts } = req.body;
 
+    // S6: content_type size limit
+    if (content_type !== undefined && typeof content_type === 'string' && Buffer.byteLength(content_type, 'utf8') > FIELD_LIMITS.content_type) {
+      res.status(400).json({ error: `content_type exceeds size limit (${FIELD_LIMITS.content_type} bytes)` });
+      return;
+    }
+
     // Validate parts if provided
     let partsJson: string | null = null;
     if (parts !== undefined) {
@@ -1407,6 +1472,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           res.status(400).json({ error: 'metadata must be JSON-serializable' });
           return;
         }
+      }
+      if (metadataJson && Buffer.byteLength(metadataJson, 'utf8') > FIELD_LIMITS.metadata) {
+        res.status(400).json({ error: `metadata exceeds size limit (${FIELD_LIMITS.metadata} bytes)` });
+        return;
       }
     }
 
@@ -1693,6 +1762,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const { content, content_type, parts } = req.body;
 
+    // S6: content_type size limit
+    if (content_type !== undefined && typeof content_type === 'string' && Buffer.byteLength(content_type, 'utf8') > FIELD_LIMITS.content_type) {
+      res.status(400).json({ error: `content_type exceeds size limit (${FIELD_LIMITS.content_type} bytes)` });
+      return;
+    }
+
     // Validate parts if provided
     let partsJson: string | null = null;
     if (parts !== undefined) {
@@ -1783,6 +1858,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!checkMessageRateLimit(req, res)) return;
 
     const { to, content, content_type, parts } = req.body;
+
+    // S6: content_type size limit
+    if (content_type !== undefined && typeof content_type === 'string' && Buffer.byteLength(content_type, 'utf8') > FIELD_LIMITS.content_type) {
+      res.status(400).json({ error: `content_type exceeds size limit (${FIELD_LIMITS.content_type} bytes)` });
+      return;
+    }
 
     // Validate parts if provided
     let partsJson: string | null = null;
