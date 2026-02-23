@@ -234,7 +234,7 @@ export class HubWS {
                 channel_name: channel.name ?? undefined,
                 count: 1,
                 last_at: msg.created_at,
-              });
+              }, channel.id);
             }
           }
 

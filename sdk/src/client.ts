@@ -14,7 +14,6 @@ import type {
   ThreadParticipant,
   ThreadPermissionPolicy,
   ThreadStatus,
-  ThreadType,
   TokenScope,
   WireMessage,
   WireThreadMessage,
@@ -305,11 +304,12 @@ export class BotsHubClient {
    */
   getMessages(
     channelId: string,
-    opts?: { limit?: number; before?: number },
+    opts?: { limit?: number; before?: number; since?: number },
   ): Promise<WireMessage[]> {
     const params = new URLSearchParams();
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
     if (opts?.before !== undefined) params.set('before', String(opts.before));
+    if (opts?.since !== undefined) params.set('since', String(opts.since));
     const qs = params.toString();
     return this.get<WireMessage[]>(`/api/channels/${channelId}/messages${qs ? '?' + qs : ''}`);
   }
@@ -340,7 +340,7 @@ export class BotsHubClient {
    */
   createThread(opts: {
     topic: string;
-    type?: ThreadType;
+    tags?: string[];
     participants?: string[];
     context?: object | string;
     channel_id?: string;
@@ -348,7 +348,7 @@ export class BotsHubClient {
   }): Promise<Thread> {
     return this.post<Thread>('/api/threads', {
       topic: opts.topic,
-      type: opts.type,
+      tags: opts.tags,
       participants: opts.participants,
       channel_id: opts.channel_id,
       context: opts.context,
@@ -414,11 +414,12 @@ export class BotsHubClient {
    */
   getThreadMessages(
     threadId: string,
-    opts?: { limit?: number; before?: number },
+    opts?: { limit?: number; before?: number; since?: number },
   ): Promise<WireThreadMessage[]> {
     const params = new URLSearchParams();
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
     if (opts?.before !== undefined) params.set('before', String(opts.before));
+    if (opts?.since !== undefined) params.set('since', String(opts.since));
     const qs = params.toString();
     return this.get<WireThreadMessage[]>(`/api/threads/${threadId}/messages${qs ? '?' + qs : ''}`);
   }

@@ -16,7 +16,6 @@ import type {
   ThreadMessage,
   Artifact,
   ArtifactType,
-  ThreadType,
   ThreadStatus,
   CloseReason,
   FileRecord,
@@ -98,8 +97,7 @@ export class HubDB {
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         topic TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'discussion'
-          CHECK(type IN ('discussion', 'request', 'collab')),
+        tags TEXT,
         status TEXT NOT NULL DEFAULT 'active'
           CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
         initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
@@ -277,6 +275,23 @@ export class HubDB {
       try { this.db.exec(`ALTER TABLE org_settings ADD COLUMN default_thread_permission_policy TEXT`); } catch { /* exists */ }
     });
 
+    // Migration: add tags column to threads (replaces type field)
+    try {
+      this.db.exec(`ALTER TABLE threads ADD COLUMN tags TEXT`);
+    } catch {
+      // Column already exists
+    }
+
+    // Migration: add ref_id to catchup_events for UPSERT aggregation
+    try {
+      this.db.exec(`ALTER TABLE catchup_events ADD COLUMN ref_id TEXT`);
+    } catch {
+      // Column already exists
+    }
+    // Index creation is idempotent (IF NOT EXISTS) — must be outside try-catch
+    // so it runs even if ALTER TABLE was already applied in a prior startup
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_catchup_ref ON catchup_events(target_bot_id, type, ref_id)`);
+
     // Migration: fix FK constraints on threads/thread_messages/artifacts
     // SQLite cannot ALTER FK constraints, so we must recreate tables.
     this.runMigration('008_fix_thread_foreign_keys', () => {
@@ -347,8 +362,7 @@ export class HubDB {
           id TEXT PRIMARY KEY,
           org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
           topic TEXT NOT NULL,
-          type TEXT NOT NULL DEFAULT 'discussion'
-            CHECK(type IN ('discussion', 'request', 'collab')),
+          tags TEXT,
           status TEXT NOT NULL DEFAULT 'active'
             CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
           initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
@@ -363,8 +377,8 @@ export class HubDB {
           last_activity_at INTEGER NOT NULL,
           resolved_at INTEGER
         );
-        INSERT INTO threads_new (id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
-          SELECT id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
+        INSERT INTO threads_new (id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
+          SELECT id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
         DROP TABLE threads;
         ALTER TABLE threads_new RENAME TO threads;
 
@@ -530,14 +544,25 @@ export class HubDB {
   }
 
   private rowToThread(row: any): Thread {
+    let tags: string[] | null = null;
+    if (row.tags) {
+      try { tags = JSON.parse(row.tags); } catch { tags = null; }
+    }
     return {
-      ...row,
+      id: row.id,
+      org_id: row.org_id,
+      topic: row.topic,
+      tags,
+      status: row.status,
       initiator_id: row.initiator_id ?? null,
       channel_id: row.channel_id ?? null,
       context: row.context ?? null,
       close_reason: row.close_reason ?? null,
       permission_policy: row.permission_policy ?? null,
       revision: row.revision ?? 1,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      last_activity_at: row.last_activity_at,
       resolved_at: row.resolved_at ?? null,
     };
   }
@@ -1308,16 +1333,17 @@ export class HubDB {
     return msg;
   }
 
-  getMessages(channelId: string, limit = 50, before?: number): Message[] {
-    if (before) {
-      return this.db.prepare(
-        'SELECT * FROM messages WHERE channel_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?'
-      ).all(channelId, before, limit) as Message[];
-    }
+  getMessages(channelId: string, limit = 50, before?: number, since?: number): Message[] {
+    const conditions = ['channel_id = ?'];
+    const params: any[] = [channelId];
 
+    if (before !== undefined) { conditions.push('created_at < ?'); params.push(before); }
+    if (since !== undefined)  { conditions.push('created_at > ?'); params.push(since); }
+
+    params.push(limit);
     return this.db.prepare(
-      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).all(channelId, limit) as Message[];
+      `SELECT * FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
+    ).all(...params) as Message[];
   }
 
   getNewMessages(agentId: string, since: number): (Message & { channel_name?: string })[] {
@@ -1337,7 +1363,7 @@ export class HubDB {
     orgId: string,
     initiatorId: string,
     topic: string,
-    type: ThreadType,
+    tags: string[] | null,
     participantIds: string[],
     channelId?: string | null,
     context?: string | null,
@@ -1353,7 +1379,7 @@ export class HubDB {
       id: crypto.randomUUID(),
       org_id: orgId,
       topic,
-      type,
+      tags,
       status: 'active',
       initiator_id: initiatorId,
       channel_id: channelId ?? null,
@@ -1371,7 +1397,7 @@ export class HubDB {
     const getChannelOrgStmt = this.db.prepare('SELECT org_id FROM channels WHERE id = ?');
     const insertThreadStmt = this.db.prepare(`
       INSERT INTO threads (
-        id, org_id, topic, type, status, initiator_id, channel_id, context, close_reason,
+        id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason,
         permission_policy, revision, created_at, updated_at, last_activity_at, resolved_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -1404,7 +1430,7 @@ export class HubDB {
         thread.id,
         thread.org_id,
         thread.topic,
-        thread.type,
+        thread.tags ? JSON.stringify(thread.tags) : null,
         thread.status,
         thread.initiator_id,
         thread.channel_id,
@@ -1668,20 +1694,17 @@ export class HubDB {
     return msg;
   }
 
-  getThreadMessages(threadId: string, limit = 50, before?: number): ThreadMessage[] {
-    const rows = before
-      ? (this.db.prepare(`
-          SELECT * FROM thread_messages
-          WHERE thread_id = ? AND created_at < ?
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(threadId, before, limit) as any[])
-      : (this.db.prepare(`
-          SELECT * FROM thread_messages
-          WHERE thread_id = ?
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(threadId, limit) as any[]);
+  getThreadMessages(threadId: string, limit = 50, before?: number, since?: number): ThreadMessage[] {
+    const conditions = ['thread_id = ?'];
+    const params: any[] = [threadId];
+
+    if (before !== undefined) { conditions.push('created_at < ?'); params.push(before); }
+    if (since !== undefined)  { conditions.push('created_at > ?'); params.push(since); }
+
+    params.push(limit);
+    const rows = this.db.prepare(
+      `SELECT * FROM thread_messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
+    ).all(...params) as any[];
 
     return rows.map(row => this.rowToThreadMessage(row));
   }
@@ -1984,13 +2007,31 @@ export class HubDB {
   }
   // ─── Catchup Event Operations ─────────────────────────────
 
-  recordCatchupEvent(orgId: string, targetBotId: string, type: string, payload: Record<string, unknown>) {
-    const id = crypto.randomUUID();
+  recordCatchupEvent(orgId: string, targetBotId: string, type: string, payload: Record<string, unknown>, refId?: string) {
     const now = Date.now();
+
+    // For aggregatable events (summaries): UPSERT by (target_bot_id, type, ref_id)
+    // to avoid flooding catchup with one row per message
+    if (refId) {
+      const existing = this.db.prepare(
+        'SELECT id, payload FROM catchup_events WHERE target_bot_id = ? AND type = ? AND ref_id = ?'
+      ).get(targetBotId, type, refId) as { id: string; payload: string } | undefined;
+
+      if (existing) {
+        const prev = JSON.parse(existing.payload);
+        const merged = { ...prev, ...payload, count: (prev.count || 0) + (payload.count as number || 1) };
+        this.db.prepare(
+          'UPDATE catchup_events SET payload = ?, occurred_at = ? WHERE id = ?'
+        ).run(JSON.stringify(merged), now, existing.id);
+        return;
+      }
+    }
+
+    const id = crypto.randomUUID();
     this.db.prepare(`
-      INSERT INTO catchup_events (id, org_id, target_bot_id, type, payload, occurred_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, orgId, targetBotId, type, JSON.stringify(payload), now);
+      INSERT INTO catchup_events (id, org_id, target_bot_id, type, ref_id, payload, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, orgId, targetBotId, type, refId ?? null, JSON.stringify(payload), now);
   }
 
   getCatchupEvents(botId: string, since: number, limit = 50, cursor?: string): { events: CatchupEvent[]; has_more: boolean } {
@@ -2075,6 +2116,7 @@ export class HubDB {
           break;
         case 'thread_message_summary':
         case 'thread_artifact_added':
+        case 'thread_participant_removed':
           counts.thread_activities += row.count;
           break;
         case 'channel_message_summary':

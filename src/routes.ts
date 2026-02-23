@@ -7,7 +7,7 @@ import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
-import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
+import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 
 // S6: Per-field size limits (bytes)
@@ -131,7 +131,7 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
   return { ...msg, parts: parsed };
 }
 
-const THREAD_TYPES = new Set<ThreadType>(['discussion', 'request', 'collab']);
+const MAX_THREAD_TAGS = 10;
 const THREAD_STATUSES = new Set<ThreadStatus>(['active', 'blocked', 'reviewing', 'resolved', 'closed']);
 const CLOSE_REASONS = new Set<CloseReason>(['manual', 'timeout', 'error']);
 const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code', 'file', 'link']);
@@ -878,7 +878,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/org/threads/:id/messages — Thread messages (enriched with parts)
-   * Query: limit?, before?
+   * Query: limit?, before?, since?
    * Auth: Org API Key + X-Admin-Secret
    */
   auth.get('/api/org/threads/:id/messages', requireOrg, (req, res) => {
@@ -893,8 +893,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
     const beforeStr = getQueryString(req.query.before);
     const before = beforeStr ? parseInt(beforeStr) : undefined;
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr !== undefined ? parseInt(sinceStr) : undefined;
+    if (since !== undefined && isNaN(since)) {
+      res.status(400).json({ error: 'since must be a valid integer timestamp' });
+      return;
+    }
 
-    const messages = db.getThreadMessages(thread.id, limit, before);
+    const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
       return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
@@ -923,12 +929,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * POST /api/threads — Create a thread
-   * Body: { topic, type?, participants?, channel_id?, context? }
+   * Body: { topic, tags?, participants?, channel_id?, context? }
    */
   auth.post('/api/threads', requireAgent, requireScope('thread'), (req, res) => {
     if (!checkThreadRateLimit(req, res)) return;
 
-    const { topic, type, participants, channel_id, context, permission_policy } = req.body;
+    const { topic, tags, participants, channel_id, context, permission_policy } = req.body;
     const orgId = req.agent!.org_id;
 
     if (!topic || typeof topic !== 'string') {
@@ -936,10 +942,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const threadType = (typeof type === 'string' ? type : 'discussion') as ThreadType;
-    if (!THREAD_TYPES.has(threadType)) {
-      res.status(400).json({ error: 'Invalid thread type' });
-      return;
+    // Validate tags: optional array of strings
+    let resolvedTags: string[] | null = null;
+    if (tags !== undefined && tags !== null) {
+      if (!Array.isArray(tags) || !tags.every((t: unknown) => typeof t === 'string')) {
+        res.status(400).json({ error: 'tags must be an array of strings' });
+        return;
+      }
+      if (tags.length > MAX_THREAD_TAGS) {
+        res.status(400).json({ error: `tags must have at most ${MAX_THREAD_TAGS} items` });
+        return;
+      }
+      resolvedTags = tags.map((t: string) => t.trim()).filter((t: string) => t.length > 0);
     }
 
     if (participants !== undefined && !Array.isArray(participants)) {
@@ -1016,7 +1030,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         orgId,
         req.agent!.id,
         topic,
-        threadType,
+        resolvedTags,
         resolvedParticipantIds,
         resolvedChannelId,
         contextJson,
@@ -1024,7 +1038,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       );
 
       // Audit (rate limit event already recorded atomically in checkThreadRateLimit)
-      db.recordAudit(orgId, req.agent!.id, 'thread.create', 'thread', thread.id, { topic, type: threadType });
+      db.recordAudit(orgId, req.agent!.id, 'thread.create', 'thread', thread.id, { topic, tags: resolvedTags });
 
       // Record catchup events: thread_invited for each participant (except initiator)
       const allParticipantIds = Array.from(new Set([req.agent!.id, ...resolvedParticipantIds]));
@@ -1041,6 +1055,20 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         type: 'thread_created',
         thread,
       });
+
+      // Emit individual join events for all participants (including initiator)
+      for (const pid of allParticipantIds) {
+        const bot = db.getAgentById(pid);
+        if (!bot) continue;
+        ws.broadcastThreadEvent(orgId, thread.id, {
+          type: 'thread_participant',
+          thread_id: thread.id,
+          bot_id: pid,
+          bot_name: bot.name,
+          action: 'joined',
+          by: req.agent!.id,
+        });
+      }
 
       res.setHeader('ETag', `"${thread.revision}"`);
       res.json(thread);
@@ -1370,7 +1398,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           type: 'thread_participant',
           thread_id: thread.id,
           bot_id: bot.id,
+          bot_name: bot.name,
           action: 'joined',
+          by: req.agent!.id,
+          label: participant.label,
         });
       }
 
@@ -1421,9 +1452,25 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       type: 'thread_participant',
       thread_id: thread.id,
       bot_id: target.id,
+      bot_name: target.name,
       action: 'left',
+      by: req.agent!.id,
     });
+
+    // Record catchup event so the removed bot sees it even if offline
+    db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
+      thread_id: thread.id,
+      topic: thread.topic,
+      removed_by: req.agent!.id,
+    });
+
     db.removeParticipant(thread.id, target.id);
+
+    // Audit
+    db.recordAudit(thread.org_id, req.agent!.id, 'thread.remove_participant', 'thread', thread.id, {
+      removed_bot_id: target.id,
+      removed_bot_name: target.name,
+    });
 
     res.json({ ok: true });
   });
@@ -1517,7 +1564,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         topic: thread.topic,
         count: 1,
         last_at: message.created_at,
-      });
+      }, thread.id);
     }
 
     ws.broadcastThreadEvent(thread.org_id, thread.id, {
@@ -1531,7 +1578,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/threads/:id/messages — Get thread messages
-   * Query: limit?, before?
+   * Query: limit?, before?, since?
    */
   auth.get('/api/threads/:id/messages', requireAgent, requireScope('read'), (req, res) => {
     const thread = requireThreadParticipant(req, res, req.params.id as string);
@@ -1540,8 +1587,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
     const beforeStr = getQueryString(req.query.before);
     const before = beforeStr ? parseInt(beforeStr) : undefined;
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr !== undefined ? parseInt(sinceStr) : undefined;
+    if (since !== undefined && isNaN(since)) {
+      res.status(400).json({ error: 'since must be a valid integer timestamp' });
+      return;
+    }
 
-    const messages = db.getThreadMessages(thread.id, limit, before);
+    const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
       return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
@@ -1640,7 +1693,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           thread_id: thread.id,
           artifact_key: artifact.artifact_key,
           version: artifact.version,
-        });
+        }, thread.id);
       }
 
       ws.broadcastThreadEvent(thread.org_id, thread.id, {
@@ -1713,7 +1766,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           thread_id: thread.id,
           artifact_key: artifact.artifact_key,
           version: artifact.version,
-        });
+        }, thread.id);
       }
 
       ws.broadcastThreadEvent(thread.org_id, thread.id, {
@@ -1820,7 +1873,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         channel_name: channel.name ?? undefined,
         count: 1,
         last_at: msg.created_at,
-      });
+      }, channel.id);
     }
 
     // Broadcast via WebSocket
@@ -1831,7 +1884,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/channels/:id/messages — Get messages from a channel
-   * Query: limit?, before? (timestamp)
+   * Query: limit?, before?, since? (timestamps)
    */
   auth.get('/api/channels/:id/messages', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
@@ -1853,8 +1906,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
     const beforeStr = getQueryString(req.query.before);
     const before = beforeStr ? parseInt(beforeStr) : undefined;
+    const sinceStr = getQueryString(req.query.since);
+    const since = sinceStr !== undefined ? parseInt(sinceStr) : undefined;
+    if (since !== undefined && isNaN(since)) {
+      res.status(400).json({ error: 'since must be a valid integer timestamp' });
+      return;
+    }
 
-    const messages = db.getMessages(channel.id, limit, before);
+    const messages = db.getMessages(channel.id, limit, before, since);
 
     // Enrich with sender names and parsed parts
     const enriched = messages.map(m => {
@@ -1940,7 +1999,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       channel_name: channel.name ?? undefined,
       count: 1,
       last_at: msg.created_at,
-    });
+    }, channel.id);
 
     // Broadcast
     ws.broadcastMessage(channel.id, msg, req.agent!.name);

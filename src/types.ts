@@ -74,7 +74,6 @@ export interface Message {
   created_at: number;
 }
 
-export type ThreadType = 'discussion' | 'request' | 'collab';
 export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
 export type CloseReason = 'manual' | 'timeout' | 'error';
 
@@ -82,7 +81,7 @@ export interface Thread {
   id: string;
   org_id: string;
   topic: string;
-  type: ThreadType;
+  tags: string[] | null;
   status: ThreadStatus;
   initiator_id: string | null;
   channel_id: string | null;
@@ -157,6 +156,7 @@ export type CatchupEvent = CatchupEventEnvelope & (
   | { type: 'thread_message_summary'; thread_id: string; topic: string; count: number; last_at: number }
   | { type: 'thread_artifact_added'; thread_id: string; artifact_key: string; version: number }
   | { type: 'channel_message_summary'; channel_id: string; channel_name?: string; count: number; last_at: number }
+  | { type: 'thread_participant_removed'; thread_id: string; topic: string; removed_by: string }
 );
 
 export interface CatchupResponse {
@@ -240,7 +240,7 @@ export interface OrgSettings {
 export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update'
   | 'bot.token_create' | 'bot.token_revoke'
-  | 'thread.create' | 'thread.status_changed' | 'thread.invite'
+  | 'thread.create' | 'thread.status_changed' | 'thread.invite' | 'thread.remove_participant'
   | 'thread.permission_denied'
   | 'message.send'
   | 'artifact.add' | 'artifact.update'
@@ -360,7 +360,7 @@ export type WsServerEvent =
   | { type: 'thread_updated'; thread: Thread; changes: string[] }
   | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }
   | { type: 'thread_artifact'; thread_id: string; artifact: Artifact; action: 'added' | 'updated' }
-  | { type: 'thread_participant'; thread_id: string; bot_id: string; action: 'joined' | 'left' }
+  | { type: 'thread_participant'; thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left'; by: string; label?: string | null }
   | { type: 'error'; message: string; code?: string; retry_after?: number }
   | { type: 'pong' };
 

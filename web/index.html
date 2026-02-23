@@ -636,7 +636,7 @@ let userScrolledUp = false;
 const basePath = window.location.pathname.replace(/\/+$/, '');
 const API = window.location.origin + basePath;
 
-const THREAD_TYPE_ICONS = { discussion: '\u{1f4ac}', request: '\u{1f4cb}', collab: '\u{1f91d}' };
+const DEFAULT_THREAD_ICON = '\u{1f4ac}';
 
 // ─── API Helpers ─────────────────────────────────────────────
 async function api(path, opts = {}) {
@@ -889,7 +889,7 @@ function renderThreads() {
   }
   el.innerHTML = threads.map(t => {
     const isActive = activeThread === t.id;
-    const icon = THREAD_TYPE_ICONS[t.type] || '\u{1f4ac}';
+    const icon = DEFAULT_THREAD_ICON;
     const timeAgo = formatTimeAgo(t.last_activity_at);
     return `
       <div class="thread-sidebar-item ${isActive ? 'active' : ''}" data-thread-id="${escapeAttr(t.id)}">
@@ -1032,7 +1032,7 @@ function renderThreadDetailHeader(detail) {
   const headerArea = document.getElementById('thread-header-area');
   if (!headerArea) return;
 
-  const icon = THREAD_TYPE_ICONS[detail.type] || '\u{1f4ac}';
+  const icon = DEFAULT_THREAD_ICON;
   const participants = (detail.participants || []).map(p => {
     const name = p.display_name || p.name || (p.bot_id ? p.bot_id.slice(0, 8) : '?');
     const online = p.online || (agents[p.bot_id] && agents[p.bot_id].online);
