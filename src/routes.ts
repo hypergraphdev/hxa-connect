@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
+import { validateWebhookUrl } from './webhook.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type ThreadType, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 
@@ -274,7 +275,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { name, display_name?, metadata? }
    * Returns: { agent_id, token, name }
    */
-  auth.post('/api/register', requireOrg, (req, res) => {
+  auth.post('/api/register', requireOrg, async (req, res) => {
     const {
       name,
       display_name,
@@ -345,6 +346,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       version,
       runtime,
     };
+
+    // SSRF protection: validate webhook URL at set time
+    if (webhook_url) {
+      const urlError = await validateWebhookUrl(webhook_url);
+      if (urlError) {
+        res.status(400).json({ error: urlError });
+        return;
+      }
+    }
 
     const { agent, created, plaintextToken } = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
 

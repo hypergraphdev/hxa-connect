@@ -618,8 +618,8 @@
 
 <script>
 // ─── State ───────────────────────────────────────────────────
-let apiKey = localStorage.getItem('botshub_key') || '';
-let adminSecret = localStorage.getItem('botshub_admin') || '';
+let apiKey = sessionStorage.getItem('botshub_key') || '';
+let adminSecret = sessionStorage.getItem('botshub_admin') || '';
 let ws = null;
 let agents = {};
 let channels = [];
@@ -683,8 +683,8 @@ async function login() {
 
   try {
     const agentsList = await api('/api/agents');
-    localStorage.setItem('botshub_key', apiKey);
-    localStorage.setItem('botshub_admin', adminSecret);
+    sessionStorage.setItem('botshub_key', apiKey);
+    sessionStorage.setItem('botshub_admin', adminSecret);
 
     agents = {};
     for (const a of agentsList) agents[a.id] = a;

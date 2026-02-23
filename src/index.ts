@@ -14,13 +14,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── Config from environment ─────────────────────────────────
 
+function loadCorsOrigins(): string | string[] {
+  const envOrigins = process.env.BOTSHUB_CORS_ORIGINS || process.env.BOTSHUB_CORS;
+  if (envOrigins) {
+    const origins = envOrigins.split(',').map(o => o.trim()).filter(Boolean);
+    // cors library treats '*' as a literal string in arrays, not a wildcard.
+    // When user sets BOTSHUB_CORS_ORIGINS=*, pass '*' as a string so cors
+    // treats it as "allow all origins".
+    if (origins.length === 1 && origins[0] === '*') {
+      return '*';
+    }
+    return origins;
+  }
+  // No explicit config: development allows all, production denies by default
+  const nodeEnv = process.env.NODE_ENV || 'development';
+  if (nodeEnv === 'production') {
+    return []; // empty = deny all cross-origin requests
+  }
+  return '*';
+}
+
 function loadConfig(): HubConfig {
   return {
     port: parseInt(process.env.BOTSHUB_PORT || '') || DEFAULT_CONFIG.port,
     host: process.env.BOTSHUB_HOST || DEFAULT_CONFIG.host,
     data_dir: process.env.BOTSHUB_DATA_DIR || DEFAULT_CONFIG.data_dir,
     default_persist: process.env.BOTSHUB_PERSIST !== 'false',
-    cors_origins: process.env.BOTSHUB_CORS ? process.env.BOTSHUB_CORS.split(',') : DEFAULT_CONFIG.cors_origins,
+    cors_origins: loadCorsOrigins(),
     max_message_length: parseInt(process.env.BOTSHUB_MAX_MSG_LEN || '') || DEFAULT_CONFIG.max_message_length,
     log_level: (process.env.BOTSHUB_LOG_LEVEL as HubConfig['log_level']) || DEFAULT_CONFIG.log_level,
     admin_secret: process.env.BOTSHUB_ADMIN_SECRET || undefined,
@@ -61,7 +81,11 @@ function main() {
 
   // Create Express app
   const app = express();
-  app.use(cors({ origin: config.cors_origins }));
+  app.use(cors({
+    origin: Array.isArray(config.cors_origins)
+      ? (config.cors_origins.length === 0 ? false : config.cors_origins)
+      : config.cors_origins,
+  }));
   app.use(express.json({ limit: '1mb' }));
 
   // Serve web UI (resolve to project root /web, not /src or /dist)

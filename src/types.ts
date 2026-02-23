@@ -379,7 +379,7 @@ export interface HubConfig {
   host: string;
   data_dir: string;
   default_persist: boolean;
-  cors_origins: string[];
+  cors_origins: string | string[];
   max_message_length: number;
   log_level: 'debug' | 'info' | 'warn' | 'error';
   admin_secret?: string;
@@ -433,7 +433,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   host: '0.0.0.0',
   data_dir: './data',
   default_persist: true,
-  cors_origins: ['*'],
+  cors_origins: '*',
   max_message_length: 65536,
   log_level: 'info',
   admin_secret: undefined,

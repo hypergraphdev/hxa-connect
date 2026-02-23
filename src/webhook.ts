@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { URL } from 'node:url';
 import type { HubDB } from './db.js';
 
 /**
@@ -7,6 +9,85 @@ import type { HubDB } from './db.js';
  */
 function computeHmacSignature(secret: string, body: string): string {
   return crypto.createHmac('sha256', secret).update(body, 'utf8').digest('hex');
+}
+
+/**
+ * Check if an IP address is in a private/reserved range.
+ */
+function isPrivateIP(ip: string): boolean {
+  // Strip IPv4-mapped IPv6 prefix — two forms:
+  //   dotted:  ::ffff:127.0.0.1
+  //   hex:     ::ffff:7f00:1  (127.0.0.1 encoded as two 16-bit hex groups)
+  let normalized = ip;
+  const v4mappedDotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i;
+  const dottedMatch = v4mappedDotted.exec(normalized);
+  if (dottedMatch) {
+    normalized = dottedMatch[1];
+  } else {
+    const v4mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i;
+    const hexMatch = v4mappedHex.exec(normalized);
+    if (hexMatch) {
+      const hi = parseInt(hexMatch[1], 16);
+      const lo = parseInt(hexMatch[2], 16);
+      normalized = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    }
+  }
+
+  // IPv4 private ranges
+  if (/^127\./.test(normalized)) return true;                          // 127.0.0.0/8
+  if (/^10\./.test(normalized)) return true;                           // 10.0.0.0/8
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(normalized)) return true;     // 172.16.0.0/12
+  if (/^192\.168\./.test(normalized)) return true;                     // 192.168.0.0/16
+  if (/^169\.254\./.test(normalized)) return true;                     // 169.254.0.0/16 (link-local)
+  if (/^0\./.test(normalized)) return true;                            // 0.0.0.0/8
+  // IPv6 private ranges
+  if (normalized === '::1') return true;                               // loopback
+  if (/^f[cd]/i.test(normalized)) return true;                         // fc00::/7 (unique local)
+  if (/^fe80/i.test(normalized)) return true;                          // fe80::/10 (link-local)
+  return false;
+}
+
+/**
+ * Validate a webhook URL for SSRF safety.
+ * - Must be https in production (http allowed in development)
+ * - Hostname must not resolve to a private IP
+ * Returns null if valid, or an error string if invalid.
+ */
+export async function validateWebhookUrl(url: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'webhook_url is not a valid URL';
+  }
+
+  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+
+  // Scheme check
+  if (parsed.protocol === 'http:' && !isDev) {
+    return 'webhook_url must use https in production';
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return 'webhook_url must use http or https scheme';
+  }
+
+  // Resolve hostname and check for private IPs
+  // URL.hostname wraps IPv6 literals in brackets (e.g. [::1]) — strip them for dns.lookup
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+  try {
+    const { address } = await lookup(hostname);
+    if (isPrivateIP(address)) {
+      return 'webhook_url must not resolve to a private/internal IP address';
+    }
+  } catch (err: any) {
+    // ENOTFOUND = domain doesn't exist; other errors = temporary DNS failure
+    if (err?.code === 'ENOTFOUND') {
+      return 'webhook_url hostname could not be resolved';
+    }
+    return 'webhook_url hostname DNS lookup failed temporarily — please try again';
+  }
+
+  return null;
 }
 
 export class WebhookManager {
@@ -31,6 +112,27 @@ export class WebhookManager {
     // Check if degraded — skip delivery
     if (this.db.isWebhookDegraded(agentId)) {
       return false;
+    }
+
+    // SSRF re-validation at delivery time to prevent DNS rebinding (TOCTOU)
+    // Registration-time check alone is insufficient: attacker can register with
+    // a public IP then switch DNS to a private IP before delivery.
+    let parsed: URL;
+    try {
+      parsed = new URL(webhookUrl);
+    } catch {
+      console.log(`  \u274c Webhook ${agentId}: invalid URL at delivery time`);
+      return false;
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    try {
+      const { address } = await lookup(hostname);
+      if (isPrivateIP(address)) {
+        console.log(`  \u274c Webhook ${agentId}: blocked — resolved to private IP at delivery time`);
+        return false;
+      }
+    } catch {
+      // DNS failure at delivery time — skip silently, will retry
     }
 
     const body = JSON.stringify(payload);
