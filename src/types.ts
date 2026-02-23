@@ -15,6 +15,11 @@ export interface Org {
   name: string;
   api_key: string;
   admin_secret: string;
+  /**
+   * Reserved for SaaS deployment — non-persistent mode is a post-GA feature.
+   * Currently always true. The field is accepted at org creation for forward
+   * compatibility, but toggling it to false has no effect on message storage.
+   */
   persist_messages: boolean;
   created_at: number;
 }
@@ -70,7 +75,7 @@ export interface Message {
 }
 
 export type ThreadType = 'discussion' | 'request' | 'collab';
-export type ThreadStatus = 'open' | 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
+export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
 export type CloseReason = 'manual' | 'timeout' | 'error';
 
 export interface Thread {
@@ -350,6 +355,7 @@ export type WsServerEvent =
   | { type: 'agent_online'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
   | { type: 'agent_offline'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
   | { type: 'channel_created'; channel: Channel; members: string[] }
+  | { type: 'channel_deleted'; channel_id: string }
   | { type: 'thread_created'; thread: Thread }
   | { type: 'thread_updated'; thread: Thread; changes: string[] }
   | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }
@@ -378,6 +384,10 @@ export interface HubConfig {
   port: number;
   host: string;
   data_dir: string;
+  /**
+   * Default value for org persist_messages on creation.
+   * Reserved for SaaS deployment — non-persistent mode is a post-GA feature.
+   */
   default_persist: boolean;
   cors_origins: string | string[];
   max_message_length: number;

@@ -98,7 +98,12 @@ function main() {
   const hubWs = new HubWS(server, db, webhookManager, config);
   app.use(createRouter(db, hubWs, config));
 
-  // Fallback: serve index.html for SPA routing
+  // JSON 404 for unmatched API routes (must come before SPA catch-all)
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+
+  // Fallback: serve index.html for SPA routing (non-API paths only)
   app.get('*', (_req, res) => {
     res.sendFile(path.join(webDir, 'index.html'));
   });

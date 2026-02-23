@@ -293,26 +293,15 @@ export class HubWS {
     };
 
     // Fire webhooks for members who have one (and aren't the sender)
+    // Webhook payload uses the same WsServerEvent envelope as WS events
+    const webhookPayload = { webhook_version: '1' as const, ...event };
     for (const agentId of members) {
       if (agentId === message.sender_id) continue;
       const agent = this.db.getAgentById(agentId);
       if (agent?.webhook_url) {
-        // Send structured webhook payload for channel plugins
-        const payload = {
-          channel_id: channelId,
-          sender_name: senderName,
-          sender_id: message.sender_id,
-          content: message.content,
-          parts: parsedParts,
-          message_id: message.id,
-          chat_type: channel.type,
-          group_name: channel.name,
-          created_at: message.created_at,
-        };
-
         console.log(`  \ud83d\udce4 Webhook \u2192 ${agent.name} (${agent.webhook_url})`);
         // Fire-and-forget — retries happen in background
-        void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, payload);
+        void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
       }
     }
 
@@ -380,6 +369,7 @@ export class HubWS {
   }
 
   private fireThreadWebhooks(participantIds: string[], event: WsServerEvent, excludeBotId?: string) {
+    const webhookPayload = { webhook_version: '1' as const, ...event };
     for (const agentId of participantIds) {
       if (excludeBotId && agentId === excludeBotId) continue;
 
@@ -388,7 +378,7 @@ export class HubWS {
 
       console.log(`  \ud83d\udce4 Thread webhook \u2192 ${agent.name} (${agent.webhook_url})`);
       // Fire-and-forget — retries happen in background
-      void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, event);
+      void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
     }
   }
 }

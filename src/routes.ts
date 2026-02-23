@@ -132,7 +132,7 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
 }
 
 const THREAD_TYPES = new Set<ThreadType>(['discussion', 'request', 'collab']);
-const THREAD_STATUSES = new Set<ThreadStatus>(['open', 'active', 'blocked', 'reviewing', 'resolved', 'closed']);
+const THREAD_STATUSES = new Set<ThreadStatus>(['active', 'blocked', 'reviewing', 'resolved', 'closed']);
 const CLOSE_REASONS = new Set<CloseReason>(['manual', 'timeout', 'error']);
 const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code', 'file', 'link']);
 const ARTIFACT_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
@@ -241,6 +241,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { name, persist_messages? }
    * Auth: Admin secret (if BOTSHUB_ADMIN_SECRET is set)
    * Returns: org with api_key
+   *
+   * Note: persist_messages is reserved for SaaS deployment — non-persistent
+   * mode is a post-GA feature. The field is accepted for forward compatibility
+   * but toggling it to false has no effect on message storage yet.
    */
   router.post('/api/orgs', (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -812,7 +816,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Broadcast channel deletion
     ws.broadcastToOrg(req.org!.id, {
-      type: 'channel_deleted' as any,
+      type: 'channel_deleted',
       channel_id: channel.id,
     });
 

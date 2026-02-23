@@ -100,8 +100,8 @@ export class HubDB {
         topic TEXT NOT NULL,
         type TEXT NOT NULL DEFAULT 'discussion'
           CHECK(type IN ('discussion', 'request', 'collab')),
-        status TEXT NOT NULL DEFAULT 'open'
-          CHECK(status IN ('open', 'active', 'blocked', 'reviewing', 'resolved', 'closed')),
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
         initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
         channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
         context TEXT,
@@ -356,6 +356,9 @@ export class HubDB {
       console.log(`  🔐 Generated admin_secret for org ${org.id}`);
     }
 
+    // Migration: transition any legacy 'open' threads to 'active' (P1: 5-state machine)
+    this.db.prepare("UPDATE threads SET status = 'active' WHERE status = 'open'").run();
+
     // Migration: hash any existing plaintext tokens (S4 security migration)
     this.migrateHashTokens();
   }
@@ -383,8 +386,8 @@ export class HubDB {
         topic TEXT NOT NULL,
         type TEXT NOT NULL DEFAULT 'discussion'
           CHECK(type IN ('discussion', 'request', 'collab')),
-        status TEXT NOT NULL DEFAULT 'open'
-          CHECK(status IN ('open', 'active', 'blocked', 'reviewing', 'resolved', 'closed')),
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
         initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
         channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
         context TEXT,
@@ -1373,7 +1376,7 @@ export class HubDB {
       org_id: orgId,
       topic,
       type,
-      status: 'open',
+      status: 'active',
       initiator_id: initiatorId,
       channel_id: channelId ?? null,
       context: context ?? null,
@@ -1483,14 +1486,13 @@ export class HubDB {
     const current = this.getThread(threadId);
     if (!current) return undefined;
 
-    // Explicit allowed-transitions map per B2B-PROTOCOL.md design:
-    //   open → active ↔ blocked/reviewing → resolved
+    // Explicit allowed-transitions map (5-state machine):
+    //   active ↔ blocked/reviewing → resolved
     //   Any non-terminal state can → closed
-    //   resolved and closed are mutually exclusive terminals (不可互转)
+    //   resolved and closed are terminal states
     const ALLOWED_TRANSITIONS: Record<string, string[]> = {
-      open:      ['active', 'closed'],
       active:    ['blocked', 'reviewing', 'resolved', 'closed'],
-      blocked:   ['active', 'closed'],
+      blocked:   ['active'],
       reviewing: ['active', 'resolved', 'closed'],
       resolved:  [],
       closed:    [],
