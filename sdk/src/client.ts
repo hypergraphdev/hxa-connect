@@ -78,6 +78,19 @@ export class ApiError extends Error {
 
 // ─── Client Options ──────────────────────────────────────────
 
+export interface ReconnectOptions {
+  /** Enable auto-reconnect on unexpected disconnect (default: true) */
+  enabled?: boolean;
+  /** Initial delay in ms before first reconnect attempt (default: 1000) */
+  initialDelay?: number;
+  /** Maximum delay in ms between reconnect attempts (default: 30000) */
+  maxDelay?: number;
+  /** Multiplier for exponential backoff (default: 2) */
+  backoffFactor?: number;
+  /** Maximum number of reconnect attempts before giving up (default: Infinity) */
+  maxAttempts?: number;
+}
+
 export interface BotsHubClientOptions {
   /** Base URL of the BotsHub server (e.g. "http://localhost:4800") */
   url: string;
@@ -85,6 +98,8 @@ export interface BotsHubClientOptions {
   token: string;
   /** HTTP request timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /** Auto-reconnect configuration */
+  reconnect?: ReconnectOptions;
 }
 
 // ─── Main Client ─────────────────────────────────────────────
@@ -99,11 +114,26 @@ export class BotsHubClient {
   private eventHandlers: Map<string, Set<EventHandler>> = new Map();
   private cachedBotId: string | null = null;
 
+  // E1: Auto-reconnect state
+  private readonly reconnectOpts: Required<ReconnectOptions>;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private intentionalDisconnect = false;
+
   constructor(options: BotsHubClientOptions) {
     // Strip trailing slash
     this.baseUrl = options.url.replace(/\/+$/, '');
     this.token = options.token;
     this.timeout = options.timeout ?? 30_000;
+
+    const rc = options.reconnect ?? {};
+    this.reconnectOpts = {
+      enabled: rc.enabled ?? true,
+      initialDelay: rc.initialDelay ?? 1000,
+      maxDelay: rc.maxDelay ?? 30_000,
+      backoffFactor: rc.backoffFactor ?? 2,
+      maxAttempts: rc.maxAttempts ?? Infinity,
+    };
   }
 
   // ─── HTTP ────────────────────────────────────────────────
@@ -162,15 +192,21 @@ export class BotsHubClient {
   /**
    * Connect to the BotsHub WebSocket for real-time events.
    * Events are received via the `.on()` method.
-   *
-   * Note: The auth token is passed via URL query parameter because the WebSocket
-   * protocol does not support custom headers during the handshake.
+   * Auto-reconnects on unexpected disconnect (configurable via `reconnect` options).
    */
   async connect(): Promise<void> {
     if (this.ws && this.ws.readyState === WS_OPEN) {
       return; // Already connected
     }
 
+    this.intentionalDisconnect = false;
+    this.reconnectAttempts = 0;
+    this.clearReconnectTimer();
+
+    await this.doConnect();
+  }
+
+  private async doConnect(): Promise<void> {
     const wsUrl = this.baseUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + `/ws?token=${encodeURIComponent(this.token)}`;
     this.ws = await createWebSocket(wsUrl);
 
@@ -190,6 +226,7 @@ export class BotsHubClient {
     this.ws.addEventListener('close', () => {
       this.ws = null;
       this.emit('close', undefined);
+      this.scheduleReconnect();
     });
 
     this.ws.addEventListener('error', (e: any) => {
@@ -197,12 +234,52 @@ export class BotsHubClient {
     });
   }
 
+  private scheduleReconnect(): void {
+    if (this.intentionalDisconnect || !this.reconnectOpts.enabled) return;
+    if (this.reconnectAttempts >= this.reconnectOpts.maxAttempts) {
+      this.emit('reconnect_failed', { attempts: this.reconnectAttempts });
+      return;
+    }
+
+    const delay = Math.min(
+      this.reconnectOpts.initialDelay * Math.pow(this.reconnectOpts.backoffFactor, this.reconnectAttempts),
+      this.reconnectOpts.maxDelay,
+    );
+    this.reconnectAttempts++;
+
+    this.emit('reconnecting', { attempt: this.reconnectAttempts, delay });
+
+    this.reconnectTimer = setTimeout(async () => {
+      if (this.intentionalDisconnect) return;
+      try {
+        await this.doConnect();
+        if (this.intentionalDisconnect) {
+          // disconnect() was called while doConnect() was in flight
+          this.ws?.close();
+          return;
+        }
+        this.emit('reconnected', { attempts: this.reconnectAttempts });
+        this.reconnectAttempts = 0;
+      } catch {
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   /**
    * Disconnect the WebSocket connection.
-   * Event handlers registered via `.on()` are preserved and will fire
-   * again if `.connect()` is called later. Use `.off()` to remove them.
+   * Stops auto-reconnect. Event handlers are preserved for future `.connect()` calls.
    */
   disconnect(): void {
+    this.intentionalDisconnect = true;
+    this.clearReconnectTimer();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -242,7 +319,8 @@ export class BotsHubClient {
     }
   }
 
-  private emit(event: string, data: unknown): void {
+  /** @internal Emit an event to registered handlers. */
+  emit(event: string, data: unknown): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
