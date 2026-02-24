@@ -408,6 +408,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
+   * GET /api/org — Get current org info
+   * Auth: Org API Key
+   */
+  auth.get('/api/org', requireOrg, (req, res) => {
+    const org = req.org!;
+    res.json({ id: org.id, name: org.name });
+  });
+
+  /**
    * GET /api/agents — List agents in the org
    */
   auth.get('/api/agents', requireOrg, (req, res) => {
@@ -928,7 +937,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+      return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse());
@@ -1608,7 +1617,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+      return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse());
@@ -1878,7 +1887,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Broadcast via WebSocket
-    ws.broadcastMessage(channel.id, msg, req.agent!.name);
+    ws.broadcastMessage(channel.id, msg, req.agent!.display_name || req.agent!.name);
 
     res.json(enrichMessage(msg));
   });
@@ -1919,7 +1928,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Enrich with sender names and parsed parts
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
+      return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse()); // Return in chronological order
@@ -2003,7 +2012,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }, channel.id);
 
     // Broadcast
-    ws.broadcastMessage(channel.id, msg, req.agent!.name);
+    ws.broadcastMessage(channel.id, msg, req.agent!.display_name || req.agent!.name);
 
     res.json({ channel_id: channel.id, message: enrichMessage(msg) });
   });
@@ -2072,7 +2081,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getNewMessages(req.agent!.id, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
+      return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
     });
 
     res.json(enriched);
@@ -2360,7 +2369,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const ticketId = issueWsTicket(token);
+    // Carry admin secret into the ticket only for validated org-key callers
+    let verifiedAdminSecret: string | undefined;
+    const adminSecretHeader = req.headers['x-admin-secret'] as string | undefined;
+    if (adminSecretHeader && req.org && req.authType === 'org') {
+      if (db.verifyOrgAdminSecret(req.org.id, adminSecretHeader)) {
+        verifiedAdminSecret = adminSecretHeader;
+      }
+      // Invalid admin secret is silently discarded — verified at WS connect time anyway
+    }
+    const ticketId = issueWsTicket(token, verifiedAdminSecret);
 
     res.json({
       ticket: ticketId,

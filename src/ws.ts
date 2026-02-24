@@ -73,6 +73,8 @@ export class HubWS {
 
       let token: string | null = null;
 
+      let ticketAdminSecret: string | undefined;
+
       if (ticketParam) {
         // Preferred: one-time ticket exchange
         const ticket = redeemWsTicket(ticketParam);
@@ -81,6 +83,7 @@ export class HubWS {
           return;
         }
         token = ticket.token;
+        ticketAdminSecret = ticket.adminSecret;
       } else if (tokenParam) {
         // Backward compat: direct token in URL (deprecated — logs a warning)
         wsLogger.warn('Deprecation: WS connection using ?token= in URL. Use POST /api/ws-ticket instead.');
@@ -165,8 +168,12 @@ export class HubWS {
       // Try org key + org admin secret (for web UI / human admins)
       const org = db.getOrgByKey(token);
       if (org) {
-        // Require org-scoped admin secret
-        const adminToken = url.searchParams.get('admin');
+        // Require org-scoped admin secret (from ticket or deprecated URL param)
+        const adminUrlParam = url.searchParams.get('admin');
+        if (adminUrlParam && !ticketAdminSecret) {
+          wsLogger.warn('Deprecation: WS connection using ?admin= in URL. Use POST /api/ws-ticket with X-Admin-Secret header instead.');
+        }
+        const adminToken = ticketAdminSecret || adminUrlParam;
         if (!adminToken || !db.verifyOrgAdminSecret(org.id, adminToken)) {
           ws.close(4003, 'Org admin secret required for console access');
           return;

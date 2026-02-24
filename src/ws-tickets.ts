@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 export interface WsTicket {
   /** The raw token that was exchanged for this ticket */
   token: string;
+  /** Optional admin secret (for org-level WS connections) */
+  adminSecret?: string;
   /** Epoch ms when this ticket expires (30s TTL) */
   expiresAt: number;
 }
@@ -30,11 +32,14 @@ function purgeExpiredTickets() {
  * Issue a one-time WS ticket for the given token.
  * Returns the ticket ID (to be used as ?ticket=xxx).
  */
-export function issueWsTicket(token: string): string {
+export function issueWsTicket(token: string, adminSecret?: string): string {
   purgeExpiredTickets();
   const ticketId = crypto.randomBytes(24).toString('hex');
   wsTicketStore.set(ticketId, {
     token,
+    // Only store non-empty adminSecret; falsy values (empty string, undefined) are omitted.
+    // ws.ts relies on this: ticketAdminSecret || url.searchParams.get('admin') uses JS falsy semantics.
+    ...(adminSecret ? { adminSecret } : {}),
     expiresAt: Date.now() + WS_TICKET_TTL_MS,
   });
   return ticketId;
