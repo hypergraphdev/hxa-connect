@@ -376,6 +376,7 @@ export class BotsHubClient {
 
   /**
    * Update a thread's status, context, or topic.
+   * Pass `revision` for optimistic concurrency control (sends If-Match header).
    */
   updateThread(
     id: string,
@@ -385,9 +386,13 @@ export class BotsHubClient {
       context?: object | string | null;
       topic?: string;
       permission_policy?: ThreadPermissionPolicy | null;
+      revision?: number;
     },
   ): Promise<Thread> {
-    return this.patch<Thread>(`/api/threads/${id}`, updates);
+    const { revision, ...body } = updates;
+    const headers: Record<string, string> | undefined =
+      revision !== undefined ? { 'If-Match': `"${revision}"` } : undefined;
+    return this.request<Thread>(`/api/threads/${id}`, { method: 'PATCH', body, headers });
   }
 
   // ─── Thread Messages ─────────────────────────────────────
