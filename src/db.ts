@@ -27,6 +27,7 @@ import type {
   AgentToken,
   TokenScope,
   ThreadPermissionPolicy,
+  OrgTicket,
 } from './types.js';
 
 // ─── Database Layer ──────────────────────────────────────────
@@ -48,8 +49,7 @@ export class HubDB {
       CREATE TABLE IF NOT EXISTS orgs (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        api_key TEXT UNIQUE NOT NULL,
-        admin_secret TEXT,
+        org_secret TEXT NOT NULL,
         persist_messages INTEGER DEFAULT 1,
         created_at INTEGER NOT NULL
       );
@@ -247,7 +247,7 @@ export class HubDB {
 
     // Run versioned migrations — each only executes once
     this.runMigration('001_add_admin_secret', () => {
-      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN admin_secret TEXT`); } catch { /* exists */ }
+      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN org_secret TEXT`); } catch { /* exists */ }
     });
 
     this.runMigration('002_add_agent_profile_fields', () => {
@@ -303,13 +303,13 @@ export class HubDB {
       this.migrateFilesForeignKey();
     });
 
-    // Generate admin_secret for orgs that don't have one
+    // Generate org_secret for orgs that don't have one
     this.runMigration('006_generate_admin_secrets', () => {
-      const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE admin_secret IS NULL').all() as any[];
+      const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE org_secret IS NULL').all() as any[];
       for (const org of orgsWithoutSecret) {
         const secret = crypto.randomBytes(24).toString('hex');
-        this.db.prepare('UPDATE orgs SET admin_secret = ? WHERE id = ?').run(secret, org.id);
-        console.log(`  🔐 Generated admin_secret for org ${org.id}`);
+        this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(secret, org.id);
+        console.log(`  🔐 Generated org_secret for org ${org.id}`);
       }
     });
 
@@ -324,9 +324,39 @@ export class HubDB {
       this.migrateHashTokens();
     });
 
-    // Migration: hash org api_key and admin_secret (missed in 007)
+    // Migration: hash org org_secret (missed in 007)
     this.runMigration('010_hash_org_keys', () => {
       this.migrateHashOrgKeys();
+    });
+
+    // Migration: add status column to orgs (Phase 1 – org auth redesign)
+    this.runMigration('011_add_org_status', () => {
+      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`); } catch { /* exists */ }
+    });
+
+    // Migration: add auth_role column to agents (Phase 1 – org auth redesign)
+    this.runMigration('012_add_agent_auth_role', () => {
+      try { this.db.exec(`ALTER TABLE agents ADD COLUMN auth_role TEXT NOT NULL DEFAULT 'member'`); } catch { /* exists */ }
+      // Backfill: all existing agents were implicitly admin
+      this.db.prepare(`UPDATE agents SET auth_role = 'admin'`).run();
+    });
+
+    // Migration: create org_tickets table (Phase 1 – org auth redesign)
+    this.runMigration('013_create_org_tickets', () => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS org_tickets (
+          id TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          secret_hash TEXT NOT NULL,
+          reusable INTEGER NOT NULL DEFAULT 0,
+          expires_at INTEGER NOT NULL,
+          consumed INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_org_tickets_org ON org_tickets(org_id);
+        CREATE INDEX IF NOT EXISTS idx_org_tickets_expires ON org_tickets(expires_at);
+      `);
     });
   }
 
@@ -526,24 +556,22 @@ export class HubDB {
   }
 
   /**
-   * Migration: hash any existing plaintext org api_key and admin_secret.
-   * Plaintext org keys are 48-char hex (24 random bytes); SHA-256 hashes are 64-char hex.
+   * Migration: hash any existing plaintext org org_secret.
+   * Plaintext org secrets are 48-char hex (24 random bytes); SHA-256 hashes are 64-char hex.
    */
   private migrateHashOrgKeys() {
-    const orgRows = this.db.prepare(`SELECT id, api_key, admin_secret FROM orgs`).all() as { id: string; api_key: string; admin_secret: string | null }[];
+    const orgRows = this.db.prepare(`SELECT id, org_secret FROM orgs`).all() as { id: string; org_secret: string | null }[];
     let orgMigrated = 0;
     for (const row of orgRows) {
-      const needsApiKeyHash = row.api_key && row.api_key.length !== 64;
-      const needsSecretHash = row.admin_secret && row.admin_secret.length !== 64;
-      if (needsApiKeyHash || needsSecretHash) {
-        const apiKeyHash = needsApiKeyHash ? HubDB.hashToken(row.api_key) : row.api_key;
-        const secretHash = needsSecretHash ? HubDB.hashToken(row.admin_secret!) : row.admin_secret;
-        this.db.prepare('UPDATE orgs SET api_key = ?, admin_secret = ? WHERE id = ?').run(apiKeyHash, secretHash, row.id);
+      const needsSecretHash = row.org_secret && row.org_secret.length !== 64;
+      if (needsSecretHash) {
+        const secretHash = HubDB.hashToken(row.org_secret!);
+        this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(secretHash, row.id);
         orgMigrated++;
       }
     }
     if (orgMigrated > 0) {
-      console.log(`  🔐 Hashed ${orgMigrated} plaintext org key(s)`);
+      console.log(`  🔐 Hashed ${orgMigrated} plaintext org secret(s)`);
     }
   }
 
@@ -551,6 +579,7 @@ export class HubDB {
     return {
       ...row,
       persist_messages: !!row.persist_messages,
+      status: row.status ?? 'active',
     };
   }
 
@@ -569,6 +598,7 @@ export class HubDB {
       active_hours: row.active_hours ?? null,
       version: row.version ?? '1.0.0',
       runtime: row.runtime ?? null,
+      auth_role: row.auth_role ?? 'member',
       online: !!row.online,
     };
   }
@@ -690,40 +720,45 @@ export class HubDB {
   // ─── Org Operations ──────────────────────────────────────
 
   createOrg(name: string, persistMessages = true): Org {
-    const plaintextApiKey = crypto.randomBytes(24).toString('hex');
-    const plaintextAdminSecret = crypto.randomBytes(24).toString('hex');
+    const plaintextOrgSecret = crypto.randomBytes(24).toString('hex');
     const org: Org = {
       id: crypto.randomUUID(),
       name,
-      api_key: plaintextApiKey,
-      admin_secret: plaintextAdminSecret,
+      org_secret: plaintextOrgSecret,
       persist_messages: persistMessages,
+      status: 'active',
       created_at: Date.now(),
     };
-    const apiKeyHash = HubDB.hashToken(plaintextApiKey);
-    const adminSecretHash = HubDB.hashToken(plaintextAdminSecret);
+    const orgSecretHash = HubDB.hashToken(plaintextOrgSecret);
     this.db.prepare(
-      'INSERT INTO orgs (id, name, api_key, admin_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(org.id, org.name, apiKeyHash, adminSecretHash, org.persist_messages ? 1 : 0, org.created_at);
-    // Return org with plaintext keys so the caller can display them once
+      'INSERT INTO orgs (id, name, org_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(org.id, org.name, orgSecretHash, org.persist_messages ? 1 : 0, org.created_at);
+    // Return org with plaintext secret so the caller can display it once
     return org;
   }
 
-  getOrgByKey(apiKey: string): Org | undefined {
-    const apiKeyHash = HubDB.hashToken(apiKey);
-    const row = this.db.prepare('SELECT * FROM orgs WHERE api_key = ?').get(apiKeyHash) as any;
-    if (!row) return undefined;
-    return this.rowToOrg(row);
-  }
-
-  verifyOrgAdminSecret(orgId: string, secret: string): boolean {
-    const row = this.db.prepare('SELECT admin_secret FROM orgs WHERE id = ?').get(orgId) as any;
-    if (!row?.admin_secret) return false;
+  verifyOrgSecret(orgId: string, secret: string): boolean {
+    const row = this.db.prepare('SELECT org_secret FROM orgs WHERE id = ?').get(orgId) as any;
+    if (!row?.org_secret) return false;
     const secretHash = HubDB.hashToken(secret);
-    const expected = Buffer.from(row.admin_secret, 'utf8');
+    const expected = Buffer.from(row.org_secret, 'utf8');
     const actual = Buffer.from(secretHash, 'utf8');
     if (expected.length !== actual.length) return false;
     return crypto.timingSafeEqual(expected, actual);
+  }
+
+  /**
+   * Set the auth_role for an agent ('admin' or 'member').
+   */
+  setAgentAuthRole(agentId: string, role: 'admin' | 'member'): void {
+    this.db.prepare('UPDATE agents SET auth_role = ? WHERE id = ?').run(role, agentId);
+  }
+
+  /**
+   * Rotate the org secret to a new hash.
+   */
+  rotateOrgSecret(orgId: string, newSecretHash: string): void {
+    this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(newSecretHash, orgId);
   }
 
   getOrgById(id: string): Org | undefined {
@@ -734,6 +769,85 @@ export class HubDB {
 
   listOrgs(): Org[] {
     return (this.db.prepare('SELECT * FROM orgs ORDER BY created_at').all() as any[]).map(r => this.rowToOrg(r));
+  }
+
+  updateOrgStatus(orgId: string, status: 'active' | 'suspended'): void {
+    this.db.prepare('UPDATE orgs SET status = ? WHERE id = ?').run(status, orgId);
+  }
+
+  updateOrgName(orgId: string, name: string): void {
+    this.db.prepare('UPDATE orgs SET name = ? WHERE id = ?').run(name, orgId);
+  }
+
+  destroyOrg(orgId: string): void {
+    // Set status first (for any in-flight requests to see)
+    this.db.prepare("UPDATE orgs SET status = 'destroyed' WHERE id = ?").run(orgId);
+    // CASCADE delete handles all related data (agents, channels, threads, etc.)
+    this.db.prepare('DELETE FROM orgs WHERE id = ?').run(orgId);
+  }
+
+  // ─── Org Ticket Operations ─────────────────────────────
+
+  private rowToOrgTicket(row: any): OrgTicket {
+    return {
+      ...row,
+      reusable: !!row.reusable,
+      consumed: !!row.consumed,
+      created_by: row.created_by ?? null,
+    };
+  }
+
+  createOrgTicket(orgId: string, secretHash: string, options: {
+    reusable?: boolean;
+    expiresAt: number;
+    createdBy?: string;
+  }): OrgTicket {
+    const ticket: OrgTicket = {
+      id: crypto.randomUUID(),
+      org_id: orgId,
+      secret_hash: secretHash,
+      reusable: options.reusable ?? false,
+      expires_at: options.expiresAt,
+      consumed: false,
+      created_by: options.createdBy ?? null,
+      created_at: Date.now(),
+    };
+    this.db.prepare(
+      'INSERT INTO org_tickets (id, org_id, secret_hash, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(ticket.id, ticket.org_id, ticket.secret_hash, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at);
+    return ticket;
+  }
+
+  redeemOrgTicket(ticketId: string): OrgTicket | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM org_tickets WHERE id = ? AND consumed = 0 AND expires_at > ?'
+    ).get(ticketId, Date.now()) as any;
+    if (!row) return undefined;
+    const result = this.db.prepare(
+      'UPDATE org_tickets SET consumed = 1 WHERE id = ? AND consumed = 0'
+    ).run(ticketId);
+    if (result.changes === 0) return undefined; // race condition: another consumer got it
+    return this.rowToOrgTicket({ ...row, consumed: 1 });
+  }
+
+  getOrgTicket(ticketId: string): OrgTicket | undefined {
+    const row = this.db.prepare('SELECT * FROM org_tickets WHERE id = ?').get(ticketId) as any;
+    if (!row) return undefined;
+    return this.rowToOrgTicket(row);
+  }
+
+  invalidateOrgTickets(orgId: string): number {
+    const result = this.db.prepare(
+      'DELETE FROM org_tickets WHERE org_id = ? AND consumed = 0'
+    ).run(orgId);
+    return result.changes;
+  }
+
+  cleanupExpiredOrgTickets(): number {
+    const result = this.db.prepare(
+      'DELETE FROM org_tickets WHERE expires_at <= ?'
+    ).run(Date.now());
+    return result.changes;
   }
 
   // ─── Token Hashing Utilities ─────────────────────────────
@@ -870,6 +984,7 @@ export class HubDB {
       active_hours: serializedProfile.active_hours ?? null,
       version: serializedProfile.version ?? '1.0.0',
       runtime: serializedProfile.runtime ?? null,
+      auth_role: 'member',
       online: true,
       last_seen_at: now,
       created_at: now,
@@ -881,8 +996,8 @@ export class HubDB {
       `INSERT INTO agents (
         id, org_id, name, display_name, token, metadata, webhook_url, webhook_secret,
         bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
-        online, last_seen_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        auth_role, online, last_seen_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       agent.id,
       agent.org_id,
@@ -904,6 +1019,7 @@ export class HubDB {
       agent.active_hours,
       agent.version,
       agent.runtime,
+      agent.auth_role,
       agent.online ? 1 : 0,
       agent.last_seen_at,
       agent.created_at,
@@ -1001,6 +1117,21 @@ export class HubDB {
     return (this.db.prepare(
       'SELECT * FROM agents WHERE org_id = ? ORDER BY name'
     ).all(orgId) as any[]).map(r => this.rowToAgent(r));
+  }
+
+  /**
+   * Paginated agent list. Cursor is an agent id; results ordered by id ASC.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  listAgentsPaginated(orgId: string, cursor: string | undefined, limit: number): Agent[] {
+    if (cursor) {
+      return (this.db.prepare(
+        'SELECT * FROM agents WHERE org_id = ? AND id > ? ORDER BY id ASC LIMIT ?'
+      ).all(orgId, cursor, limit + 1) as any[]).map(r => this.rowToAgent(r));
+    }
+    return (this.db.prepare(
+      'SELECT * FROM agents WHERE org_id = ? ORDER BY id ASC LIMIT ?'
+    ).all(orgId, limit + 1) as any[]).map(r => this.rowToAgent(r));
   }
 
   listBots(orgId: string, filters?: ListBotsFilters): Agent[] {
@@ -1390,6 +1521,32 @@ export class HubDB {
     ).all(...params) as Message[];
   }
 
+  /**
+   * Paginated channel messages (newest first). `before` is a message id.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  getMessagesPaginated(channelId: string, before: string | undefined, limit: number): Message[] {
+    if (before) {
+      // Get the created_at of the cursor message so we can seek efficiently
+      const cursorRow = this.db.prepare(
+        'SELECT created_at FROM messages WHERE id = ?'
+      ).get(before) as { created_at: number } | undefined;
+      if (!cursorRow) {
+        // Unknown cursor — return from newest
+        return this.db.prepare(
+          'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?'
+        ).all(channelId, limit + 1) as Message[];
+      }
+      // Use (created_at, id) for stable ordering when timestamps collide
+      return this.db.prepare(
+        `SELECT * FROM messages WHERE channel_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
+      ).all(channelId, cursorRow.created_at, cursorRow.created_at, before, limit + 1) as Message[];
+    }
+    return this.db.prepare(
+      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(channelId, limit + 1) as Message[];
+  }
+
   getNewMessages(agentId: string, since: number): (Message & { channel_name?: string })[] {
     return this.db.prepare(`
       SELECT m.*, ch.name as channel_name FROM messages m
@@ -1511,6 +1668,24 @@ export class HubDB {
     const rows = status
       ? (this.db.prepare(query).all(orgId, status, limit, offset) as any[])
       : (this.db.prepare(query).all(orgId, limit, offset) as any[]);
+    return rows.map(row => this.rowToThread(row));
+  }
+
+  /**
+   * Paginated thread list for org. Cursor is a thread id; ordered by id ASC.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number): Thread[] {
+    const conditions = ['org_id = ?'];
+    const params: any[] = [orgId];
+
+    if (status) { conditions.push('status = ?'); params.push(status); }
+    if (cursor) { conditions.push('id > ?'); params.push(cursor); }
+
+    params.push(limit + 1);
+    const rows = this.db.prepare(
+      `SELECT * FROM threads WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT ?`
+    ).all(...params) as any[];
     return rows.map(row => this.rowToThread(row));
   }
 
@@ -1753,6 +1928,29 @@ export class HubDB {
     return rows.map(row => this.rowToThreadMessage(row));
   }
 
+  /**
+   * Paginated thread messages (newest first). `before` is a message id.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  getThreadMessagesPaginated(threadId: string, before: string | undefined, limit: number): ThreadMessage[] {
+    if (before) {
+      const cursorRow = this.db.prepare(
+        'SELECT created_at FROM thread_messages WHERE id = ?'
+      ).get(before) as { created_at: number } | undefined;
+      if (!cursorRow) {
+        return (this.db.prepare(
+          'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?'
+        ).all(threadId, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+      }
+      return (this.db.prepare(
+        `SELECT * FROM thread_messages WHERE thread_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
+      ).all(threadId, cursorRow.created_at, cursorRow.created_at, before, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+    }
+    return (this.db.prepare(
+      'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(threadId, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+  }
+
   addArtifact(
     threadId: string,
     contributorId: string,
@@ -1945,6 +2143,31 @@ export class HubDB {
       WHERE a.thread_id = ?
       ORDER BY a.created_at ASC
     `).all(threadId, threadId) as any[];
+
+    return rows.map(row => this.rowToArtifact(row));
+  }
+
+  /**
+   * Paginated artifact list (latest version per key). Cursor is an artifact_key.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  listArtifactsPaginated(threadId: string, cursor: string | undefined, limit: number): Artifact[] {
+    const cursorClause = cursor ? 'AND a.artifact_key > ?' : '';
+    const params: any[] = cursor
+      ? [threadId, threadId, cursor, limit + 1]
+      : [threadId, threadId, limit + 1];
+    const rows = this.db.prepare(`
+      SELECT a.* FROM artifacts a
+      JOIN (
+        SELECT artifact_key, MAX(version) as max_version
+        FROM artifacts
+        WHERE thread_id = ?
+        GROUP BY artifact_key
+      ) latest ON a.artifact_key = latest.artifact_key AND a.version = latest.max_version
+      WHERE a.thread_id = ? ${cursorClause}
+      ORDER BY a.artifact_key ASC
+      LIMIT ?
+    `).all(...params) as any[];
 
     return rows.map(row => this.rowToArtifact(row));
   }
@@ -2564,6 +2787,7 @@ export class HubDB {
     this.drainBatch((bs) => this.cleanupOldAuditLog(90, bs), 5000);
     this.drainBatch((bs) => this.cleanupOldRateLimitEvents(bs), 10000);
     this.drainBatch((bs) => this.cleanupExpiredTokens(bs), 1000);
+    this.cleanupExpiredOrgTickets();
   }
 
   /** O1: Lightweight DB health check */

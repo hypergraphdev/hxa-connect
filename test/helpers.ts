@@ -21,10 +21,12 @@ export interface TestEnv {
   config: HubConfig;
   baseUrl: string;
   dataDir: string;
-  /** Create an org and return { orgId, apiKey } */
-  createOrg(name?: string): { id: string; api_key: string };
-  /** Register an agent in an org and return { agent, token } */
-  registerAgent(apiKey: string, name: string, opts?: Record<string, unknown>): Promise<{ agent: any; token: string }>;
+  /** Create an org and return { id, org_secret } */
+  createOrg(name?: string): { id: string; org_secret: string };
+  /** Register an agent in an org via ticket-based auth. Pass org_secret (login -> ticket -> register). */
+  registerAgent(orgSecret: string, name: string, opts?: Record<string, unknown>): Promise<{ agent: any; token: string }>;
+  /** Login as org and get a reusable ticket that works as Bearer token for org-level endpoints. */
+  loginAsOrg(orgSecret: string): Promise<string>;
   /** Cleanup — close server, remove temp dir */
   cleanup(): Promise<void>;
 }
@@ -85,24 +87,53 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
   const addr = server.address() as { port: number };
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
+  // Map plaintext org_secret -> org_id for registerAgent helper
+  const secretToOrgId = new Map<string, string>();
+
   function createOrg(name?: string) {
     const orgName = name || `test-org-${++counter}`;
     const org = db.createOrg(orgName, config.default_persist);
-    return { id: org.id, api_key: org.api_key };
+    secretToOrgId.set(org.org_secret, org.id);
+    return { id: org.id, org_secret: org.org_secret };
   }
 
-  async function registerAgent(apiKey: string, agentName: string, opts?: Record<string, unknown>) {
-    const res = await fetch(`${baseUrl}/api/register`, {
+  async function registerAgent(orgSecret: string, agentName: string, opts?: Record<string, unknown>) {
+    // Look up org_id from our secret map
+    const orgId = secretToOrgId.get(orgSecret);
+    if (!orgId) throw new Error('Unknown org_secret — was this org created via createOrg()?');
+
+    // Login to get a ticket
+    const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ name: agentName, ...opts }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, org_secret: orgSecret }),
+    });
+    if (!loginRes.ok) throw new Error(`Login failed: ${loginRes.status} ${await loginRes.text()}`);
+    const loginData = await loginRes.json() as any;
+
+    // Register via ticket
+    const res = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, ticket: loginData.ticket, name: agentName, ...opts }),
     });
     if (!res.ok) throw new Error(`Register failed: ${res.status} ${await res.text()}`);
     const data = await res.json() as any;
     return { agent: data, token: data.token };
+  }
+
+  async function loginAsOrg(orgSecret: string): Promise<string> {
+    const orgId = secretToOrgId.get(orgSecret);
+    if (!orgId) throw new Error('Unknown org_secret — was this org created via createOrg()?');
+
+    const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, org_secret: orgSecret, reusable: true, expires_in: 3600 }),
+    });
+    if (!loginRes.ok) throw new Error(`Login failed: ${loginRes.status} ${await loginRes.text()}`);
+    const loginData = await loginRes.json() as any;
+    return loginData.ticket;
   }
 
   async function cleanup() {
@@ -114,7 +145,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 
-  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerAgent, cleanup };
+  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerAgent, loginAsOrg, cleanup };
 }
 
 /** Simple fetch helper that returns { status, headers, body } */

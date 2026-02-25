@@ -4,9 +4,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HubDB } from './db.js';
+import { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
-import { authMiddleware, requireAgent, requireOrg, requireScope } from './auth.js';
+import { authMiddleware, requireAgent, requireOrg, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Agent, type AgentProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
@@ -61,6 +61,7 @@ function toAgentResponse(agent: Agent) {
     org_id: agent.org_id,
     name: agent.name,
     display_name: agent.display_name,
+    auth_role: agent.auth_role,
     online: agent.online,
     last_seen_at: agent.last_seen_at,
     created_at: agent.created_at,
@@ -175,16 +176,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   }
 
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
-    if (!req.org || req.authType !== 'org') {
-      res.status(403).json({ error: 'Organization authentication required', code: 'FORBIDDEN' });
-      return false;
-    }
-    const adminSecret = req.headers['x-admin-secret'] as string;
-    if (!adminSecret || !db.verifyOrgAdminSecret(req.org.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
-      return false;
-    }
-    return true;
+    // Ticket auth (authType='org') proves org_secret knowledge — that's admin
+    if (req.authType === 'org' && req.org) return true;
+    // Admin agents also qualify
+    if (req.agent?.auth_role === 'admin') return true;
+    res.status(403).json({ error: 'Organization admin authentication required', code: 'FORBIDDEN' });
+    return false;
   }
 
   function checkMessageRateLimit(req: import('express').Request, res: import('express').Response): boolean {
@@ -265,7 +262,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/orgs — Create an organization
    * Body: { name, persist_messages? }
    * Auth: Admin secret (if BOTSHUB_ADMIN_SECRET is set)
-   * Returns: org with api_key
+   * Returns: org with org_secret
    *
    * Note: persist_messages is reserved for SaaS deployment — non-persistent
    * mode is a post-GA feature. The field is accepted for forward compatibility
@@ -279,8 +276,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
     const org = db.createOrg(name, persist_messages ?? config.default_persist);
-    const { admin_secret: _stripped, ...safeOrg } = org;
-    res.json(safeOrg);
+    // Return full org including org_secret for super admin
+    res.json(org);
   });
 
   /**
@@ -289,22 +286,105 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   router.get('/api/orgs', (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const orgs = db.listOrgs().map(({ api_key, admin_secret, ...safe }) => safe);
+    const orgs = db.listOrgs().map(({ org_secret, ...safe }) => ({
+      ...safe,
+      agent_count: db.listAgents(safe.id).length,
+    }));
     res.json(orgs);
   });
 
-  // ─── Authenticated Routes ─────────────────────────────────
+  /**
+   * PATCH /api/orgs/:org_id — Update org name or status
+   * Auth: Super admin (BOTSHUB_ADMIN_SECRET)
+   * Body: { name?: string, status?: 'active' | 'suspended' }
+   */
+  router.patch('/api/orgs/:org_id', (req, res) => {
+    if (!requireAdmin(req, res)) return;
 
-  const auth = Router();
-  auth.use(authMiddleware(db));
+    const org = db.getOrgById(req.params.org_id);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    if (org.status === 'destroyed') {
+      res.status(409).json({ error: 'Cannot modify destroyed org', code: 'ORG_DESTROYED' });
+      return;
+    }
+
+    const { name, status } = req.body;
+
+    // Validate all fields before mutating
+    if (status !== undefined && status !== 'active' && status !== 'suspended') {
+      res.status(400).json({ error: 'status must be "active" or "suspended" (use DELETE to destroy)', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (name !== undefined && (!name || typeof name !== 'string')) {
+      res.status(400).json({ error: 'name must be a non-empty string', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Apply mutations after all validation passes
+    if (status !== undefined && status !== org.status) {
+      db.updateOrgStatus(org.id, status);
+
+      if (status === 'suspended') {
+        // Invalidate all outstanding org tickets
+        db.invalidateOrgTickets(org.id);
+        // Disconnect all WS clients
+        ws.disconnectOrg(org.id, 4100, 'Organization suspended');
+      }
+    }
+
+    if (name !== undefined) {
+      db.updateOrgName(org.id, name);
+    }
+
+    // Re-fetch to return current state
+    const updated = db.getOrgById(org.id)!;
+    res.json({ id: updated.id, name: updated.name, status: updated.status });
+  });
 
   /**
-   * POST /api/register — Register an agent
-   * Auth: Org API key
-   * Body: { name, display_name?, metadata? }
-   * Returns: { agent_id, token, name }
+   * DELETE /api/orgs/:org_id — Destroy an org (irreversible)
+   * Auth: Super admin (BOTSHUB_ADMIN_SECRET)
+   * Response: 204 No Content
    */
-  auth.post('/api/register', requireOrg, async (req, res) => {
+  router.delete('/api/orgs/:org_id', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const org = db.getOrgById(req.params.org_id);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Disconnect all WS clients before deletion
+    ws.disconnectOrg(org.id, 4101, 'Organization destroyed');
+
+    // Destroy org (sets status, then deletes — CASCADE handles related data)
+    db.destroyOrg(org.id);
+
+    res.status(204).end();
+  });
+
+  // ─── Shared Registration Validation ───────────────────────
+
+  /**
+   * Validate and extract agent registration fields from a request body.
+   * Returns the validated fields or sends an error response and returns null.
+   */
+  async function validateRegistrationBody(
+    body: any,
+    res: import('express').Response,
+  ): Promise<{
+    name: string;
+    display_name?: string;
+    metadata?: Record<string, unknown> | null;
+    webhook_url?: string | null;
+    webhook_secret?: string | null;
+    profile: AgentProfileInput;
+  } | null> {
     const {
       name,
       display_name,
@@ -323,23 +403,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       active_hours,
       version,
       runtime,
-    } = req.body;
+    } = body;
 
     if (!name) {
       res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
-      return;
+      return null;
     }
 
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
       res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)', code: 'VALIDATION_ERROR' });
-      return;
+      return null;
     }
 
     // Per-field size limits
     const fieldError = checkFieldLimits({ name, display_name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
     if (fieldError) {
       res.status(400).json({ error: fieldError });
-      return;
+      return null;
     }
 
     // Validate profile field types
@@ -347,18 +427,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     for (const [key, val] of Object.entries(stringFields)) {
       if (val !== undefined && val !== null && typeof val !== 'string') {
         res.status(400).json({ error: `${key} must be a string or null` });
-        return;
+        return null;
       }
     }
     for (const [key, val] of Object.entries({ tags, languages }) as [string, unknown][]) {
       if (val !== undefined && val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
         res.status(400).json({ error: `${key} must be an array of strings or null` });
-        return;
+        return null;
       }
     }
     if (protocols !== undefined && protocols !== null && typeof protocols !== 'object') {
       res.status(400).json({ error: 'protocols must be an object or null' });
-      return;
+      return null;
     }
 
     const profile: AgentProfileInput = {
@@ -381,17 +461,169 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       const urlError = await validateWebhookUrl(webhook_url);
       if (urlError) {
         res.status(400).json({ error: urlError });
+        return null;
+      }
+    }
+
+    return { name, display_name, metadata, webhook_url, webhook_secret, profile };
+  }
+
+  // ─── Public Auth Routes (Ticket-Based) ──────────────────
+
+  /**
+   * POST /api/auth/login — Authenticate with org credentials and receive a ticket
+   * Body: { org_id, org_secret, reusable?, expires_in? }
+   * Returns: { ticket, expires_at, reusable, org: { id, name } }
+   */
+  router.post('/api/auth/login', (req, res) => {
+    const { org_id, org_secret, reusable, expires_in } = req.body;
+
+    // Validate required fields
+    if (!org_id || typeof org_id !== 'string') {
+      res.status(400).json({ error: 'org_id is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (!org_secret || typeof org_secret !== 'string') {
+      res.status(400).json({ error: 'org_secret is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Look up org
+    const org = db.getOrgById(org_id);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Verify org_secret
+    if (!db.verifyOrgSecret(org.id, org_secret)) {
+      res.status(401).json({ error: 'Invalid org secret', code: 'INVALID_SECRET' });
+      return;
+    }
+
+    // Check org status
+    if (org.status !== 'active') {
+      const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+      res.status(403).json({ error: `Organization is ${org.status}`, code });
+      return;
+    }
+
+    // Calculate expiry
+    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 1800;
+    const expiresAt = Date.now() + expiresInSec * 1000;
+
+    // Store the hash of the plaintext org_secret in the ticket for rotation binding
+    const secretHash = HubDB.hashToken(org_secret);
+
+    const isReusable = reusable === true;
+    const ticket = db.createOrgTicket(org.id, secretHash, {
+      reusable: isReusable,
+      expiresAt,
+      createdBy: 'login',
+    });
+
+    res.json({
+      ticket: ticket.id,
+      expires_at: ticket.expires_at,
+      reusable: ticket.reusable,
+      org: { id: org.id, name: org.name },
+    });
+  });
+
+  /**
+   * POST /api/auth/register — Register an agent using a ticket (no Bearer auth needed)
+   * Body: { org_id, ticket, name, display_name?, ...profile fields }
+   * Returns: { agent_id, token, name, auth_role }
+   */
+  router.post('/api/auth/register', async (req, res) => {
+    const { org_id, ticket: ticketId } = req.body;
+
+    // Validate required fields
+    if (!org_id || typeof org_id !== 'string') {
+      res.status(400).json({ error: 'org_id is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (!ticketId || typeof ticketId !== 'string') {
+      res.status(400).json({ error: 'ticket is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Validate registration body fields
+    const validated = await validateRegistrationBody(req.body, res);
+    if (!validated) return; // response already sent
+
+    // Get and validate the ticket
+    const ticket = db.getOrgTicket(ticketId);
+    if (!ticket) {
+      res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
+      return;
+    }
+
+    // Check ticket belongs to this org
+    if (ticket.org_id !== org_id) {
+      res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
+      return;
+    }
+
+    // Check not expired
+    if (ticket.expires_at <= Date.now()) {
+      res.status(401).json({ error: 'Ticket expired', code: 'TICKET_EXPIRED' });
+      return;
+    }
+
+    // Check not already consumed (for one-time tickets)
+    if (!ticket.reusable && ticket.consumed) {
+      res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
+      return;
+    }
+
+    // Redeem the ticket (atomic consume for one-time tickets)
+    if (!ticket.reusable) {
+      const redeemed = db.redeemOrgTicket(ticketId);
+      if (!redeemed) {
+        res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
         return;
       }
     }
 
-    const { agent, created, plaintextToken } = db.registerAgent(req.org!.id, name, display_name, metadata, webhook_url, webhook_secret, profile);
+    // Get org and check status
+    const org = db.getOrgById(org_id);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+    if (org.status !== 'active') {
+      const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+      res.status(403).json({ error: `Organization is ${org.status}`, code });
+      return;
+    }
+
+    // First-agent auto-admin
+    const existingAgents = db.listAgents(org_id);
+    const authRole: 'admin' | 'member' = existingAgents.length === 0 ? 'admin' : 'member';
+
+    // Register the agent
+    const { agent, created, plaintextToken } = db.registerAgent(
+      org_id,
+      validated.name,
+      validated.display_name,
+      validated.metadata,
+      validated.webhook_url,
+      validated.webhook_secret,
+      validated.profile,
+    );
+
+    // Set auth_role (registerAgent defaults to 'member', override if first agent)
+    if (authRole === 'admin' && created) {
+      db.setAgentAuthRole(agent.id, 'admin');
+      agent.auth_role = 'admin';
+    }
 
     // Audit
-    db.recordAudit(req.org!.id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name, reregister: !created });
+    db.recordAudit(org_id, agent.id, 'bot.register', 'agent', agent.id, { name: agent.name, reregister: !created, via: 'ticket' });
 
-    // Broadcast agent online to all org viewers (Web UI etc.)
-    ws.broadcastToOrg(req.org!.id, {
+    // Broadcast agent online
+    ws.broadcastToOrg(org_id, {
       type: 'agent_online',
       agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
     });
@@ -400,44 +632,72 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       agent_id: agent.id,
       ...toAgentResponse(agent),
     };
-    // Only include token on initial registration (S13: atomic check + S4: plaintext only at creation)
+    // Only include token on initial registration
     if (created && plaintextToken !== null) {
       response.token = plaintextToken;
     }
     res.json(response);
   });
 
+  // ─── Authenticated Routes ─────────────────────────────────
+
+  const auth = Router();
+  auth.use(authMiddleware(db));
+
   /**
    * GET /api/org — Get current org info
-   * Auth: Org API Key
+   * Auth: Agent token or org ticket
    */
-  auth.get('/api/org', requireOrg, (req, res) => {
-    const org = req.org!;
-    res.json({ id: org.id, name: org.name });
+  auth.get('/api/org', (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+    const org = db.getOrgById(orgId);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json({ id: org.id, name: org.name, status: org.status });
   });
 
   /**
    * GET /api/agents — List agents in the org
+   * Query: cursor? (agent id), limit? (default 50, max 200)
    */
   auth.get('/api/agents', requireOrg, (req, res) => {
-    const agents = db.listAgents(req.org!.id);
-    res.json(agents.map(a => toAgentResponse(a)));
+    const cursor = getQueryString(req.query.cursor);
+    const limitParam = getQueryString(req.query.limit);
+
+    // When no pagination params, fall back to existing unpaginated behavior
+    if (!cursor && !limitParam) {
+      const agents = db.listAgents(req.org!.id);
+      res.json(agents.map(a => toAgentResponse(a)));
+      return;
+    }
+
+    const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
+    const rows = db.listAgentsPaginated(req.org!.id, cursor, limit);
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const response: Record<string, unknown> = {
+      items: items.map(a => toAgentResponse(a)),
+      has_more: hasMore,
+    };
+    if (hasMore) {
+      response.next_cursor = items[items.length - 1].id;
+    }
+    res.json(response);
   });
 
   /**
    * DELETE /api/agents/:id — Remove an agent (org admin only)
-   * Auth: Org API Key + Org Admin Secret (via X-Admin-Secret header)
+   * Auth: Org ticket or admin agent token
    */
-  auth.delete('/api/agents/:id', requireOrg, (req, res) => {
-    // Require org admin secret
-    const adminSecret = req.headers['x-admin-secret'] as string;
-    if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
-      return;
-    }
+  auth.delete('/api/agents/:id', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
 
+    const orgId = req.org?.id || req.agent?.org_id;
     const agent = db.getAgentById(req.params.id as string);
-    if (!agent || agent.org_id !== req.org!.id) {
+    if (!agent || agent.org_id !== orgId) {
       res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
       return;
     }
@@ -445,7 +705,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     db.deleteAgent(agent.id);
 
     // Audit
-    db.recordAudit(req.org!.id, agent.id, 'bot.delete', 'agent', agent.id, { name: agent.name });
+    db.recordAudit(orgId!, agent.id, 'bot.delete', 'agent', agent.id, { name: agent.name });
 
     // Broadcast agent offline
     ws.broadcastToOrg(agent.org_id, {
@@ -719,11 +979,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * POST /api/channels — Create a channel
+   * Auth: Org ticket or admin agent token
    * Body: { type: 'direct'|'group', members: [agent_id_or_name, ...], name? }
    */
-  auth.post('/api/channels', requireOrg, (req, res) => {
+  auth.post('/api/channels', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
     const { type, members, name } = req.body;
-    const orgId = req.org!.id;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     if (!type || !members || !Array.isArray(members) || members.length < 2) {
       res.status(400).json({ error: 'type and members (≥2) are required' });
@@ -828,17 +1090,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * DELETE /api/channels/:id — Delete a channel (org admin only)
-   * Auth: Org API Key + X-Admin-Secret
+   * Auth: Org ticket or admin agent token
    */
-  auth.delete('/api/channels/:id', requireOrg, (req, res) => {
-    const adminSecret = req.headers['x-admin-secret'] as string;
-    if (!adminSecret || !db.verifyOrgAdminSecret(req.org!.id, adminSecret)) {
-      res.status(403).json({ error: 'Org admin secret required', code: 'FORBIDDEN' });
-      return;
-    }
+  auth.delete('/api/channels/:id', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const channel = db.getChannel(req.params.id as string);
-    if (!channel || channel.org_id !== req.org!.id) {
+    if (!channel || channel.org_id !== orgId) {
       res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
     }
@@ -846,10 +1105,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     db.deleteChannel(channel.id);
 
     // Audit
-    db.recordAudit(req.org!.id, null, 'channel.delete', 'channel', channel.id, { name: channel.name });
+    db.recordAudit(orgId, null, 'channel.delete', 'channel', channel.id, { name: channel.name });
 
     // Broadcast channel deletion
-    ws.broadcastToOrg(req.org!.id, {
+    ws.broadcastToOrg(orgId, {
       type: 'channel_deleted',
       channel_id: channel.id,
     });
@@ -861,11 +1120,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/org/threads — List all threads in the org
-   * Query: status? (filter by thread status)
-   * Auth: Org API Key + X-Admin-Secret
+   * Query: status?, cursor? (thread id), limit? (default 50, max 200), offset? (legacy)
+   * Auth: Org ticket or admin agent token
    */
-  auth.get('/api/org/threads', requireOrg, (req, res) => {
+  auth.get('/api/org/threads', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const statusRaw = getQueryString(req.query.status);
     if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
@@ -874,22 +1134,44 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const status = statusRaw as ThreadStatus | undefined;
-    const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
-    const offset = Math.max(parseInt(getQueryString(req.query.offset) || '') || 0, 0);
+    const cursor = getQueryString(req.query.cursor);
+    const limitParam = getQueryString(req.query.limit);
+    const offsetParam = getQueryString(req.query.offset);
 
-    const threads = db.listThreadsForOrg(req.org!.id, status, limit, offset);
+    // When cursor is present, use paginated behavior
+    if (cursor || (limitParam && !offsetParam)) {
+      const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
+      const rows = db.listThreadsForOrgPaginated(orgId, status, cursor, limit);
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const response: Record<string, unknown> = {
+        items,
+        has_more: hasMore,
+      };
+      if (hasMore) {
+        response.next_cursor = items[items.length - 1].id;
+      }
+      res.json(response);
+      return;
+    }
+
+    // Legacy offset-based behavior
+    const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
+    const offset = Math.max(parseInt(offsetParam || '') || 0, 0);
+    const threads = db.listThreadsForOrg(orgId, status, limit, offset);
     res.json(threads);
   });
 
   /**
    * GET /api/org/threads/:id — Thread detail with participants
-   * Auth: Org API Key + X-Admin-Secret
+   * Auth: Org ticket or admin agent token
    */
-  auth.get('/api/org/threads/:id', requireOrg, (req, res) => {
+  auth.get('/api/org/threads/:id', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const thread = db.getThread(req.params.id as string);
-    if (!thread || thread.org_id !== req.org!.id) {
+    if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
@@ -912,22 +1194,45 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/org/threads/:id/messages — Thread messages (enriched with parts)
-   * Query: limit?, before?, since?
-   * Auth: Org API Key + X-Admin-Secret
+   * Query: limit?, before? (message id for pagination, or timestamp for legacy), since?
+   * When before is a message id (not numeric), uses cursor-based pagination and returns
+   * { messages: [...], has_more: boolean } with messages sorted newest first.
+   * Auth: Org ticket or admin agent token
    */
-  auth.get('/api/org/threads/:id/messages', requireOrg, (req, res) => {
+  auth.get('/api/org/threads/:id/messages', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const thread = db.getThread(req.params.id as string);
-    if (!thread || thread.org_id !== req.org!.id) {
+    if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
     const beforeStr = getQueryString(req.query.before);
-    const before = beforeStr ? parseInt(beforeStr) : undefined;
     const sinceStr = getQueryString(req.query.since);
+
+    // Detect cursor-based pagination: before is a non-numeric string (message id)
+    const isBeforeId = beforeStr !== undefined && isNaN(Number(beforeStr));
+
+    if (isBeforeId) {
+      // Cursor-based pagination path (newest first)
+      const rows = db.getThreadMessagesPaginated(thread.id, isBeforeId ? beforeStr : undefined, limit);
+      const hasMore = rows.length > limit;
+      const messages = hasMore ? rows.slice(0, limit) : rows;
+
+      const enriched = messages.map(m => {
+        const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+        return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      });
+
+      res.json({ messages: enriched, has_more: hasMore });
+      return;
+    }
+
+    // Legacy timestamp-based path
+    const before = beforeStr ? parseInt(beforeStr) : undefined;
     const since = sinceStr !== undefined ? parseInt(sinceStr) : undefined;
     if (since !== undefined && isNaN(since)) {
       res.status(400).json({ error: 'since must be a valid integer timestamp' });
@@ -945,18 +1250,40 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/org/threads/:id/artifacts — Thread artifacts
-   * Auth: Org API Key + X-Admin-Secret
+   * Query: cursor? (artifact key), limit? (default 50, max 200)
+   * Auth: Org ticket or admin agent token
    */
-  auth.get('/api/org/threads/:id/artifacts', requireOrg, (req, res) => {
+  auth.get('/api/org/threads/:id/artifacts', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const thread = db.getThread(req.params.id as string);
-    if (!thread || thread.org_id !== req.org!.id) {
+    if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
-    res.json(db.listArtifacts(thread.id));
+    const cursor = getQueryString(req.query.cursor);
+    const limitParam = getQueryString(req.query.limit);
+
+    // When no pagination params, fall back to existing unpaginated behavior
+    if (!cursor && !limitParam) {
+      res.json(db.listArtifacts(thread.id));
+      return;
+    }
+
+    const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
+    const rows = db.listArtifactsPaginated(thread.id, cursor, limit);
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const response: Record<string, unknown> = {
+      items,
+      has_more: hasMore,
+    };
+    if (hasMore) {
+      response.next_cursor = items[items.length - 1].artifact_key;
+    }
+    res.json(response);
   });
 
   // ─── Threads ─────────────────────────────────────────────
@@ -1894,7 +2221,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/channels/:id/messages — Get messages from a channel
-   * Query: limit?, before?, since? (timestamps)
+   * Query: limit?, before? (message id for pagination, or timestamp for legacy), since? (timestamps)
+   * When before is a message id (not numeric), uses cursor-based pagination and returns
+   * { messages: [...], has_more: boolean } with messages sorted newest first.
    */
   auth.get('/api/channels/:id/messages', requireScope('read'), (req, res) => {
     const channel = db.getChannel(req.params.id as string);
@@ -1915,8 +2244,28 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
     const beforeStr = getQueryString(req.query.before);
-    const before = beforeStr ? parseInt(beforeStr) : undefined;
     const sinceStr = getQueryString(req.query.since);
+
+    // Detect cursor-based pagination: before is a non-numeric string (message id)
+    const isBeforeId = beforeStr !== undefined && isNaN(Number(beforeStr));
+
+    if (isBeforeId) {
+      // Cursor-based pagination path (newest first)
+      const rows = db.getMessagesPaginated(channel.id, isBeforeId ? beforeStr : undefined, limit);
+      const hasMore = rows.length > limit;
+      const messages = hasMore ? rows.slice(0, limit) : rows;
+
+      const enriched = messages.map(m => {
+        const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
+        return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      });
+
+      res.json({ messages: enriched, has_more: hasMore });
+      return;
+    }
+
+    // Legacy timestamp-based path
+    const before = beforeStr ? parseInt(beforeStr) : undefined;
     const since = sinceStr !== undefined ? parseInt(sinceStr) : undefined;
     if (since !== undefined && isNaN(since)) {
       res.status(400).json({ error: 'since must be a valid integer timestamp' });
@@ -2259,20 +2608,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/org/settings — Get org settings
-   * Auth: Org API Key + X-Admin-Secret
+   * Auth: Org ticket or admin agent token
    */
-  auth.get('/api/org/settings', requireOrg, (req, res) => {
+  auth.get('/api/org/settings', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    res.json(db.getOrgSettings(req.org!.id));
+    const orgId = (req.org?.id || req.agent?.org_id)!;
+    res.json(db.getOrgSettings(orgId));
   });
 
   /**
    * PATCH /api/org/settings — Update org settings
-   * Auth: Org API Key + X-Admin-Secret
+   * Auth: Org ticket or admin agent token
    * Body: partial OrgSettings fields
    */
-  auth.patch('/api/org/settings', requireOrg, (req, res) => {
+  auth.patch('/api/org/settings', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const {
       messages_per_minute_per_bot,
@@ -2342,12 +2693,118 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const settings = db.updateOrgSettings(req.org!.id, updates);
+    const settings = db.updateOrgSettings(orgId, updates);
 
     // Audit
-    db.recordAudit(req.org!.id, null, 'settings.update', 'org_settings', req.org!.id, updates);
+    db.recordAudit(orgId, null, 'settings.update', 'org_settings', orgId, updates);
 
     res.json(settings);
+  });
+
+  // ─── Org Auth Management (Admin Agent) ─────────────────────
+
+  /**
+   * POST /api/org/tickets — Create an org ticket (admin agents only)
+   * Auth: Agent token (admin role)
+   * Body: { reusable?: boolean, expires_in?: number }
+   * Returns: { ticket, expires_at, reusable }
+   */
+  auth.post('/api/org/tickets', requireAgent, requireAuthRole('admin'), (req, res) => {
+    const { reusable, expires_in } = req.body;
+
+    const orgId = req.agent!.org_id;
+    const org = db.getOrgById(orgId);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Calculate expiry
+    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 1800;
+    const expiresAt = Date.now() + expiresInSec * 1000;
+
+    // Use the org's stored org_secret hash as the secret_hash for the ticket
+    // This allows rotation invalidation: when org_secret changes, the hash
+    // won't match new tickets' secret_hash
+    const secretHash = org.org_secret;
+
+    const isReusable = reusable === true;
+    const ticket = db.createOrgTicket(orgId, secretHash, {
+      reusable: isReusable,
+      expiresAt,
+      createdBy: req.agent!.id,
+    });
+
+    res.json({
+      ticket: ticket.id,
+      expires_at: ticket.expires_at,
+      reusable: ticket.reusable,
+    });
+  });
+
+  /**
+   * POST /api/org/rotate-secret — Rotate the org secret (admin agents only)
+   * Auth: Agent token (admin role)
+   * Returns: { org_secret }
+   */
+  auth.post('/api/org/rotate-secret', requireAgent, requireAuthRole('admin'), (req, res) => {
+    const orgId = req.agent!.org_id;
+    const org = db.getOrgById(orgId);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Generate new secret
+    const newSecret = crypto.randomBytes(24).toString('hex');
+    const newSecretHash = HubDB.hashToken(newSecret);
+
+    // Update in DB
+    db.rotateOrgSecret(orgId, newSecretHash);
+
+    // Invalidate all unredeemed org_tickets for this org
+    db.invalidateOrgTickets(orgId);
+
+    res.json({ org_secret: newSecret });
+  });
+
+  /**
+   * PATCH /api/org/agents/:agent_id/role — Update an agent's auth_role (admin agents only)
+   * Auth: Agent token (admin role)
+   * Body: { auth_role: 'admin' | 'member' }
+   * Returns: { agent_id, auth_role }
+   */
+  auth.patch('/api/org/agents/:agent_id/role', requireAgent, requireAuthRole('admin'), (req, res) => {
+    const { auth_role } = req.body;
+
+    // Validate auth_role
+    if (auth_role !== 'admin' && auth_role !== 'member') {
+      res.status(400).json({ error: "auth_role must be 'admin' or 'member'", code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const targetAgentId = req.params.agent_id as string;
+    const targetAgent = db.getAgentById(targetAgentId);
+    if (!targetAgent) {
+      res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Verify same org
+    if (targetAgent.org_id !== req.agent!.org_id) {
+      res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Guard: admin cannot demote self (prevent lockout)
+    if (targetAgentId === req.agent!.id && auth_role === 'member') {
+      res.status(400).json({ error: 'Cannot demote yourself', code: 'SELF_DEMOTION' });
+      return;
+    }
+
+    db.setAgentAuthRole(targetAgentId, auth_role);
+
+    res.json({ agent_id: targetAgentId, auth_role });
   });
 
   // ─── WS Ticket Exchange ──────────────────────────────────
@@ -2369,16 +2826,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    // Carry admin secret into the ticket only for validated org-key callers
-    let verifiedAdminSecret: string | undefined;
-    const adminSecretHeader = req.headers['x-admin-secret'] as string | undefined;
-    if (adminSecretHeader && req.org && req.authType === 'org') {
-      if (db.verifyOrgAdminSecret(req.org.id, adminSecretHeader)) {
-        verifiedAdminSecret = adminSecretHeader;
-      }
-      // Invalid admin secret is silently discarded — verified at WS connect time anyway
-    }
-    const ticketId = issueWsTicket(token, verifiedAdminSecret);
+    // Phase 3: Include org context in the ticket for WS org binding
+    const orgId = req.agent?.org_id || req.org?.id;
+    const ticketId = issueWsTicket(token, orgId);
 
     res.json({
       ticket: ticketId,
@@ -2390,11 +2840,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/audit — Query audit log
-   * Auth: Org API Key + X-Admin-Secret
+   * Auth: Org ticket or admin agent token
    * Query: since?, action?, target_type?, target_id?, bot_id?, limit?
    */
-  auth.get('/api/audit', requireOrg, (req, res) => {
+  auth.get('/api/audit', (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.agent?.org_id)!;
 
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : undefined;
@@ -2409,7 +2860,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 50;
     const limit = Math.min(Math.max(limitRaw, 1), 200);
 
-    const entries = db.getAuditLog(req.org!.id, { since, action, target_type, target_id, bot_id, limit });
+    const entries = db.getAuditLog(orgId, { since, action, target_type, target_id, bot_id, limit });
     res.json(entries);
   });
 

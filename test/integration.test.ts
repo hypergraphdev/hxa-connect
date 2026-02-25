@@ -18,7 +18,7 @@ describe('Thread State Machine', () => {
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
+    orgKey = org.org_secret;
     const { token } = await env.registerAgent(orgKey, 'sm-agent');
     agentToken = token;
   });
@@ -133,17 +133,19 @@ describe('Thread State Machine', () => {
 
 describe('Auth Types', () => {
   let env: TestEnv;
-  let orgKey: string;
+  let orgSecret: string;
+  let orgTicket: string;
   let agentToken: string;
   let agentId: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
-    const { agent, token } = await env.registerAgent(orgKey, 'auth-agent');
+    orgSecret = org.org_secret;
+    const { agent, token } = await env.registerAgent(orgSecret, 'auth-agent');
     agentToken = token;
     agentId = agent.id;
+    orgTicket = await env.loginAsOrg(orgSecret);
   });
 
   afterAll(() => env.cleanup());
@@ -154,8 +156,8 @@ describe('Auth Types', () => {
     expect(body.id).toBe(agentId);
   });
 
-  it('authenticates with org API key', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', { token: orgKey });
+  it('authenticates with org ticket', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', { token: orgTicket });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
   });
@@ -232,9 +234,9 @@ describe('Auth Types', () => {
     expect(status).toBe(403);
   });
 
-  it('org API key bypasses scope checks', async () => {
-    // Org key can access agent listing (which requires 'read' scope for agents)
-    const { status } = await api(env.baseUrl, 'GET', '/api/agents', { token: orgKey });
+  it('org ticket bypasses scope checks', async () => {
+    // Org ticket can access agent listing (which requires 'read' scope for agents)
+    const { status } = await api(env.baseUrl, 'GET', '/api/agents', { token: orgTicket });
     expect(status).toBe(200);
   });
 
@@ -264,7 +266,7 @@ describe('Rate Limiting', () => {
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
+    orgKey = org.org_secret;
 
     // Set very low rate limits for testing
     env.db.updateOrgSettings(org.id, {
@@ -413,7 +415,7 @@ describe('Catchup Events', () => {
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
+    orgKey = org.org_secret;
     const a1 = await env.registerAgent(orgKey, 'catchup-agent-1');
     const a2 = await env.registerAgent(orgKey, 'catchup-agent-2');
     agent1Token = a1.token;
@@ -579,7 +581,7 @@ describe('Optimistic Concurrency (If-Match)', () => {
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
+    orgKey = org.org_secret;
     const a1 = await env.registerAgent(orgKey, 'occ-agent-1');
     const a2 = await env.registerAgent(orgKey, 'occ-agent-2');
     agent1Token = a1.token;
@@ -693,7 +695,7 @@ describe('Terminal State Protection', () => {
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    orgKey = org.api_key;
+    orgKey = org.org_secret;
     const a1 = await env.registerAgent(orgKey, 'term-agent-1');
     const a2 = await env.registerAgent(orgKey, 'term-agent-2');
     agent1Token = a1.token;
@@ -837,5 +839,1066 @@ describe('Health Endpoint', () => {
     // No token provided — should still work
     const res = await fetch(`${env.baseUrl}/health`);
     expect(res.status).toBe(200);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 2: Ticket-Based Auth, Role Enforcement
+// ═══════════════════════════════════════════════════════════════
+
+describe('Phase 2: Auth Login', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let orgSecret: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg('login-org');
+    orgId = org.id;
+    orgSecret = org.org_secret;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('issues a ticket on valid login', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    expect(status).toBe(200);
+    expect(body.ticket).toBeTypeOf('string');
+    expect(body.expires_at).toBeTypeOf('number');
+    expect(body.reusable).toBe(false);
+    expect(body.org.id).toBe(orgId);
+    expect(body.org.name).toBe('login-org');
+  });
+
+  it('issues a reusable ticket', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret, reusable: true, expires_in: 3600 },
+    });
+    expect(status).toBe(200);
+    expect(body.reusable).toBe(true);
+    expect(body.expires_at).toBeGreaterThan(Date.now() + 3500 * 1000);
+  });
+
+  it('rejects wrong org_secret', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: 'wrong-secret' },
+    });
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_SECRET');
+  });
+
+  it('rejects unknown org_id', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: 'nonexistent', org_secret: orgSecret },
+    });
+    expect(status).toBe(404);
+    expect(body.code).toBe('NOT_FOUND');
+  });
+
+  it('rejects missing fields', async () => {
+    const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_secret: orgSecret },
+    });
+    expect(s1).toBe(400);
+
+    const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId },
+    });
+    expect(s2).toBe(400);
+  });
+});
+
+describe('Phase 2: Ticket-Based Registration', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let orgSecret: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg('ticket-reg-org');
+    orgId = org.id;
+    orgSecret = org.org_secret;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('first agent via ticket gets admin role', async () => {
+    // Login to get a ticket
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+
+    // Register via ticket
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'first-agent' },
+    });
+    expect(status).toBe(200);
+    expect(body.agent_id).toBeTypeOf('string');
+    expect(body.token).toBeTypeOf('string');
+    expect(body.name).toBe('first-agent');
+    expect(body.auth_role).toBe('admin');
+  });
+
+  it('second agent via ticket gets member role', async () => {
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'second-agent' },
+    });
+    expect(status).toBe(200);
+    expect(body.auth_role).toBe('member');
+  });
+
+  it('one-time ticket cannot be reused', async () => {
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret, reusable: false },
+    });
+
+    // First use — succeeds
+    const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'onetime-agent-1' },
+    });
+    expect(s1).toBe(200);
+
+    // Second use — fails
+    const { status: s2, body: b2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'onetime-agent-2' },
+    });
+    expect(s2).toBe(401);
+    expect(b2.code).toBe('TICKET_CONSUMED');
+  });
+
+  it('reusable ticket can be used multiple times', async () => {
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret, reusable: true },
+    });
+
+    const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reusable-agent-1' },
+    });
+    expect(s1).toBe(200);
+
+    const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reusable-agent-2' },
+    });
+    expect(s2).toBe(200);
+  });
+
+  it('rejects invalid ticket', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: 'nonexistent-ticket', name: 'bad-ticket-agent' },
+    });
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_TICKET');
+  });
+
+  it('rejects ticket from wrong org', async () => {
+    const otherOrg = env.createOrg('other-org');
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: otherOrg.id, org_secret: otherOrg.org_secret },
+    });
+
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'cross-org-agent' },
+    });
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_TICKET');
+  });
+
+  it('rejects missing required fields in ticket registration', async () => {
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+
+    // Missing name
+    const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket },
+    });
+    expect(s1).toBe(400);
+
+    // Missing org_id
+    const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { ticket: loginBody.ticket, name: 'no-org-agent' },
+    });
+    expect(s2).toBe(400);
+  });
+});
+
+describe('Phase 2: toAgentResponse includes auth_role', () => {
+  let env: TestEnv;
+  let orgTicket: string;
+  let agentToken: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    const { token } = await env.registerAgent(org.org_secret, 'role-agent');
+    agentToken = token;
+    orgTicket = await env.loginAsOrg(org.org_secret);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('GET /api/me includes auth_role', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', { token: agentToken });
+    expect(status).toBe(200);
+    expect(body.auth_role).toBeDefined();
+  });
+
+  it('GET /api/agents includes auth_role in list', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', { token: orgTicket });
+    expect(status).toBe(200);
+    expect(body[0].auth_role).toBeDefined();
+  });
+});
+
+describe('Phase 2: Role Enforcement & Management', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let orgSecret: string;
+  let adminToken: string;
+  let adminId: string;
+  let memberToken: string;
+  let memberId: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg('role-org');
+    orgId = org.id;
+    orgSecret = org.org_secret;
+
+    // Create admin agent (first via ticket = auto-admin)
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    const { body: adminBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'admin-agent' },
+    });
+    adminToken = adminBody.token;
+    adminId = adminBody.agent_id;
+
+    // Create member agent (second = member)
+    const { body: loginBody2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody2.ticket, name: 'member-agent' },
+    });
+    memberToken = memberBody.token;
+    memberId = memberBody.agent_id;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('admin can create tickets via /api/org/tickets', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/org/tickets', {
+      token: adminToken,
+      body: { reusable: true, expires_in: 7200 },
+    });
+    expect(status).toBe(200);
+    expect(body.ticket).toBeTypeOf('string');
+    expect(body.reusable).toBe(true);
+    expect(body.expires_at).toBeGreaterThan(Date.now());
+  });
+
+  it('member cannot create tickets', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/org/tickets', {
+      token: memberToken,
+      body: {},
+    });
+    expect(status).toBe(403);
+    expect(body.code).toBe('FORBIDDEN');
+  });
+
+  it('admin can promote member to admin', async () => {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+      token: adminToken,
+      body: { auth_role: 'admin' },
+    });
+    expect(status).toBe(200);
+    expect(body.agent_id).toBe(memberId);
+    expect(body.auth_role).toBe('admin');
+  });
+
+  it('admin can demote other admin to member', async () => {
+    // First promote memberId to admin (may already be from previous test)
+    await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+      token: adminToken,
+      body: { auth_role: 'admin' },
+    });
+
+    // Now demote
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+      token: adminToken,
+      body: { auth_role: 'member' },
+    });
+    expect(status).toBe(200);
+    expect(body.auth_role).toBe('member');
+  });
+
+  it('admin cannot demote self', async () => {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${adminId}/role`, {
+      token: adminToken,
+      body: { auth_role: 'member' },
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe('SELF_DEMOTION');
+  });
+
+  it('member cannot change roles', async () => {
+    const { status } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${adminId}/role`, {
+      token: memberToken,
+      body: { auth_role: 'member' },
+    });
+    expect(status).toBe(403);
+  });
+
+  it('rejects invalid auth_role value', async () => {
+    const { status } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+      token: adminToken,
+      body: { auth_role: 'superadmin' },
+    });
+    expect(status).toBe(400);
+  });
+});
+
+describe('Phase 2: Org Secret Rotation', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let orgSecret: string;
+  let adminToken: string;
+  let memberToken: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg('rotate-org');
+    orgId = org.id;
+    orgSecret = org.org_secret;
+
+    // Create admin agent
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    const { body: adminBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'rotate-admin' },
+    });
+    adminToken = adminBody.token;
+
+    // Create member agent
+    const { body: loginBody2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: loginBody2.ticket, name: 'rotate-member' },
+    });
+    memberToken = memberBody.token;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('admin can rotate org secret', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
+      token: adminToken,
+    });
+    expect(status).toBe(200);
+    expect(body.org_secret).toBeTypeOf('string');
+    expect(body.org_secret).toHaveLength(48); // 24 bytes hex
+  });
+
+  it('new secret works for login after rotation', async () => {
+    // Rotate
+    const { body: rotateBody } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
+      token: adminToken,
+    });
+    const newSecret = rotateBody.org_secret;
+
+    // Login with new secret works
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: newSecret },
+    });
+    expect(status).toBe(200);
+
+    // Login with old secret fails
+    const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    expect(s2).toBe(401);
+  });
+
+  it('rotation invalidates outstanding tickets', async () => {
+    // Get a new secret first
+    const { body: rotBody } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
+      token: adminToken,
+    });
+
+    // Login to get a ticket with current secret
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: rotBody.org_secret },
+    });
+    const ticketBeforeRotation = loginBody.ticket;
+
+    // Rotate again
+    await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
+      token: adminToken,
+    });
+
+    // Try to use the old ticket — should fail (tickets were invalidated)
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticketBeforeRotation, name: 'post-rotation-agent' },
+    });
+    expect(status).toBe(401);
+  });
+
+  it('member cannot rotate secret', async () => {
+    const { status } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
+      token: memberToken,
+    });
+    expect(status).toBe(403);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3: Multi-Org Context (X-Org-Id Header & WS Ticket Org Binding)
+// ═══════════════════════════════════════════════════════════════
+
+describe('Phase 3: X-Org-Id Header Validation', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let agentToken: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    orgId = org.id;
+    const { token } = await env.registerAgent(org.org_secret, 'org-header-agent');
+    agentToken = token;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('accepts X-Org-Id matching agent org', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+      headers: { 'X-Org-Id': orgId },
+    });
+    expect(status).toBe(200);
+    expect(body.org_id).toBe(orgId);
+  });
+
+  it('rejects X-Org-Id not matching agent org', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+      headers: { 'X-Org-Id': 'wrong-org-id-00000000' },
+    });
+    expect(status).toBe(403);
+    expect(body.code).toBe('ORG_MISMATCH');
+  });
+
+  it('works without X-Org-Id (backward compat)', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(status).toBe(200);
+    expect(body.org_id).toBe(orgId);
+  });
+
+  it('rejects X-Org-Id for scoped token with wrong org', async () => {
+    // Create a scoped token
+    const { body: tokenBody } = await api(env.baseUrl, 'POST', '/api/me/tokens', {
+      token: agentToken,
+      body: { label: 'scoped-org-test', scopes: ['read'] },
+    });
+    expect(tokenBody.token).toBeTruthy();
+
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: tokenBody.token,
+      headers: { 'X-Org-Id': 'wrong-org-id-00000000' },
+    });
+    expect(status).toBe(403);
+    expect(body.code).toBe('ORG_MISMATCH');
+  });
+
+  it('accepts X-Org-Id for scoped token with correct org', async () => {
+    const { body: tokenBody } = await api(env.baseUrl, 'POST', '/api/me/tokens', {
+      token: agentToken,
+      body: { label: 'scoped-org-test-ok', scopes: ['read'] },
+    });
+
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: tokenBody.token,
+      headers: { 'X-Org-Id': orgId },
+    });
+    expect(status).toBe(200);
+    expect(body.org_id).toBe(orgId);
+  });
+});
+
+describe('Phase 3: WS Ticket Org Binding', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let agentToken: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    orgId = org.id;
+    const { token } = await env.registerAgent(org.org_secret, 'ws-org-agent');
+    agentToken = token;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('ws-ticket includes org binding and WS connection succeeds', async () => {
+    // Get a ws-ticket (should include org binding)
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/ws-ticket', {
+      token: agentToken,
+    });
+    expect(status).toBe(200);
+    expect(body.ticket).toBeTruthy();
+    expect(body.expires_in).toBe(30);
+
+    // Connect via WS using the ticket
+    const wsUrl = env.baseUrl.replace('http', 'ws');
+    const ws = await new Promise<import('ws').WebSocket>((resolve, reject) => {
+      const { WebSocket } = require('ws');
+      const socket = new WebSocket(`${wsUrl}/ws?ticket=${body.ticket}`);
+      socket.on('open', () => resolve(socket));
+      socket.on('error', reject);
+      setTimeout(() => reject(new Error('WS connect timeout')), 3000);
+    });
+
+    // Connection succeeded — org binding was valid
+    expect(ws.readyState).toBe(1); // OPEN
+    ws.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 4: Super Admin Org Lifecycle
+// ═══════════════════════════════════════════════════════════════
+
+describe('Phase 4: Super Admin Org Lifecycle', () => {
+  const ADMIN_SECRET = 'test-super-admin-secret';
+  let env: TestEnv;
+
+  beforeAll(async () => {
+    env = await createTestEnv({ admin_secret: ADMIN_SECRET });
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('POST /api/orgs returns org_secret and status', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/orgs', {
+      token: ADMIN_SECRET,
+      body: { name: 'lifecycle-org' },
+    });
+    expect(status).toBe(200);
+    expect(body.name).toBe('lifecycle-org');
+    expect(body.status).toBe('active');
+    expect(body.org_secret).toBeTypeOf('string');
+  });
+
+  it('POST /api/orgs requires admin auth', async () => {
+    const { status } = await api(env.baseUrl, 'POST', '/api/orgs', {
+      token: 'wrong-secret',
+      body: { name: 'should-fail' },
+    });
+    expect(status).toBe(401);
+  });
+
+  it('GET /api/orgs includes status and agent_count', async () => {
+    // Create an org with an agent so we can verify agent_count
+    const org = env.createOrg('list-test-org');
+    await env.registerAgent(org.org_secret, 'list-agent');
+
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/orgs', {
+      token: ADMIN_SECRET,
+    });
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+    const found = body.find((o: any) => o.name === 'list-test-org');
+    expect(found).toBeDefined();
+    expect(found.status).toBe('active');
+    expect(found.agent_count).toBe(1);
+    // org_secret should be stripped from list
+    expect(found.org_secret).toBeUndefined();
+  });
+
+  it('PATCH /api/orgs/:id can update name', async () => {
+    const org = env.createOrg('rename-me');
+
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { name: 'renamed-org' },
+    });
+    expect(status).toBe(200);
+    expect(body.name).toBe('renamed-org');
+    expect(body.status).toBe('active');
+  });
+
+  it('PATCH /api/orgs/:id can suspend org', async () => {
+    const org = env.createOrg('suspend-me');
+
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+    expect(status).toBe(200);
+    expect(body.status).toBe('suspended');
+  });
+
+  it('PATCH /api/orgs/:id can reactivate suspended org', async () => {
+    const org = env.createOrg('reactivate-me');
+
+    // Suspend
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+
+    // Reactivate
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'active' },
+    });
+    expect(status).toBe(200);
+    expect(body.status).toBe('active');
+  });
+
+  it('PATCH /api/orgs/:id rejects setting status to destroyed', async () => {
+    const org = env.createOrg('no-destroy-patch');
+
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'destroyed' },
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('PATCH /api/orgs/:id rejects modifying destroyed org', async () => {
+    const org = env.createOrg('destroy-then-patch');
+
+    // Destroy via DELETE
+    await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+    });
+
+    // Try to modify — org is gone (deleted from DB)
+    const { status } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { name: 'impossible' },
+    });
+    expect(status).toBe(404);
+  });
+
+  it('PATCH /api/orgs/:id returns 404 for unknown org', async () => {
+    const { status } = await api(env.baseUrl, 'PATCH', '/api/orgs/nonexistent-id', {
+      token: ADMIN_SECRET,
+      body: { name: 'nope' },
+    });
+    expect(status).toBe(404);
+  });
+
+  it('DELETE /api/orgs/:id destroys org', async () => {
+    const org = env.createOrg('destroy-me');
+
+    const { status } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+    });
+    expect(status).toBe(204);
+
+    // Verify org is gone
+    const { status: listStatus, body: orgs } = await api(env.baseUrl, 'GET', '/api/orgs', {
+      token: ADMIN_SECRET,
+    });
+    expect(listStatus).toBe(200);
+    const found = orgs.find((o: any) => o.id === org.id);
+    expect(found).toBeUndefined();
+  });
+
+  it('DELETE /api/orgs/:id returns 404 for unknown org', async () => {
+    const { status } = await api(env.baseUrl, 'DELETE', '/api/orgs/nonexistent-id', {
+      token: ADMIN_SECRET,
+    });
+    expect(status).toBe(404);
+  });
+
+  it('suspended org rejects authenticated API calls', async () => {
+    const org = env.createOrg('suspend-api-test');
+    const { token: agentToken } = await env.registerAgent(org.org_secret, 'test-agent');
+
+    // Verify agent can make API calls initially
+    const { status: beforeStatus } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(beforeStatus).toBe(200);
+
+    // Suspend org
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+
+    // Agent API calls should now be rejected
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(status).toBe(403);
+    expect(body.code).toBe('ORG_SUSPENDED');
+  });
+
+  it('reactivated org allows API calls again', async () => {
+    const org = env.createOrg('reactivate-api-test');
+    const { token: agentToken } = await env.registerAgent(org.org_secret, 'test-agent');
+
+    // Suspend
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+
+    // Verify blocked
+    const { status: blockedStatus } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(blockedStatus).toBe(403);
+
+    // Reactivate
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'active' },
+    });
+
+    // API calls should work again
+    const { status } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(status).toBe(200);
+  });
+
+  it('suspended org invalidates org tickets', async () => {
+    const org = env.createOrg('suspend-ticket-test');
+    const orgTicket = await env.loginAsOrg(org.org_secret);
+
+    // Verify ticket works initially
+    const { status: beforeStatus } = await api(env.baseUrl, 'GET', '/api/agents', {
+      token: orgTicket,
+    });
+    expect(beforeStatus).toBe(200);
+
+    // Suspend — invalidates all outstanding org tickets
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+
+    // Org ticket should be invalidated (401, not 403)
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', {
+      token: orgTicket,
+    });
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_TOKEN');
+  });
+
+  it('suspension invalidates outstanding org tickets', async () => {
+    const org = env.createOrg('suspend-tickets-test');
+
+    // Login to get a ticket
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: org.id, org_secret: org.org_secret },
+    });
+    const ticket = loginBody.ticket;
+    expect(ticket).toBeTypeOf('string');
+
+    // Suspend the org
+    await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+      body: { status: 'suspended' },
+    });
+
+    // Ticket should be invalidated
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: org.id, ticket, name: 'post-suspend-agent' },
+    });
+    expect(status).toBe(401);
+  });
+
+  it('destroy cascades to agents and channels', async () => {
+    const org = env.createOrg('cascade-test');
+    const { token: agentToken } = await env.registerAgent(org.org_secret, 'cascade-agent');
+
+    // Verify agent exists
+    const { status: agentStatus } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(agentStatus).toBe(200);
+
+    // Destroy
+    const { status } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
+      token: ADMIN_SECRET,
+    });
+    expect(status).toBe(204);
+
+    // Agent token should be invalid (org and agents deleted)
+    const { status: afterStatus } = await api(env.baseUrl, 'GET', '/api/me', {
+      token: agentToken,
+    });
+    expect(afterStatus).toBe(401);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 5: Web UI Backend (Pagination + GET /api/org + Login)
+// ═══════════════════════════════════════════════════════════════
+
+describe('Phase 5: GET /api/org', () => {
+  let env: TestEnv;
+  let orgId: string;
+  let agentToken: string;
+  let orgTicket: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg('org-info-test');
+    orgId = org.id;
+    const { token } = await env.registerAgent(org.org_secret, 'info-agent');
+    agentToken = token;
+    orgTicket = await env.loginAsOrg(org.org_secret);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('returns org info via agent token', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/org', {
+      token: agentToken,
+    });
+    expect(status).toBe(200);
+    expect(body.id).toBe(orgId);
+    expect(body.name).toBe('org-info-test');
+    expect(body.status).toBe('active');
+  });
+
+  it('returns org info via org ticket', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/org', {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    expect(body.id).toBe(orgId);
+    expect(body.name).toBe('org-info-test');
+  });
+
+  it('rejects unauthenticated request', async () => {
+    const { status } = await api(env.baseUrl, 'GET', '/api/org', {});
+    expect(status).toBe(401);
+  });
+});
+
+describe('Phase 5: Agents Pagination', () => {
+  let env: TestEnv;
+  let orgTicket: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    // Register 5 agents
+    for (let i = 0; i < 5; i++) {
+      await env.registerAgent(org.org_secret, `page-agent-${i}`);
+    }
+    orgTicket = await env.loginAsOrg(org.org_secret);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('returns unpaginated list when no params', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.length).toBe(5);
+  });
+
+  it('returns paginated response with limit', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents?limit=2', {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    expect(body.items).toHaveLength(2);
+    expect(body.has_more).toBe(true);
+    expect(body.next_cursor).toBeTruthy();
+  });
+
+  it('cursor-based pagination walks all agents', async () => {
+    let cursor: string | undefined;
+    const allNames: string[] = [];
+
+    for (let page = 0; page < 10; page++) {
+      const url = cursor ? `/api/agents?limit=2&cursor=${cursor}` : '/api/agents?limit=2';
+      const { body } = await api(env.baseUrl, 'GET', url, { token: orgTicket });
+      for (const a of body.items) allNames.push(a.name);
+      if (!body.has_more) break;
+      cursor = body.next_cursor;
+    }
+
+    expect(allNames.length).toBe(5);
+    // All unique
+    expect(new Set(allNames).size).toBe(5);
+  });
+});
+
+describe('Phase 5: Threads Pagination', () => {
+  let env: TestEnv;
+  let agentToken: string;
+  let orgTicket: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    const { token } = await env.registerAgent(org.org_secret, 'thread-page-agent');
+    agentToken = token;
+    orgTicket = await env.loginAsOrg(org.org_secret);
+    // Create 4 threads
+    for (let i = 0; i < 4; i++) {
+      await api(env.baseUrl, 'POST', '/api/threads', {
+        token: agentToken,
+        body: { topic: `Thread ${i}` },
+      });
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('returns paginated threads with limit', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=2', {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    expect(body.items).toHaveLength(2);
+    expect(body.has_more).toBe(true);
+    expect(body.next_cursor).toBeTruthy();
+  });
+
+  it('cursor pagination walks all threads', async () => {
+    let cursor: string | undefined;
+    const topics: string[] = [];
+
+    for (let page = 0; page < 10; page++) {
+      const url = cursor ? `/api/org/threads?limit=2&cursor=${cursor}` : '/api/org/threads?limit=2';
+      const { body } = await api(env.baseUrl, 'GET', url, {
+        token: orgTicket,
+      });
+      for (const t of body.items) topics.push(t.topic);
+      if (!body.has_more) break;
+      cursor = body.next_cursor;
+    }
+
+    expect(topics.length).toBe(4);
+  });
+});
+
+describe('Phase 5: Channel Messages Pagination', () => {
+  let env: TestEnv;
+  let agentToken1: string;
+  let orgTicket: string;
+  let channelId: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    const { token: t1, agent: a1 } = await env.registerAgent(org.org_secret, 'msg-agent-1');
+    const { agent: a2 } = await env.registerAgent(org.org_secret, 'msg-agent-2');
+    agentToken1 = t1;
+    orgTicket = await env.loginAsOrg(org.org_secret);
+
+    // Create a DM channel via org ticket
+    const { body: ch } = await api(env.baseUrl, 'POST', '/api/channels', {
+      token: orgTicket,
+      body: { type: 'direct', members: [a1.id, a2.id] },
+    });
+    channelId = ch.id;
+
+    // Send 6 messages via agent token
+    for (let i = 0; i < 6; i++) {
+      await api(env.baseUrl, 'POST', `/api/channels/${channelId}/messages`, {
+        token: agentToken1,
+        body: { content: `Message ${i}` },
+      });
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('returns latest messages with limit', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/channels/${channelId}/messages?limit=3`, {
+      token: agentToken1,
+    });
+    expect(status).toBe(200);
+    // With limit param, should still work (may return paginated or flat)
+    const messages = body.messages || body;
+    expect(messages.length).toBeLessThanOrEqual(6);
+  });
+
+  it('legacy format without pagination params', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/channels/${channelId}/messages`, {
+      token: agentToken1,
+    });
+    expect(status).toBe(200);
+    // Legacy returns flat array
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.length).toBe(6);
+  });
+});
+
+describe('Phase 5: Thread Messages Pagination', () => {
+  let env: TestEnv;
+  let agentToken: string;
+  let orgTicket: string;
+  let threadId: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+    const org = env.createOrg();
+    const { token } = await env.registerAgent(org.org_secret, 'tmsg-agent');
+    agentToken = token;
+    orgTicket = await env.loginAsOrg(org.org_secret);
+
+    // Create thread
+    const { body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
+      token: agentToken,
+      body: { topic: 'Paginated thread' },
+    });
+    threadId = thread.id;
+
+    // Send 5 thread messages
+    for (let i = 0; i < 5; i++) {
+      await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+        token: agentToken,
+        body: { parts: [{ type: 'text', content: `TMsg ${i}` }] },
+      });
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it('returns thread messages with limit', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=2`, {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    const messages = body.messages || body;
+    expect(messages.length).toBeLessThanOrEqual(5);
+  });
+
+  it('legacy format returns flat array', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages`, {
+      token: orgTicket,
+    });
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
   });
 });

@@ -12,7 +12,7 @@ declare global {
       authType?: 'agent' | 'org';
       /** Token scopes for the current request. Primary agent tokens have ['full']. */
       tokenScopes?: TokenScope[];
-      /** ID of the scoped token used (null if primary agent token or org key). */
+      /** ID of the scoped token used (null if primary agent token or org ticket). */
       scopedTokenId?: string;
       /** The raw plaintext token from the request (for ws-ticket exchange). */
       rawToken?: string;
@@ -34,7 +34,7 @@ function extractToken(req: Request): string | undefined {
 }
 
 /**
- * Middleware: Authenticate as agent (via agent token) or org admin (via org API key)
+ * Middleware: Authenticate as agent (via agent token) or org (via reusable ticket)
  * Sets req.agent, req.org, and req.tokenScopes
  */
 export function authMiddleware(db: HubDB) {
@@ -52,10 +52,35 @@ export function authMiddleware(db: HubDB) {
     // Try primary agent token first
     const agent = db.getAgentByToken(token);
     if (agent) {
+      // Phase 3: Validate X-Org-Id header if present
+      const requestedOrgId = req.headers['x-org-id'] as string | undefined;
+      if (requestedOrgId) {
+        if (requestedOrgId !== agent.org_id) {
+          res.status(403).json({
+            error: 'Agent does not belong to the requested organization',
+            code: 'ORG_MISMATCH',
+          });
+          return;
+        }
+      }
+      // No X-Org-Id header — fall back to agent's DB org (single-org compat)
+      // In Phase 7 this will become a deprecation warning
+
       req.agent = agent;
       req.org = db.getOrgById(agent.org_id);
       req.authType = 'agent';
       req.tokenScopes = ['full'];
+      // Check org status
+      if (req.org) {
+        if (req.org.status === 'suspended') {
+          res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
+          return;
+        }
+        if (req.org.status === 'destroyed') {
+          res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
+          return;
+        }
+      }
       // W3: HTTP requests update last_seen but do NOT mark agent online.
       // Online status is managed exclusively by WS connections.
       db.touchAgentLastSeen(agent.id);
@@ -73,11 +98,34 @@ export function authMiddleware(db: HubDB) {
       }
       const scopedAgent = db.getAgentById(scopedToken.agent_id);
       if (scopedAgent) {
+        // Phase 3: Validate X-Org-Id header if present
+        const requestedOrgId = req.headers['x-org-id'] as string | undefined;
+        if (requestedOrgId) {
+          if (requestedOrgId !== scopedAgent.org_id) {
+            res.status(403).json({
+              error: 'Agent does not belong to the requested organization',
+              code: 'ORG_MISMATCH',
+            });
+            return;
+          }
+        }
+
         req.agent = scopedAgent;
         req.org = db.getOrgById(scopedAgent.org_id);
         req.authType = 'agent';
         req.tokenScopes = scopedToken.scopes;
         req.scopedTokenId = scopedToken.id;
+        // Check org status
+        if (req.org) {
+          if (req.org.status === 'suspended') {
+            res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
+            return;
+          }
+          if (req.org.status === 'destroyed') {
+            res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
+            return;
+          }
+        }
         // W3: HTTP requests update last_seen but do NOT mark agent online.
         db.touchAgentLastSeen(scopedAgent.id);
         db.touchAgentToken(scopedToken.id);
@@ -86,13 +134,24 @@ export function authMiddleware(db: HubDB) {
       }
     }
 
-    // Try org API key
-    const org = db.getOrgByKey(token);
-    if (org) {
-      req.org = org;
-      req.authType = 'org';
-      next();
-      return;
+    // Try org ticket (reusable session token from login)
+    const ticket = db.getOrgTicket(token);
+    if (ticket && ticket.reusable && !ticket.consumed && ticket.expires_at > Date.now()) {
+      const ticketOrg = db.getOrgById(ticket.org_id);
+      if (ticketOrg) {
+        if (ticketOrg.status === 'suspended') {
+          res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
+          return;
+        }
+        if (ticketOrg.status === 'destroyed') {
+          res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
+          return;
+        }
+        req.org = ticketOrg;
+        req.authType = 'org';
+        next();
+        return;
+      }
     }
 
     res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
@@ -119,6 +178,24 @@ export function requireOrg(req: Request, res: Response, next: NextFunction) {
     return;
   }
   next();
+}
+
+/**
+ * Middleware factory: Require a specific auth_role on the current agent.
+ * Only agents with the specified role can proceed.
+ */
+export function requireAuthRole(role: 'admin') {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.agent) {
+      res.status(403).json({ error: 'Agent authentication required', code: 'FORBIDDEN' });
+      return;
+    }
+    if (req.agent.auth_role !== role) {
+      res.status(403).json({ error: `Auth role '${role}' required`, code: 'FORBIDDEN' });
+      return;
+    }
+    next();
+  };
 }
 
 /**
