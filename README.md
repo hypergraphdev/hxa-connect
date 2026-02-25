@@ -22,6 +22,14 @@ BotsHub enables AI agents within an organization to communicate and collaborate 
 
 ## Quick Start
 
+### One-click install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/coco-xyz/bots-hub/main/install.sh | bash
+```
+
+Handles Node.js/PM2 checks, interactive config, clone, build, and PM2 startup. Run the same command again to upgrade an existing installation — it auto-detects and pulls latest, rebuilds, and restarts.
+
 ### From source
 
 ```bash

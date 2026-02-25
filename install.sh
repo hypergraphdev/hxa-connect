@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# BotsHub — One-Click Install Script
-# Usage: curl -sSL https://raw.githubusercontent.com/coco-xyz/bots-hub/main/install.sh | bash
-#   or:  bash install.sh [--dir /path/to/install] [--port 4800] [--no-interactive]
+# BotsHub — Install & Upgrade Script
+# Fresh install:  curl -sSL https://raw.githubusercontent.com/coco-xyz/bots-hub/main/install.sh | bash
+# Upgrade:        cd ~/bots-hub && bash install.sh
+#   or:           bash install.sh [--dir /path/to/install] [--port 4800] [--no-interactive]
 set -euo pipefail
 
 # ─── Defaults ─────────────────────────────────────────────────
@@ -12,6 +13,7 @@ REPO_URL="https://github.com/coco-xyz/bots-hub.git"
 BRANCH="main"
 INTERACTIVE=true
 PM2_NAME="botshub"
+IS_UPGRADE=false
 
 # ─── Colors ───────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -38,11 +40,17 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: install.sh [OPTIONS]"
       echo ""
+      echo "  Fresh install: clones repo, configures, builds, and starts PM2"
+      echo "  Upgrade:       pulls latest code, rebuilds, and restarts PM2"
+      echo ""
+      echo "  Automatically detects whether to install or upgrade based on"
+      echo "  whether the install directory already contains a git repo."
+      echo ""
       echo "Options:"
       echo "  --dir DIR          Install directory (default: ~/bots-hub)"
       echo "  --port PORT        Server port (default: 4800)"
       echo "  --secret SECRET    Admin secret (prompted if not set)"
-      echo "  --branch BRANCH    Git branch to install (default: main)"
+      echo "  --branch BRANCH    Git branch (default: main)"
       echo "  --name NAME        PM2 process name (default: botshub)"
       echo "  --no-interactive   Skip prompts, use defaults/env vars"
       echo "  -h, --help         Show this help"
@@ -52,12 +60,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ─── Detect Mode ─────────────────────────────────────────────
+# Also detect if running from inside an existing installation
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+  IS_UPGRADE=true
+elif [[ -d "./.git" ]] && [[ -f "./package.json" ]] && grep -qE '"name"\s*:\s*"bots-hub"' "./package.json" 2>/dev/null; then
+  IS_UPGRADE=true
+  INSTALL_DIR="$(pwd)"
+fi
+
 # ─── Banner ───────────────────────────────────────────────────
 echo ""
-echo -e "${CYAN}  ╔═══════════════════════════════════════╗${NC}"
-echo -e "${CYAN}  ║          🐾 BotsHub Installer         ║${NC}"
-echo -e "${CYAN}  ║   Agent-to-Agent Communication Hub    ║${NC}"
-echo -e "${CYAN}  ╚═══════════════════════════════════════╝${NC}"
+if [[ "$IS_UPGRADE" == true ]]; then
+  echo -e "${CYAN}  ╔═══════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║          🐾 BotsHub Upgrade           ║${NC}"
+  echo -e "${CYAN}  ║   Agent-to-Agent Communication Hub    ║${NC}"
+  echo -e "${CYAN}  ╚═══════════════════════════════════════╝${NC}"
+else
+  echo -e "${CYAN}  ╔═══════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║          🐾 BotsHub Installer         ║${NC}"
+  echo -e "${CYAN}  ║   Agent-to-Agent Communication Hub    ║${NC}"
+  echo -e "${CYAN}  ╚═══════════════════════════════════════╝${NC}"
+fi
 echo ""
 
 # ─── Step 1: Check Node.js ────────────────────────────────────
@@ -82,8 +106,8 @@ if ! command -v pm2 &>/dev/null; then
 fi
 ok "PM2 $(pm2 -v)"
 
-# ─── Step 3: Interactive Config ────────────────────────────────
-if [[ "$INTERACTIVE" == true ]]; then
+# ─── Step 3: Interactive Config (fresh install only) ──────────
+if [[ "$IS_UPGRADE" == false && "$INTERACTIVE" == true ]]; then
   echo ""
   info "Configuration (press Enter for defaults):"
   echo ""
@@ -109,13 +133,19 @@ if [[ "$INTERACTIVE" == true ]]; then
 fi
 
 # ─── Step 4: Clone or Update ──────────────────────────────────
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-  info "Existing installation found. Updating..."
+if [[ "$IS_UPGRADE" == true ]]; then
   cd "$INSTALL_DIR"
+  OLD_HEAD=$(git rev-parse --short HEAD)
+  info "Pulling latest from $BRANCH..."
   git fetch origin
   git checkout "$BRANCH"
   git pull origin "$BRANCH"
-  ok "Updated to latest $BRANCH"
+  NEW_HEAD=$(git rev-parse --short HEAD)
+  if [[ "$OLD_HEAD" == "$NEW_HEAD" ]]; then
+    ok "Already up to date ($NEW_HEAD)"
+  else
+    ok "Updated $OLD_HEAD → $NEW_HEAD"
+  fi
 else
   info "Cloning bots-hub..."
   git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
@@ -126,21 +156,22 @@ cd "$INSTALL_DIR"
 
 # ─── Step 5: Install Dependencies & Build ─────────────────────
 info "Installing dependencies..."
-npm ci --loglevel=warn
+npm install --loglevel=warn
 ok "Dependencies installed"
 
 info "Building..."
 npm run build
 ok "Build complete"
 
-# ─── Step 6: Generate .env ────────────────────────────────────
-ENV_FILE="$INSTALL_DIR/.env"
-if [[ -f "$ENV_FILE" ]]; then
-  info "Existing .env found — preserving. New config written to .env.new"
-  ENV_FILE="$INSTALL_DIR/.env.new"
-fi
+# ─── Step 6: Generate .env (fresh install only) ───────────────
+if [[ "$IS_UPGRADE" == false ]]; then
+  ENV_FILE="$INSTALL_DIR/.env"
+  if [[ -f "$ENV_FILE" ]]; then
+    info "Existing .env found — preserving. New config written to .env.new"
+    ENV_FILE="$INSTALL_DIR/.env.new"
+  fi
 
-cat > "$ENV_FILE" <<ENVEOF
+  cat > "$ENV_FILE" <<ENVEOF
 # BotsHub Configuration
 # Generated by install.sh on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
@@ -150,15 +181,15 @@ BOTSHUB_PERSIST=true
 BOTSHUB_DATA_DIR=./data
 ENVEOF
 
-if [[ -n "$BOTSHUB_ADMIN_SECRET" ]]; then
-  echo "BOTSHUB_ADMIN_SECRET=$BOTSHUB_ADMIN_SECRET" >> "$ENV_FILE"
-else
-  echo "# BOTSHUB_ADMIN_SECRET=  # Set this for production!" >> "$ENV_FILE"
-  echo "NODE_ENV=development" >> "$ENV_FILE"
-  warn "No admin secret set — running in development mode"
-fi
+  if [[ -n "$BOTSHUB_ADMIN_SECRET" ]]; then
+    echo "BOTSHUB_ADMIN_SECRET=$BOTSHUB_ADMIN_SECRET" >> "$ENV_FILE"
+  else
+    echo "# BOTSHUB_ADMIN_SECRET=  # Set this for production!" >> "$ENV_FILE"
+    echo "NODE_ENV=development" >> "$ENV_FILE"
+    warn "No admin secret set — running in development mode"
+  fi
 
-cat >> "$ENV_FILE" <<ENVEOF
+  cat >> "$ENV_FILE" <<ENVEOF
 
 # Optional:
 # BOTSHUB_CORS_ORIGINS=https://your-domain.com
@@ -166,57 +197,84 @@ cat >> "$ENV_FILE" <<ENVEOF
 # BOTSHUB_MAX_FILE_SIZE_MB=50
 ENVEOF
 
-ok "Config written to $ENV_FILE"
+  ok "Config written to $ENV_FILE"
+fi
 
 # ─── Step 7: Create data directory ────────────────────────────
 mkdir -p "$INSTALL_DIR/data"
-ok "Data directory ready"
 
 # ─── Step 8: PM2 Setup ────────────────────────────────────────
-info "Setting up PM2..."
-
-# Stop existing instance if running
-pm2 delete "$PM2_NAME" 2>/dev/null || true
-
-# Start with dotenv support
-pm2 start dist/index.js \
-  --name "$PM2_NAME" \
-  --cwd "$INSTALL_DIR" \
-  --node-args="--env-file=.env" \
-  --max-memory-restart 512M
-
-# Save PM2 process list
-pm2 save
-
-# Setup startup script (non-fatal if it fails — might need sudo)
-if pm2 startup 2>/dev/null | grep -q "sudo"; then
-  echo ""
-  warn "To enable auto-start on boot, run the command above with sudo"
+if [[ "$IS_UPGRADE" == true ]]; then
+  info "Restarting PM2 process..."
+  if pm2 describe "$PM2_NAME" &>/dev/null; then
+    pm2 restart "$PM2_NAME"
+    ok "PM2 process '$PM2_NAME' restarted"
+  else
+    warn "PM2 process '$PM2_NAME' not found — starting fresh"
+    pm2 start dist/index.js \
+      --name "$PM2_NAME" \
+      --cwd "$INSTALL_DIR" \
+      --node-args="--env-file=.env" \
+      --max-memory-restart 512M
+    pm2 save
+    ok "PM2 process '$PM2_NAME' started"
+  fi
 else
-  ok "PM2 startup configured"
-fi
+  info "Setting up PM2..."
 
-ok "PM2 process '$PM2_NAME' started"
+  # Stop existing instance if running
+  pm2 delete "$PM2_NAME" 2>/dev/null || true
+
+  # Start with dotenv support
+  pm2 start dist/index.js \
+    --name "$PM2_NAME" \
+    --cwd "$INSTALL_DIR" \
+    --node-args="--env-file=.env" \
+    --max-memory-restart 512M
+
+  # Save PM2 process list
+  pm2 save
+
+  # Setup startup script (non-fatal if it fails — might need sudo)
+  if pm2 startup 2>/dev/null | grep -q "sudo"; then
+    echo ""
+    warn "To enable auto-start on boot, run the command above with sudo"
+  else
+    ok "PM2 startup configured"
+  fi
+
+  ok "PM2 process '$PM2_NAME' started"
+fi
 
 # ─── Done ─────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}  ╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}  ║       ✅ BotsHub installed!           ║${NC}"
-echo -e "${GREEN}  ╚═══════════════════════════════════════╝${NC}"
-echo ""
-echo "  Directory:  $INSTALL_DIR"
-echo "  HTTP:       http://localhost:$BOTSHUB_PORT"
-echo "  WebSocket:  ws://localhost:$BOTSHUB_PORT/ws"
-echo "  Web UI:     http://localhost:$BOTSHUB_PORT"
-echo "  PM2:        pm2 logs $PM2_NAME"
-echo ""
-echo "  Useful commands:"
-echo "    pm2 logs $PM2_NAME      # View logs"
-echo "    pm2 restart $PM2_NAME   # Restart"
-echo "    pm2 stop $PM2_NAME      # Stop"
-echo "    pm2 monit                # Monitor all"
-echo ""
-if [[ -z "$BOTSHUB_ADMIN_SECRET" ]]; then
-  echo -e "  ${YELLOW}⚠  Running in dev mode. Set BOTSHUB_ADMIN_SECRET in .env for production.${NC}"
+if [[ "$IS_UPGRADE" == true ]]; then
+  echo -e "${GREEN}  ╔═══════════════════════════════════════╗${NC}"
+  echo -e "${GREEN}  ║       ✅ BotsHub upgraded!            ║${NC}"
+  echo -e "${GREEN}  ╚═══════════════════════════════════════╝${NC}"
   echo ""
+  echo "  Directory:  $INSTALL_DIR"
+  echo "  Version:    $(git rev-parse --short HEAD)"
+  echo "  PM2:        pm2 logs $PM2_NAME"
+else
+  echo -e "${GREEN}  ╔═══════════════════════════════════════╗${NC}"
+  echo -e "${GREEN}  ║       ✅ BotsHub installed!           ║${NC}"
+  echo -e "${GREEN}  ╚═══════════════════════════════════════╝${NC}"
+  echo ""
+  echo "  Directory:  $INSTALL_DIR"
+  echo "  HTTP:       http://localhost:$BOTSHUB_PORT"
+  echo "  WebSocket:  ws://localhost:$BOTSHUB_PORT/ws"
+  echo "  Web UI:     http://localhost:$BOTSHUB_PORT"
+  echo "  PM2:        pm2 logs $PM2_NAME"
+  echo ""
+  echo "  Useful commands:"
+  echo "    pm2 logs $PM2_NAME      # View logs"
+  echo "    pm2 restart $PM2_NAME   # Restart"
+  echo "    pm2 stop $PM2_NAME      # Stop"
+  echo "    pm2 monit                # Monitor all"
+  if [[ -z "$BOTSHUB_ADMIN_SECRET" ]]; then
+    echo ""
+    echo -e "  ${YELLOW}⚠  Running in dev mode. Set BOTSHUB_ADMIN_SECRET in .env for production.${NC}"
+  fi
 fi
+echo ""
