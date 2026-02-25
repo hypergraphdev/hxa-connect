@@ -181,17 +181,18 @@ function main() {
 
   // O2: Graceful shutdown — drain WS, stop HTTP, close DB
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (closeCode: number = 1001) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log('\n  Shutting down gracefully...');
+    const isRestart = closeCode === 1012;
+    console.log(`\n  ${isRestart ? 'Restarting' : 'Shutting down'} gracefully...`);
 
     // 1. Stop accepting new connections
     server.close();
 
     // 2. Drain WS connections (sends close frames, waits up to 5s)
     try {
-      await hubWs.shutdown();
+      await hubWs.shutdown(closeCode);
       console.log('  ✅ WebSocket connections drained');
     } catch (err) {
       console.error('  WebSocket shutdown error:', err);
@@ -203,8 +204,12 @@ function main() {
 
     process.exit(0);
   };
-  process.on('SIGINT', () => void shutdown());
-  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown(1001));
+  process.on('SIGTERM', () => void shutdown(1001));
+  // SIGQUIT = graceful stop (e.g. pm2 restart). Send 1012 so clients reconnect immediately.
+  if (process.platform !== 'win32') {
+    process.on('SIGQUIT', () => void shutdown(1012));
+  }
 }
 
 main();

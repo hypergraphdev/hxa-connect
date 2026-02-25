@@ -444,27 +444,34 @@ export class HubWS {
     };
   }
 
-  /** O2: Graceful shutdown — close all WS connections with close frame */
-  async shutdown(): Promise<void> {
+  /**
+   * O2: Graceful shutdown — close all WS connections with close frame.
+   * @param code WebSocket close code: 1012 for service restart (clients reconnect immediately), 1001 for going away.
+   */
+  async shutdown(code: number = 1001): Promise<void> {
     // Stop heartbeat
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
 
+    const reason = code === 1012 ? 'Service restart' : 'Server shutting down';
+
     // Send close frame to all clients
     const closePromises: Promise<void>[] = [];
     for (const client of this.clients) {
       closePromises.push(new Promise<void>((resolve) => {
-        client.ws.once('close', resolve);
-        client.ws.close(1001, 'Server shutting down');
-        // Force terminate after 5s if close handshake doesn't complete
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           if (client.ws.readyState !== WebSocket.CLOSED) {
             client.ws.terminate();
           }
           resolve();
         }, 5000);
+        client.ws.once('close', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        client.ws.close(code, reason);
       }));
     }
 
