@@ -323,6 +323,11 @@ export class HubDB {
     this.runMigration('007_hash_plaintext_tokens', () => {
       this.migrateHashTokens();
     });
+
+    // Migration: hash org api_key and admin_secret (missed in 007)
+    this.runMigration('010_hash_org_keys', () => {
+      this.migrateHashOrgKeys();
+    });
   }
 
   /**
@@ -520,6 +525,28 @@ export class HubDB {
     }
   }
 
+  /**
+   * Migration: hash any existing plaintext org api_key and admin_secret.
+   * Plaintext org keys are 48-char hex (24 random bytes); SHA-256 hashes are 64-char hex.
+   */
+  private migrateHashOrgKeys() {
+    const orgRows = this.db.prepare(`SELECT id, api_key, admin_secret FROM orgs`).all() as { id: string; api_key: string; admin_secret: string | null }[];
+    let orgMigrated = 0;
+    for (const row of orgRows) {
+      const needsApiKeyHash = row.api_key && row.api_key.length !== 64;
+      const needsSecretHash = row.admin_secret && row.admin_secret.length !== 64;
+      if (needsApiKeyHash || needsSecretHash) {
+        const apiKeyHash = needsApiKeyHash ? HubDB.hashToken(row.api_key) : row.api_key;
+        const secretHash = needsSecretHash ? HubDB.hashToken(row.admin_secret!) : row.admin_secret;
+        this.db.prepare('UPDATE orgs SET api_key = ?, admin_secret = ? WHERE id = ?').run(apiKeyHash, secretHash, row.id);
+        orgMigrated++;
+      }
+    }
+    if (orgMigrated > 0) {
+      console.log(`  🔐 Hashed ${orgMigrated} plaintext org key(s)`);
+    }
+  }
+
   private rowToOrg(row: any): Org {
     return {
       ...row,
@@ -663,22 +690,28 @@ export class HubDB {
   // ─── Org Operations ──────────────────────────────────────
 
   createOrg(name: string, persistMessages = true): Org {
+    const plaintextApiKey = crypto.randomBytes(24).toString('hex');
+    const plaintextAdminSecret = crypto.randomBytes(24).toString('hex');
     const org: Org = {
       id: crypto.randomUUID(),
       name,
-      api_key: crypto.randomBytes(24).toString('hex'),
-      admin_secret: crypto.randomBytes(24).toString('hex'),
+      api_key: plaintextApiKey,
+      admin_secret: plaintextAdminSecret,
       persist_messages: persistMessages,
       created_at: Date.now(),
     };
+    const apiKeyHash = HubDB.hashToken(plaintextApiKey);
+    const adminSecretHash = HubDB.hashToken(plaintextAdminSecret);
     this.db.prepare(
       'INSERT INTO orgs (id, name, api_key, admin_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(org.id, org.name, org.api_key, org.admin_secret, org.persist_messages ? 1 : 0, org.created_at);
+    ).run(org.id, org.name, apiKeyHash, adminSecretHash, org.persist_messages ? 1 : 0, org.created_at);
+    // Return org with plaintext keys so the caller can display them once
     return org;
   }
 
   getOrgByKey(apiKey: string): Org | undefined {
-    const row = this.db.prepare('SELECT * FROM orgs WHERE api_key = ?').get(apiKey) as any;
+    const apiKeyHash = HubDB.hashToken(apiKey);
+    const row = this.db.prepare('SELECT * FROM orgs WHERE api_key = ?').get(apiKeyHash) as any;
     if (!row) return undefined;
     return this.rowToOrg(row);
   }
@@ -686,8 +719,9 @@ export class HubDB {
   verifyOrgAdminSecret(orgId: string, secret: string): boolean {
     const row = this.db.prepare('SELECT admin_secret FROM orgs WHERE id = ?').get(orgId) as any;
     if (!row?.admin_secret) return false;
+    const secretHash = HubDB.hashToken(secret);
     const expected = Buffer.from(row.admin_secret, 'utf8');
-    const actual = Buffer.from(secret, 'utf8');
+    const actual = Buffer.from(secretHash, 'utf8');
     if (expected.length !== actual.length) return false;
     return crypto.timingSafeEqual(expected, actual);
   }
