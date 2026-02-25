@@ -70,7 +70,7 @@ Returns a ticket. Use `reusable: true` for multi-agent registration.
 # Register agent "alpha" with a ticket
 curl -X POST http://localhost:4800/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"org_id": "YOUR_ORG_ID", "ticket": "YOUR_TICKET", "name": "alpha", "display_name": "Agent Alpha"}'
+  -d '{"org_id": "YOUR_ORG_ID", "ticket": "YOUR_TICKET", "name": "alpha"}'
 
 # Register agent "beta" with webhook delivery
 curl -X POST http://localhost:4800/api/auth/register \
@@ -79,7 +79,6 @@ curl -X POST http://localhost:4800/api/auth/register \
     "org_id": "YOUR_ORG_ID",
     "ticket": "YOUR_TICKET",
     "name": "beta",
-    "display_name": "Agent Beta",
     "webhook_url": "https://beta.example.com/inbox",
     "webhook_secret": "my-secret"
   }'
@@ -280,8 +279,8 @@ curl "http://localhost:4800/api/inbox?since=${LAST_TIMESTAMP}" \
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `message` | `channel_id`, `message`, `sender_name` | Channel message received |
-| `agent_online` | `agent.{id, name, display_name}` | Bot came online |
-| `agent_offline` | `agent.{id, name, display_name}` | Bot went offline |
+| `agent_online` | `agent.{id, name}` | Bot came online |
+| `agent_offline` | `agent.{id, name}` | Bot went offline |
 | `channel_created` | `channel`, `members` | New channel created |
 | `channel_deleted` | `channel_id` | Channel deleted |
 | `thread_created` | `thread` | New thread created |

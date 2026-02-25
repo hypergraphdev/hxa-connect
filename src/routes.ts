@@ -15,7 +15,6 @@ import { issueWsTicket } from './ws-tickets.js';
 // S6: Per-field size limits (bytes)
 const FIELD_LIMITS = {
   name: 128,
-  display_name: 256,
   metadata: 16384,       // 16 KB
   content_type: 128,
   webhook_url: 2048,
@@ -60,7 +59,6 @@ function toAgentResponse(agent: Agent) {
     id: agent.id,
     org_id: agent.org_id,
     name: agent.name,
-    display_name: agent.display_name,
     auth_role: agent.auth_role,
     online: agent.online,
     last_seen_at: agent.last_seen_at,
@@ -379,7 +377,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res: import('express').Response,
   ): Promise<{
     name: string;
-    display_name?: string;
     metadata?: Record<string, unknown> | null;
     webhook_url?: string | null;
     webhook_secret?: string | null;
@@ -387,7 +384,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   } | null> {
     const {
       name,
-      display_name,
       metadata,
       webhook_url,
       webhook_secret,
@@ -416,7 +412,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Per-field size limits
-    const fieldError = checkFieldLimits({ name, display_name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
+    const fieldError = checkFieldLimits({ name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
     if (fieldError) {
       res.status(400).json({ error: fieldError });
       return null;
@@ -465,7 +461,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
     }
 
-    return { name, display_name, metadata, webhook_url, webhook_secret, profile };
+    return { name, metadata, webhook_url, webhook_secret, profile };
   }
 
   // ─── Public Auth Routes (Ticket-Based) ──────────────────
@@ -532,7 +528,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * POST /api/auth/register — Register an agent using a ticket (no Bearer auth needed)
-   * Body: { org_id, ticket, name, display_name?, ...profile fields }
+   * Body: { org_id, ticket, name, ...profile fields }
    * Returns: { agent_id, token, name, auth_role }
    */
   router.post('/api/auth/register', async (req, res) => {
@@ -606,7 +602,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const { agent, created, plaintextToken } = db.registerAgent(
       org_id,
       validated.name,
-      validated.display_name,
       validated.metadata,
       validated.webhook_url,
       validated.webhook_secret,
@@ -625,7 +620,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Broadcast agent online
     ws.broadcastToOrg(org_id, {
       type: 'agent_online',
-      agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+      agent: { id: agent.id, name: agent.name },
     });
 
     const response: Record<string, unknown> = {
@@ -710,7 +705,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Broadcast agent offline
     ws.broadcastToOrg(agent.org_id, {
       type: 'agent_offline',
-      agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+      agent: { id: agent.id, name: agent.name },
     });
 
     res.json({ ok: true, message: `Agent "${agent.name}" deleted` });
@@ -730,7 +725,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Broadcast agent offline
     ws.broadcastToOrg(agent.org_id, {
       type: 'agent_offline',
-      agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+      agent: { id: agent.id, name: agent.name },
     });
 
     res.json({ ok: true, message: `Agent "${agent.name}" deregistered` });
@@ -1063,7 +1058,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return {
         id: m.agent_id,
         name: agent?.name,
-        display_name: agent?.display_name,
         online: agent?.online,
       };
     });
@@ -1181,7 +1175,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return {
         bot_id: p.bot_id,
         name: bot?.name,
-        display_name: bot?.display_name,
         online: bot?.online,
         label: p.label,
         joined_at: p.joined_at,
@@ -1224,7 +1217,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
       const enriched = messages.map(m => {
         const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-        return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+        return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
       });
 
       res.json({ messages: enriched, has_more: hasMore });
@@ -1242,7 +1235,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse());
@@ -1466,7 +1459,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return {
         bot_id: p.bot_id,
         name: bot?.name,
-        display_name: bot?.display_name,
         online: bot?.online,
         label: p.label,
         joined_at: p.joined_at,
@@ -1944,7 +1936,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getThreadMessages(thread.id, limit, before, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse());
@@ -2214,7 +2206,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Broadcast via WebSocket
-    ws.broadcastMessage(channel.id, msg, req.agent!.display_name || req.agent!.name);
+    ws.broadcastMessage(channel.id, msg, req.agent!.name);
 
     res.json(enrichMessage(msg));
   });
@@ -2257,7 +2249,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
       const enriched = messages.map(m => {
         const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-        return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+        return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
       });
 
       res.json({ messages: enriched, has_more: hasMore });
@@ -2277,7 +2269,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Enrich with sender names and parsed parts
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched.reverse()); // Return in chronological order
@@ -2361,7 +2353,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }, channel.id);
 
     // Broadcast
-    ws.broadcastMessage(channel.id, msg, req.agent!.display_name || req.agent!.name);
+    ws.broadcastMessage(channel.id, msg, req.agent!.name);
 
     res.json({ channel_id: channel.id, message: enrichMessage(msg) });
   });
@@ -2430,7 +2422,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const messages = db.getNewMessages(req.agent!.id, since);
     const enriched = messages.map(m => {
       const sender = m.sender_id ? db.getAgentById(m.sender_id) : undefined;
-      return { ...enrichMessage(m), sender_name: sender?.display_name || sender?.name || 'unknown' };
+      return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
     });
 
     res.json(enriched);

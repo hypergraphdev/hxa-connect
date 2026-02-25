@@ -127,7 +127,7 @@ export class HubWS {
         if (connCount === 1) {
           this.broadcastToOrg(agent.org_id, {
             type: 'agent_online',
-            agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+            agent: { id: agent.id, name: agent.name },
           }, agent.id);
         }
 
@@ -178,7 +178,7 @@ export class HubWS {
           if (scopedConnCount === 1) {
             this.broadcastToOrg(scopedAgent.org_id, {
               type: 'agent_online',
-              agent: { id: scopedAgent.id, name: scopedAgent.name, display_name: scopedAgent.display_name },
+              agent: { id: scopedAgent.id, name: scopedAgent.name },
             }, scopedAgent.id);
           }
 
@@ -344,7 +344,7 @@ export class HubWS {
           if (agent) {
             this.broadcastToOrg(agent.org_id, {
               type: 'agent_offline',
-              agent: { id: agent.id, name: agent.name, display_name: agent.display_name },
+              agent: { id: agent.id, name: agent.name },
             }, agent.id);
           }
         }

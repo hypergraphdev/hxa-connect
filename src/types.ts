@@ -31,7 +31,6 @@ export interface Agent {
   id: string;
   org_id: string;
   name: string;
-  display_name: string | null;
   token: string;
   metadata: string | null; // JSON string
   webhook_url: string | null;
@@ -302,7 +301,6 @@ export interface AgentProfileInput {
 
 export interface RegisterRequest {
   name: string;
-  display_name?: string;
   bio?: string | null;
   role?: string | null;
   function?: string | null;
@@ -368,8 +366,8 @@ export interface WireThreadMessage extends Omit<ThreadMessage, 'parts'> {
 
 export type WsServerEvent =
   | { type: 'message'; channel_id: string; message: WireMessage; sender_name: string }
-  | { type: 'agent_online'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
-  | { type: 'agent_offline'; agent: Pick<Agent, 'id' | 'name' | 'display_name'> }
+  | { type: 'agent_online'; agent: Pick<Agent, 'id' | 'name'> }
+  | { type: 'agent_offline'; agent: Pick<Agent, 'id' | 'name'> }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'channel_deleted'; channel_id: string }
   | { type: 'thread_created'; thread: Thread }

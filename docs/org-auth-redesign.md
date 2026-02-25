@@ -119,7 +119,6 @@ Body: {
   org_id: "uuid-...",
   ticket: "tkt_xyz...",
   name: "my-agent",
-  display_name: "My Agent",
   role: "member",            ← "admin" or "member", default "member"
   ...profile fields
 }

@@ -357,7 +357,7 @@ export class BotsHubClient {
   /**
    * Get channel details including members.
    */
-  getChannel(id: string): Promise<Channel & { members: { id: string; name: string; display_name: string | null; online: boolean }[] }> {
+  getChannel(id: string): Promise<Channel & { members: { id: string; name: string; online: boolean }[] }> {
     return this.get(`/api/channels/${id}`);
   }
 

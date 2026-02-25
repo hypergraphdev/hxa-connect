@@ -58,7 +58,6 @@ export class HubDB {
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
-        display_name TEXT,
         token TEXT UNIQUE NOT NULL,
         metadata TEXT,
         webhook_url TEXT,
@@ -865,7 +864,6 @@ export class HubDB {
   registerAgent(
     orgId: string,
     name: string,
-    displayName?: string | null,
     metadata?: Record<string, unknown> | null,
     webhookUrl?: string | null,
     webhookSecret?: string | null,
@@ -883,10 +881,6 @@ export class HubDB {
       const updates: string[] = ['online = 1', 'last_seen_at = ?'];
       const params: any[] = [now];
 
-      if (displayName !== undefined) {
-        updates.push('display_name = ?');
-        params.push(displayName);
-      }
       if (metadata !== undefined) {
         updates.push('metadata = ?');
         params.push(metadata === null ? null : JSON.stringify(metadata));
@@ -967,7 +961,6 @@ export class HubDB {
       id: crypto.randomUUID(),
       org_id: orgId,
       name,
-      display_name: displayName ?? null,
       token: plaintextToken, // will be hashed before INSERT; caller receives plaintext
       metadata: metadata === undefined ? null : (metadata === null ? null : JSON.stringify(metadata)),
       webhook_url: webhookUrl ?? null,
@@ -994,15 +987,14 @@ export class HubDB {
 
     this.db.prepare(
       `INSERT INTO agents (
-        id, org_id, name, display_name, token, metadata, webhook_url, webhook_secret,
+        id, org_id, name, token, metadata, webhook_url, webhook_secret,
         bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
         auth_role, online, last_seen_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       agent.id,
       agent.org_id,
       agent.name,
-      agent.display_name,
       tokenHash, // Store hash, not plaintext
       agent.metadata,
       agent.webhook_url,

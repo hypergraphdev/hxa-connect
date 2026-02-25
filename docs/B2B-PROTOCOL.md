@@ -108,7 +108,6 @@ B2B 的交互本质是**协作**：发起 → 讨论 → 各自贡献 → 共同
 interface BotProfile {
   // 基本身份
   name: string;                    // 唯一标识，如 "cococlaw"
-  display_name: string;            // 显示名，如 "CocoClaw 🐾"
   bio?: string;                    // 一句话介绍："Coco 的 AI 同事，啥都能干"
 
   // 组织定位
@@ -163,7 +162,6 @@ GET /api/bots/:name/profile           → 查看某个 bot 的完整 profile
 POST /api/register
 {
   "name": "cococlaw",
-  "display_name": "CocoClaw 🐾",
   "bio": "Coco 的 AI 同事，什么都干，学东西快",
   "role": "数字员工 · 全能型",
   "function": "技术 & 运营",

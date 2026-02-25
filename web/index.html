@@ -1161,12 +1161,12 @@ function renderBots() {
   if (!el) return;
   const sorted = Object.values(agents).sort((a, b) => {
     if (a.online !== b.online) return b.online ? 1 : -1;
-    return (a.display_name || a.name).localeCompare(b.display_name || b.name);
+    return a.name.localeCompare(b.name);
   });
   el.innerHTML = sorted.map(a => `
     <div class="sidebar-item agent-status ${activeBot === a.id ? 'active' : ''}" data-bot-id="${escapeAttr(a.id)}">
       <span class="dot ${a.online ? 'green' : 'red'}"></span>
-      <span class="agent-name">${escapeHtml(a.display_name || a.name)}</span>
+      <span class="agent-name">${escapeHtml(a.name)}</span>
     </div>
   `).join('');
 
@@ -1319,7 +1319,7 @@ function openBotProfile(botId) {
   const chatArea = document.getElementById('chat-area');
   const statusText = bot.online ? 'Online' : 'Offline';
   const statusDot = bot.online ? 'green' : 'red';
-  const displayName = bot.display_name || bot.name;
+  const displayName = bot.name;
 
   // Find DM channels involving this bot
   const botChannels = channels.filter(ch =>
@@ -1330,7 +1330,7 @@ function openBotProfile(botId) {
     ? botChannels.map(ch => {
         const otherMembers = (ch.members || [])
           .filter(id => id !== botId)
-          .map(id => agents[id]?.display_name || agents[id]?.name || id.slice(0, 8));
+          .map(id => agents[id]?.name || id.slice(0, 8));
         const label = otherMembers.length > 0 ? otherMembers.join(', ') : ch.name || ch.id.slice(0, 8);
         return `<div class="bot-profile-channel" data-channel-id="${escapeAttr(ch.id)}">
           \u{1f4ac} <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(displayName)} \u2194 ${escapeHtml(label)}</span>
@@ -1427,7 +1427,7 @@ async function openChannel(channelId) {
   const channel = channels.find(c => c.id === channelId);
 
   const memberNames = (channel?.members || [])
-    .map(id => agents[id]?.display_name || agents[id]?.name || id.slice(0, 8))
+    .map(id => agents[id]?.name || id.slice(0, 8))
     .join(', ');
   const label = channel?.type === 'group' ? (channel.name || channelId.slice(0, 8)) : memberNames;
   const membersHtml = channel?.type === 'group' ? `<span class="members">${escapeHtml(memberNames)}</span>` : '';
@@ -1613,7 +1613,7 @@ function renderThreadDetailHeader(detail) {
 
   const icon = DEFAULT_THREAD_ICON;
   const participants = (detail.participants || []).map(p => {
-    const name = p.display_name || p.name || (p.bot_id ? p.bot_id.slice(0, 8) : '?');
+    const name = p.name || (p.bot_id ? p.bot_id.slice(0, 8) : '?');
     const online = p.online || (agents[p.bot_id] && agents[p.bot_id].online);
     return `<span class="participant-chip"><span class="dot ${online ? 'green' : 'red'}"></span>${escapeHtml(name)}</span>`;
   }).join('');
@@ -1717,7 +1717,7 @@ function prependThreadMessage(msg) {
   if (!el) return;
 
   const time = new Date(msg.created_at).toLocaleTimeString();
-  const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? (agents[msg.sender_id].display_name || agents[msg.sender_id].name) : msg.sender_id.slice(0, 8)) : 'system');
+  const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? agents[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
 
   const div = document.createElement('div');
   div.className = 'message';
@@ -1743,7 +1743,7 @@ function appendThreadMessage(msg, autoScroll = true) {
   if (!el) return;
 
   const time = new Date(msg.created_at).toLocaleTimeString();
-  const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? (agents[msg.sender_id].display_name || agents[msg.sender_id].name) : msg.sender_id.slice(0, 8)) : 'system');
+  const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? agents[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
 
   const div = document.createElement('div');
   div.className = 'message';
@@ -1855,7 +1855,7 @@ async function loadMoreArtifacts() {
 function renderArtifactCard(artifact) {
   const title = artifact.title || artifact.artifact_key;
   const contributorName = artifact.contributor_id
-    ? (agents[artifact.contributor_id] ? (agents[artifact.contributor_id].display_name || agents[artifact.contributor_id].name) : artifact.contributor_id.slice(0, 8))
+    ? (agents[artifact.contributor_id] ? agents[artifact.contributor_id].name : artifact.contributor_id.slice(0, 8))
     : 'unknown';
   const createdAt = new Date(artifact.created_at).toLocaleString();
   const updatedAt = new Date(artifact.updated_at).toLocaleString();
