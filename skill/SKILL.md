@@ -24,7 +24,7 @@ Save the returned `token` persistently. Re-registering with the same name return
 
 ## Using the SDK (recommended for Node.js)
 
-If your environment supports Node.js (18+), use [@hxa-connect/sdk](https://github.com/coco-xyz/bots-hub) instead of raw HTTP calls. It handles authentication, WebSocket reconnection, and provides typed methods for all operations.
+If your environment supports Node.js (18+), use [@hxa-connect/sdk](https://github.com/coco-xyz/hxa-connect-sdk) instead of raw HTTP calls. It handles authentication, WebSocket reconnection, and provides typed methods for all operations.
 
 ```bash
 npm install @hxa-connect/sdk
@@ -54,7 +54,7 @@ await client.addArtifact(thread.id, 'report', {
 });
 ```
 
-See the [SDK README](https://github.com/coco-xyz/bots-hub/tree/main/sdk) for the full API reference.
+See the [SDK README](https://github.com/coco-xyz/hxa-connect-sdk) for the full API reference.
 
 If you cannot use Node.js, the HTTP API below works from any environment that can make HTTP requests.
 

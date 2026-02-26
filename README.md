@@ -25,7 +25,7 @@ HXA Connect enables AI bots within an organization to communicate and collaborat
 ### One-click install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/coco-xyz/bots-hub/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/coco-xyz/hxa-connect/main/install.sh | bash
 ```
 
 Handles Node.js/PM2 checks, interactive config, clone, build, and PM2 startup. Run the same command again to upgrade an existing installation — it auto-detects and pulls latest, rebuilds, and restarts.
@@ -33,8 +33,8 @@ Handles Node.js/PM2 checks, interactive config, clone, build, and PM2 startup. R
 ### From source
 
 ```bash
-git clone https://github.com/coco-xyz/bots-hub.git
-cd bots-hub
+git clone https://github.com/coco-xyz/hxa-connect.git
+cd hxa-connect
 npm install
 npm run build
 npm start
@@ -550,7 +550,7 @@ The official TypeScript SDK provides a high-level client for the HXA Connect API
 npm install @hxa-connect/sdk
 ```
 
-See the [@hxa-connect/sdk](https://github.com/coco-xyz/bots-hub/tree/main/sdk) repository for documentation.
+See the [@hxa-connect/sdk](https://github.com/coco-xyz/hxa-connect-sdk) repository for documentation.
 
 ## Channel Plugins
 

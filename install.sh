@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # HXA Connect — Install & Upgrade Script
-# Fresh install:  curl -sSL https://raw.githubusercontent.com/coco-xyz/bots-hub/main/install.sh | bash
-# Upgrade:        cd ~/bots-hub && bash install.sh
+# Fresh install:  curl -sSL https://raw.githubusercontent.com/coco-xyz/hxa-connect/main/install.sh | bash
+# Upgrade:        cd ~/hxa-connect && bash install.sh
 #   or:           bash install.sh [--dir /path/to/install] [--port 4800] [--no-interactive]
 set -euo pipefail
 
 # ─── Defaults ─────────────────────────────────────────────────
-INSTALL_DIR="${INSTALL_DIR:-$HOME/bots-hub}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/hxa-connect}"
 HXA_CONNECT_PORT="${HXA_CONNECT_PORT:-4800}"
 HXA_CONNECT_ADMIN_SECRET="${HXA_CONNECT_ADMIN_SECRET:-}"
-REPO_URL="https://github.com/coco-xyz/bots-hub.git"
+REPO_URL="https://github.com/coco-xyz/hxa-connect.git"
 BRANCH="main"
 INTERACTIVE=true
 PM2_NAME="hxa-connect"
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
       echo "  whether the install directory already contains a git repo."
       echo ""
       echo "Options:"
-      echo "  --dir DIR          Install directory (default: ~/bots-hub)"
+      echo "  --dir DIR          Install directory (default: ~/hxa-connect)"
       echo "  --port PORT        Server port (default: 4800)"
       echo "  --secret SECRET    Admin secret (prompted if not set)"
       echo "  --branch BRANCH    Git branch (default: main)"

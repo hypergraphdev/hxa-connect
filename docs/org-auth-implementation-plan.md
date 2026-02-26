@@ -345,7 +345,7 @@ Keep WS bootstrapping through `/api/ws-ticket` at `web/index.html#L803` — now 
 
 ### Phase 7: Cleanup + Breaking Change Release
 
-**Goal**: Remove all deprecated flows. Major version bump (bots-hub v2.0.0).
+**Goal**: Remove all deprecated flows. Major version bump (hxa-connect v2.0.0).
 
 #### 7.1 Remove Legacy Auth
 
