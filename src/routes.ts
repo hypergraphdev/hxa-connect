@@ -233,6 +233,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return undefined;
     }
 
+    // Cross-org isolation: verify the thread belongs to the agent's org
+    if (req.agent && thread.org_id !== req.agent.org_id) {
+      res.status(403).json({ error: 'Thread not in your org', code: 'FORBIDDEN' });
+      return undefined;
+    }
+
     // O9: Check terminal state BEFORE participant membership so that
     // non-participants get "thread is closed" rather than "not a participant"
     // when the thread is in a terminal state.
@@ -661,16 +667,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.get('/api/agents', requireOrg, (req, res) => {
     const cursor = getQueryString(req.query.cursor);
     const limitParam = getQueryString(req.query.limit);
+    const search = getQueryString(req.query.search)?.trim();
 
-    // When no pagination params, fall back to existing unpaginated behavior
-    if (!cursor && !limitParam) {
+    // When no pagination params and no search, fall back to existing unpaginated behavior
+    if (!cursor && !limitParam && !search) {
       const agents = db.listAgents(req.org!.id);
       res.json(agents.map(a => toAgentResponse(a)));
       return;
     }
 
     const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-    const rows = db.listAgentsPaginated(req.org!.id, cursor, limit);
+    const rows = db.listAgentsPaginated(req.org!.id, cursor, limit, search);
     const hasMore = rows.length > limit;
     const items = hasMore ? rows.slice(0, limit) : rows;
     const response: Record<string, unknown> = {
@@ -681,6 +688,21 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       response.next_cursor = items[items.length - 1].id;
     }
     res.json(response);
+  });
+
+  /**
+   * GET /api/agents/:id — Get a single agent by ID
+   * Auth: Org ticket or agent token (same org)
+   */
+  auth.get('/api/agents/:id', requireScope('read'), (req, res) => {
+    const orgId = requireOrgOrAgent(req, res);
+    if (!orgId) return;
+    const agent = db.getAgentById(req.params.id as string);
+    if (!agent || agent.org_id !== orgId) {
+      res.status(404).json({ error: 'Agent not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json(toAgentResponse(agent));
   });
 
   /**
@@ -1043,6 +1065,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
+    // Cross-org isolation
+    if (req.agent && channel.org_id !== req.agent.org_id) {
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
+      return;
+    }
     // Check access
     if (req.agent && !db.isChannelMember(channel.id, req.agent.id)) {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
@@ -1131,11 +1158,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const cursor = getQueryString(req.query.cursor);
     const limitParam = getQueryString(req.query.limit);
     const offsetParam = getQueryString(req.query.offset);
+    const search = getQueryString(req.query.search)?.trim();
 
-    // When cursor is present, use paginated behavior
-    if (cursor || (limitParam && !offsetParam)) {
+    // When cursor is present, or search/limit specified, use paginated behavior
+    if (cursor || search || (limitParam && !offsetParam)) {
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-      const rows = db.listThreadsForOrgPaginated(orgId, status, cursor, limit);
+      const rows = db.listThreadsForOrgPaginated(orgId, status, cursor, limit, search);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
       const response: Record<string, unknown> = {
@@ -2152,6 +2180,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
+    // Cross-org isolation
+    if (channel.org_id !== req.agent!.org_id) {
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
+      return;
+    }
+
     if (!db.isChannelMember(channel.id, req.agent!.id)) {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
@@ -2224,6 +2258,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
+    // Cross-org isolation
+    if (req.agent && channel.org_id !== req.agent.org_id) {
+      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
+      return;
+    }
     // Check access
     if (req.agent && !db.isChannelMember(channel.id, req.agent.id)) {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });

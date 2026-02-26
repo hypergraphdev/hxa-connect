@@ -1115,15 +1115,23 @@ export class HubDB {
    * Paginated agent list. Cursor is an agent id; results ordered by id ASC.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listAgentsPaginated(orgId: string, cursor: string | undefined, limit: number): Agent[] {
+  listAgentsPaginated(orgId: string, cursor: string | undefined, limit: number, search?: string): Agent[] {
+    const searchFilter = search ? ' AND name LIKE ?' : '';
+    const searchParam = search ? `%${search}%` : undefined;
     if (cursor) {
+      const params: any[] = [orgId, cursor];
+      if (searchParam) params.push(searchParam);
+      params.push(limit + 1);
       return (this.db.prepare(
-        'SELECT * FROM agents WHERE org_id = ? AND id > ? ORDER BY id ASC LIMIT ?'
-      ).all(orgId, cursor, limit + 1) as any[]).map(r => this.rowToAgent(r));
+        `SELECT * FROM agents WHERE org_id = ? AND id > ?${searchFilter} ORDER BY id ASC LIMIT ?`
+      ).all(...params) as any[]).map(r => this.rowToAgent(r));
     }
+    const params: any[] = [orgId];
+    if (searchParam) params.push(searchParam);
+    params.push(limit + 1);
     return (this.db.prepare(
-      'SELECT * FROM agents WHERE org_id = ? ORDER BY id ASC LIMIT ?'
-    ).all(orgId, limit + 1) as any[]).map(r => this.rowToAgent(r));
+      `SELECT * FROM agents WHERE org_id = ?${searchFilter} ORDER BY id ASC LIMIT ?`
+    ).all(...params) as any[]).map(r => this.rowToAgent(r));
   }
 
   listBots(orgId: string, filters?: ListBotsFilters): Agent[] {
@@ -1435,13 +1443,17 @@ export class HubDB {
     return this.db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId) as Channel | undefined;
   }
 
-  listChannelsForAgent(agentId: string): (Channel & { members: string[] })[] {
+  listChannelsForAgent(agentId: string): (Channel & { members: string[]; last_activity_at: number })[] {
     const channels = this.db.prepare(`
-      SELECT c.* FROM channels c
+      SELECT c.*, COALESCE(
+        (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
+        c.created_at
+      ) AS last_activity_at
+      FROM channels c
       JOIN channel_members cm ON c.id = cm.channel_id
       WHERE cm.agent_id = ?
-      ORDER BY c.created_at DESC
-    `).all(agentId) as Channel[];
+      ORDER BY last_activity_at DESC
+    `).all(agentId) as (Channel & { last_activity_at: number })[];
 
     return channels.map(ch => ({
       ...ch,
@@ -1449,10 +1461,16 @@ export class HubDB {
     }));
   }
 
-  listChannelsForOrg(orgId: string): (Channel & { members: string[] })[] {
-    const channels = this.db.prepare(
-      'SELECT * FROM channels WHERE org_id = ? ORDER BY created_at DESC'
-    ).all(orgId) as Channel[];
+  listChannelsForOrg(orgId: string): (Channel & { members: string[]; last_activity_at: number })[] {
+    const channels = this.db.prepare(`
+      SELECT c.*, COALESCE(
+        (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
+        c.created_at
+      ) AS last_activity_at
+      FROM channels c
+      WHERE c.org_id = ?
+      ORDER BY last_activity_at DESC
+    `).all(orgId) as (Channel & { last_activity_at: number })[];
 
     return channels.map(ch => ({
       ...ch,
@@ -1667,12 +1685,13 @@ export class HubDB {
    * Paginated thread list for org. Cursor is a thread id; ordered by id ASC.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number): Thread[] {
+  listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number, search?: string): Thread[] {
     const conditions = ['org_id = ?'];
     const params: any[] = [orgId];
 
     if (status) { conditions.push('status = ?'); params.push(status); }
     if (cursor) { conditions.push('id > ?'); params.push(cursor); }
+    if (search) { conditions.push('topic LIKE ?'); params.push(`%${search}%`); }
 
     params.push(limit + 1);
     const rows = this.db.prepare(
