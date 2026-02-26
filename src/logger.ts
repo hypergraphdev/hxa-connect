@@ -2,7 +2,7 @@ import pino from 'pino';
 import crypto from 'node:crypto';
 
 const isDev = (process.env.NODE_ENV || 'development') !== 'production';
-const level = process.env.BOTSHUB_LOG_LEVEL || (isDev ? 'debug' : 'info');
+const level = process.env.HXA_CONNECT_LOG_LEVEL || (isDev ? 'debug' : 'info');
 
 const transport = isDev
   ? pino.transport({ target: 'pino-pretty', options: { colorize: true, translateTime: 'HH:MM:ss' } })

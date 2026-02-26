@@ -9,31 +9,31 @@ import { wsLogger } from './logger.js';
 
 interface WsClient {
   ws: WebSocket;
-  agentId?: string;
+  botId?: string;
   orgId: string;
   isOrgAdmin: boolean; // org-level viewer (web UI)
-  /** Scopes granted to this WS connection. null means full access (primary agent token or org key). */
+  /** Scopes granted to this WS connection. null means full access (primary bot token or org key). */
   scopes: import('./types.js').TokenScope[] | null;
   /** Whether the client has responded to the last ping. */
   alive: boolean;
 }
 
-// W2: Track active WS connection count per agent
-const agentConnectionCount = new Map<string, number>();
+// W2: Track active WS connection count per bot
+const botConnectionCount = new Map<string, number>();
 
-function incrementAgentConnections(agentId: string): number {
-  const count = (agentConnectionCount.get(agentId) ?? 0) + 1;
-  agentConnectionCount.set(agentId, count);
+function incrementBotConnections(botId: string): number {
+  const count = (botConnectionCount.get(botId) ?? 0) + 1;
+  botConnectionCount.set(botId, count);
   return count;
 }
 
-function decrementAgentConnections(agentId: string): number {
-  const count = (agentConnectionCount.get(agentId) ?? 1) - 1;
+function decrementBotConnections(botId: string): number {
+  const count = (botConnectionCount.get(botId) ?? 1) - 1;
   if (count <= 0) {
-    agentConnectionCount.delete(agentId);
+    botConnectionCount.delete(botId);
     return 0;
   }
-  agentConnectionCount.set(agentId, count);
+  botConnectionCount.set(botId, count);
   return count;
 }
 
@@ -92,67 +92,67 @@ export class HubWS {
         return;
       }
 
-      // Authenticate as agent via primary token
-      const agent = db.getAgentByToken(token);
-      if (agent) {
+      // Authenticate as bot via primary token
+      const bot = db.getBotByToken(token);
+      if (bot) {
         // Phase 3: Validate org binding if ticket specifies an orgId
-        if (redeemedTicket?.orgId && redeemedTicket.orgId !== agent.org_id) {
-          ws.close(4003, 'Agent does not belong to ticket org');
+        if (redeemedTicket?.orgId && redeemedTicket.orgId !== bot.org_id) {
+          ws.close(4003, 'Bot does not belong to ticket org');
           return;
         }
 
         // Phase 4: Check org status before allowing connection
-        const agentOrg = db.getOrgById(agent.org_id);
-        if (!agentOrg || agentOrg.status !== 'active') {
+        const botOrg = db.getOrgById(bot.org_id);
+        if (!botOrg || botOrg.status !== 'active') {
           ws.close(4100, 'Organization is not active');
           return;
         }
 
         const client: WsClient = {
           ws,
-          agentId: agent.id,
-          orgId: agent.org_id,
+          botId: bot.id,
+          orgId: bot.org_id,
           isOrgAdmin: false,
           scopes: null, // primary token = full access
           alive: true,
         };
         this.clients.add(client);
-        const connCount = incrementAgentConnections(agent.id);
-        db.setAgentOnline(agent.id, true);
+        const connCount = incrementBotConnections(bot.id);
+        db.setBotOnline(bot.id, true);
 
         // Reset degraded webhook status on reconnect
-        db.resetWebhookDegraded(agent.id);
+        db.resetWebhookDegraded(bot.id);
 
-        // W2: Only broadcast agent_online on first connection (0→1)
+        // W2: Only broadcast bot_online on first connection (0→1)
         if (connCount === 1) {
-          this.broadcastToOrg(agent.org_id, {
-            type: 'agent_online',
-            agent: { id: agent.id, name: agent.name },
-          }, agent.id);
+          this.broadcastToOrg(bot.org_id, {
+            type: 'bot_online',
+            bot: { id: bot.id, name: bot.name },
+          }, bot.id);
         }
 
         this.setupHandlers(client);
         return;
       }
 
-      // Authenticate via scoped token (agent_tokens table)
-      const scopedToken = db.getAgentTokenByToken(token);
+      // Authenticate via scoped token (bot_tokens table)
+      const scopedToken = db.getBotTokenByToken(token);
       if (scopedToken) {
         // Check expiration
         if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
           ws.close(4001, 'Token expired');
           return;
         }
-        const scopedAgent = db.getAgentById(scopedToken.agent_id);
-        if (scopedAgent) {
+        const scopedBot = db.getBotById(scopedToken.bot_id);
+        if (scopedBot) {
           // Phase 3: Validate org binding if ticket specifies an orgId
-          if (redeemedTicket?.orgId && redeemedTicket.orgId !== scopedAgent.org_id) {
-            ws.close(4003, 'Agent does not belong to ticket org');
+          if (redeemedTicket?.orgId && redeemedTicket.orgId !== scopedBot.org_id) {
+            ws.close(4003, 'Bot does not belong to ticket org');
             return;
           }
 
           // Phase 4: Check org status before allowing connection
-          const scopedOrg = db.getOrgById(scopedAgent.org_id);
+          const scopedOrg = db.getOrgById(scopedBot.org_id);
           if (!scopedOrg || scopedOrg.status !== 'active') {
             ws.close(4100, 'Organization is not active');
             return;
@@ -160,33 +160,33 @@ export class HubWS {
 
           const client: WsClient = {
             ws,
-            agentId: scopedAgent.id,
-            orgId: scopedAgent.org_id,
+            botId: scopedBot.id,
+            orgId: scopedBot.org_id,
             isOrgAdmin: false,
             scopes: scopedToken.scopes, // scoped token = restricted access
             alive: true,
           };
           this.clients.add(client);
-          const scopedConnCount = incrementAgentConnections(scopedAgent.id);
-          db.setAgentOnline(scopedAgent.id, true);
-          db.touchAgentToken(scopedToken.id);
+          const scopedConnCount = incrementBotConnections(scopedBot.id);
+          db.setBotOnline(scopedBot.id, true);
+          db.touchBotToken(scopedToken.id);
 
           // Reset degraded webhook status on reconnect
-          db.resetWebhookDegraded(scopedAgent.id);
+          db.resetWebhookDegraded(scopedBot.id);
 
-          // W2: Only broadcast agent_online on first connection (0→1)
+          // W2: Only broadcast bot_online on first connection (0→1)
           if (scopedConnCount === 1) {
-            this.broadcastToOrg(scopedAgent.org_id, {
-              type: 'agent_online',
-              agent: { id: scopedAgent.id, name: scopedAgent.name },
-            }, scopedAgent.id);
+            this.broadcastToOrg(scopedBot.org_id, {
+              type: 'bot_online',
+              bot: { id: scopedBot.id, name: scopedBot.name },
+            }, scopedBot.id);
           }
 
           this.setupHandlers(client);
           return;
         }
-        // Scoped token references an unknown agent — reject explicitly
-        ws.close(4001, 'Token references unknown agent');
+        // Scoped token references an unknown bot — reject explicitly
+        ws.close(4001, 'Token references unknown bot');
         return;
       }
 
@@ -244,7 +244,7 @@ export class HubWS {
           return;
         }
 
-        if (data.type === 'send' && client.agentId) {
+        if (data.type === 'send' && client.botId) {
           // Scope check: sending messages requires 'message' scope
           if (!this.clientHasScope(client, 'message')) {
             this.send(client, { type: 'error', message: 'Insufficient token scope: message scope required to send messages' });
@@ -252,13 +252,13 @@ export class HubWS {
           }
 
           // Validate channel membership
-          if (!this.db.isChannelMember(data.channel_id, client.agentId)) {
+          if (!this.db.isChannelMember(data.channel_id, client.botId)) {
             this.send(client, { type: 'error', message: 'Not a member of this channel' });
             return;
           }
 
           // Atomic rate limit check + record
-          const rateCheck = this.db.checkAndRecordRateLimit(client.orgId, client.agentId, 'message');
+          const rateCheck = this.db.checkAndRecordRateLimit(client.orgId, client.botId, 'message');
           if (!rateCheck.allowed) {
             this.send(client, { type: 'error', code: 'rate_limited', message: `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, retry_after: rateCheck.retryAfter });
             return;
@@ -300,19 +300,19 @@ export class HubWS {
           }
 
           const contentType = data.content_type || 'text';
-          const msg = this.db.createMessage(data.channel_id, client.agentId, content, contentType, partsJson);
-          const agent = this.db.getAgentById(client.agentId);
+          const msg = this.db.createMessage(data.channel_id, client.botId, content, contentType, partsJson);
+          const bot = this.db.getBotById(client.botId);
 
           // Audit (rate limit event already recorded atomically above)
-          this.db.recordAudit(client.orgId, client.agentId, 'message.send', 'channel_message', msg.id, { channel_id: data.channel_id, via: 'ws' });
+          this.db.recordAudit(client.orgId, client.botId, 'message.send', 'channel_message', msg.id, { channel_id: data.channel_id, via: 'ws' });
 
           // Record catchup events for channel members except sender
           const channel = this.db.getChannel(data.channel_id);
           if (channel) {
             const members = this.db.getChannelMembers(data.channel_id);
             for (const m of members) {
-              if (m.agent_id === client.agentId) continue;
-              this.db.recordCatchupEvent(channel.org_id, m.agent_id, 'channel_message_summary', {
+              if (m.bot_id === client.botId) continue;
+              this.db.recordCatchupEvent(channel.org_id, m.bot_id, 'channel_message_summary', {
                 channel_id: channel.id,
                 channel_name: channel.name ?? undefined,
                 count: 1,
@@ -321,7 +321,7 @@ export class HubWS {
             }
           }
 
-          this.broadcastMessage(data.channel_id, msg, agent?.name || 'unknown');
+          this.broadcastMessage(data.channel_id, msg, bot?.name || 'unknown');
         }
       } catch {
         this.send(client, { type: 'error', message: 'Invalid message format' });
@@ -335,17 +335,17 @@ export class HubWS {
 
     client.ws.on('close', () => {
       this.clients.delete(client);
-      if (client.agentId) {
+      if (client.botId) {
         // W2: Only mark offline when last connection closes
-        const remaining = decrementAgentConnections(client.agentId);
+        const remaining = decrementBotConnections(client.botId);
         if (remaining === 0) {
-          this.db.setAgentOnline(client.agentId, false);
-          const agent = this.db.getAgentById(client.agentId);
-          if (agent) {
-            this.broadcastToOrg(agent.org_id, {
-              type: 'agent_offline',
-              agent: { id: agent.id, name: agent.name },
-            }, agent.id);
+          this.db.setBotOnline(client.botId, false);
+          const bot = this.db.getBotById(client.botId);
+          if (bot) {
+            this.broadcastToOrg(bot.org_id, {
+              type: 'bot_offline',
+              bot: { id: bot.id, name: bot.name },
+            }, bot.id);
           }
         }
       }
@@ -363,7 +363,7 @@ export class HubWS {
     const channel = this.db.getChannel(channelId);
     if (!channel) return;
 
-    const members = this.db.getChannelMembers(channelId).map(m => m.agent_id);
+    const members = this.db.getChannelMembers(channelId).map(m => m.bot_id);
 
     // Parse parts for wire format: send parsed array, not raw JSON string
     let parsedParts: MessagePart[];
@@ -387,13 +387,13 @@ export class HubWS {
     // Fire webhooks for members who have one (and aren't the sender)
     // Webhook payload uses the same WsServerEvent envelope as WS events
     const webhookPayload = { webhook_version: '1' as const, ...event };
-    for (const agentId of members) {
-      if (agentId === message.sender_id) continue;
-      const agent = this.db.getAgentById(agentId);
-      if (agent?.webhook_url) {
-        wsLogger.info({ agentName: agent.name }, 'Webhook dispatch for channel message');
+    for (const botId of members) {
+      if (botId === message.sender_id) continue;
+      const bot = this.db.getBotById(botId);
+      if (bot?.webhook_url) {
+        wsLogger.info({ botName: bot.name }, 'Webhook dispatch for channel message');
         // Fire-and-forget — retries happen in background
-        void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
+        void this.webhookManager.deliver(bot.id, bot.webhook_url, bot.webhook_secret, webhookPayload);
       }
     }
 
@@ -406,8 +406,8 @@ export class HubWS {
         continue;
       }
 
-      // Agents only see channels they're in
-      if (client.agentId && members.includes(client.agentId)) {
+      // Bots only see channels they're in
+      if (client.botId && members.includes(client.botId)) {
         this.send(client, event);
       }
     }
@@ -437,7 +437,7 @@ export class HubWS {
         continue;
       }
 
-      if (client.agentId && participantSet.has(client.agentId)) {
+      if (client.botId && participantSet.has(client.botId)) {
         this.send(client, event);
       }
     }
@@ -446,10 +446,10 @@ export class HubWS {
   /**
    * Broadcast event to all clients in an org
    */
-  broadcastToOrg(orgId: string, event: WsServerEvent, excludeAgentId?: string) {
+  broadcastToOrg(orgId: string, event: WsServerEvent, excludeBotId?: string) {
     for (const client of this.clients) {
       if (client.orgId !== orgId) continue;
-      if (excludeAgentId && client.agentId === excludeAgentId) continue;
+      if (excludeBotId && client.botId === excludeBotId) continue;
       this.send(client, event);
     }
   }
@@ -473,15 +473,15 @@ export class HubWS {
   }
 
   /** O1: Return health stats for the /health endpoint */
-  getHealthStats(): { uptime_ms: number; connected_clients: number; connected_agents: number } {
-    const agentIds = new Set<string>();
+  getHealthStats(): { uptime_ms: number; connected_clients: number; connected_bots: number } {
+    const botIds = new Set<string>();
     for (const client of this.clients) {
-      if (client.agentId) agentIds.add(client.agentId);
+      if (client.botId) botIds.add(client.botId);
     }
     return {
       uptime_ms: Date.now() - this.startedAt,
       connected_clients: this.clients.size,
-      connected_agents: agentIds.size,
+      connected_bots: botIds.size,
     };
   }
 
@@ -526,15 +526,15 @@ export class HubWS {
 
   private fireThreadWebhooks(participantIds: string[], event: WsServerEvent, excludeBotId?: string) {
     const webhookPayload = { webhook_version: '1' as const, ...event };
-    for (const agentId of participantIds) {
-      if (excludeBotId && agentId === excludeBotId) continue;
+    for (const botId of participantIds) {
+      if (excludeBotId && botId === excludeBotId) continue;
 
-      const agent = this.db.getAgentById(agentId);
-      if (!agent?.webhook_url) continue;
+      const bot = this.db.getBotById(botId);
+      if (!bot?.webhook_url) continue;
 
-      wsLogger.info({ agentName: agent.name }, 'Webhook dispatch for thread event');
+      wsLogger.info({ botName: bot.name }, 'Webhook dispatch for thread event');
       // Fire-and-forget — retries happen in background
-      void this.webhookManager.deliver(agent.id, agent.webhook_url, agent.webhook_secret, webhookPayload);
+      void this.webhookManager.deliver(bot.id, bot.webhook_url, bot.webhook_secret, webhookPayload);
     }
   }
 }

@@ -23,8 +23,8 @@ export interface TestEnv {
   dataDir: string;
   /** Create an org and return { id, org_secret } */
   createOrg(name?: string): { id: string; org_secret: string };
-  /** Register an agent in an org via ticket-based auth. Pass org_secret (login -> ticket -> register). */
-  registerAgent(orgSecret: string, name: string, opts?: Record<string, unknown>): Promise<{ agent: any; token: string }>;
+  /** Register a bot in an org via ticket-based auth. Pass org_secret (login -> ticket -> register). */
+  registerBot(orgSecret: string, name: string, opts?: Record<string, unknown>): Promise<{ bot: any; token: string }>;
   /** Login as org and get a reusable ticket that works as Bearer token for org-level endpoints. */
   loginAsOrg(orgSecret: string): Promise<string>;
   /** Cleanup — close server, remove temp dir */
@@ -34,7 +34,7 @@ export interface TestEnv {
 let counter = 0;
 
 export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promise<TestEnv> {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'botshub-test-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hxa-connect-test-'));
   const filesDir = path.join(dataDir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
 
@@ -68,7 +68,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
       status: dbOk ? 'ok' : 'degraded',
       uptime_ms: wsStats.uptime_ms,
       connected_clients: wsStats.connected_clients,
-      connected_agents: wsStats.connected_agents,
+      connected_bots: wsStats.connected_bots,
       db: dbOk ? 'ok' : 'error',
     });
   });
@@ -87,7 +87,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
   const addr = server.address() as { port: number };
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  // Map plaintext org_secret -> org_id for registerAgent helper
+  // Map plaintext org_secret -> org_id for registerBot helper
   const secretToOrgId = new Map<string, string>();
 
   function createOrg(name?: string) {
@@ -97,7 +97,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     return { id: org.id, org_secret: org.org_secret };
   }
 
-  async function registerAgent(orgSecret: string, agentName: string, opts?: Record<string, unknown>) {
+  async function registerBot(orgSecret: string, botName: string, opts?: Record<string, unknown>) {
     // Look up org_id from our secret map
     const orgId = secretToOrgId.get(orgSecret);
     if (!orgId) throw new Error('Unknown org_secret — was this org created via createOrg()?');
@@ -115,11 +115,11 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     const res = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org_id: orgId, ticket: loginData.ticket, name: agentName, ...opts }),
+      body: JSON.stringify({ org_id: orgId, ticket: loginData.ticket, name: botName, ...opts }),
     });
     if (!res.ok) throw new Error(`Register failed: ${res.status} ${await res.text()}`);
     const data = await res.json() as any;
-    return { agent: data, token: data.token };
+    return { bot: data, token: data.token };
   }
 
   async function loginAsOrg(orgSecret: string): Promise<string> {
@@ -145,7 +145,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 
-  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerAgent, loginAsOrg, cleanup };
+  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerBot, loginAsOrg, cleanup };
 }
 
 /** Simple fetch helper that returns { status, headers, body } */

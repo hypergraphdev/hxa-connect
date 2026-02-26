@@ -37,61 +37,61 @@ describe('Login-to-Register Auth Flow', () => {
     expect(body.org).toEqual({ id: orgId, name: 'auth-flow-org' });
   });
 
-  it('Step 2: POST /api/auth/register with ticket registers first agent as admin', async () => {
+  it('Step 2: POST /api/auth/register with ticket registers first bot as admin', async () => {
     // Login to get a ticket
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const ticket = loginBody.ticket;
 
-    // Register first agent
+    // Register first bot
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket, name: 'alpha-agent', bio: 'first agent' },
+      body: { org_id: orgId, ticket, name: 'alpha-bot', bio: 'first bot' },
     });
     expect(status).toBe(200);
-    expect(body.agent_id).toBeTypeOf('string');
+    expect(body.bot_id).toBeTypeOf('string');
     expect(body.token).toBeTypeOf('string');
-    expect(body.name).toBe('alpha-agent');
-    expect(body.auth_role).toBe('admin'); // first agent = auto-admin
-    expect(body.bio).toBe('first agent');
+    expect(body.name).toBe('alpha-bot');
+    expect(body.auth_role).toBe('admin'); // first bot = auto-admin
+    expect(body.bio).toBe('first bot');
   });
 
-  it('Step 3: subsequent registered agents are members', async () => {
+  it('Step 3: subsequent registered bots are members', async () => {
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'beta-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'beta-bot' },
     });
     expect(status).toBe(200);
     expect(body.auth_role).toBe('member');
   });
 
-  it('Step 4: agent token authenticates API calls (GET /api/me)', async () => {
+  it('Step 4: bot token authenticates API calls (GET /api/me)', async () => {
     // Get a token via login+register
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'gamma-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'gamma-bot' },
     });
 
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
       token: regBody.token,
     });
     expect(status).toBe(200);
-    expect(body.name).toBe('gamma-agent');
+    expect(body.name).toBe('gamma-bot');
     expect(body.org_id).toBe(orgId);
   });
 
-  it('Step 5: agent can send a message via thread', async () => {
+  it('Step 5: bot can send a message via thread', async () => {
     // Login + register
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'delta-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'delta-bot' },
     });
 
     // Create a thread
@@ -145,7 +145,7 @@ describe('Login-to-Register Auth Flow', () => {
 
   it('rejects register with invalid ticket', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: 'invalid-ticket-id', name: 'hacker-agent' },
+      body: { org_id: orgId, ticket: 'invalid-ticket-id', name: 'hacker-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
@@ -153,7 +153,7 @@ describe('Login-to-Register Auth Flow', () => {
 
   it('rejects register with missing ticket', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, name: 'hacker-agent' },
+      body: { org_id: orgId, name: 'hacker-bot' },
     });
     expect(status).toBe(400);
     expect(body.code).toBe('VALIDATION_ERROR');
@@ -168,7 +168,7 @@ describe('Login-to-Register Auth Flow', () => {
 
     // Try to register in the first org using the second org's ticket
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'cross-org-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'cross-org-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
@@ -218,7 +218,7 @@ describe('X-Org-Id Header Validation', () => {
   let env: TestEnv;
   let orgId: string;
   let orgSecret: string;
-  let agentToken: string;
+  let botToken: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
@@ -226,30 +226,30 @@ describe('X-Org-Id Header Validation', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Register an agent via the new auth flow
+    // Register a bot via the new auth flow
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'orgid-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'orgid-bot' },
     });
-    agentToken = regBody.token;
+    botToken = regBody.token;
   });
 
   afterAll(() => env.cleanup());
 
-  it('succeeds when X-Org-Id matches agent org', async () => {
+  it('succeeds when X-Org-Id matches bot org', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
-      token: agentToken,
+      token: botToken,
       headers: { 'X-Org-Id': orgId },
     });
     expect(status).toBe(200);
-    expect(body.name).toBe('orgid-agent');
+    expect(body.name).toBe('orgid-bot');
   });
 
-  it('rejects when X-Org-Id does not match agent org', async () => {
+  it('rejects when X-Org-Id does not match bot org', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
-      token: agentToken,
+      token: botToken,
       headers: { 'X-Org-Id': 'wrong-org-id' },
     });
     expect(status).toBe(403);
@@ -258,10 +258,10 @@ describe('X-Org-Id Header Validation', () => {
 
   it('succeeds when X-Org-Id is absent (backward compat)', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
-      token: agentToken,
+      token: botToken,
     });
     expect(status).toBe(200);
-    expect(body.name).toBe('orgid-agent');
+    expect(body.name).toBe('orgid-bot');
   });
 });
 
@@ -279,7 +279,7 @@ describe('Secret Rotation and Ticket Invalidation', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Register admin agent
+    // Register admin bot
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
@@ -347,7 +347,7 @@ describe('Secret Rotation and Ticket Invalidation', () => {
 
     // Pre-rotation ticket should be invalidated
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: preRotationTicket, name: 'orphan-agent' },
+      body: { org_id: orgId, ticket: preRotationTicket, name: 'orphan-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
@@ -357,13 +357,13 @@ describe('Secret Rotation and Ticket Invalidation', () => {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const { status: regStatus, body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: newLogin.ticket, name: 'post-rotation-agent' },
+      body: { org_id: orgId, ticket: newLogin.ticket, name: 'post-rotation-bot' },
     });
     expect(regStatus).toBe(200);
-    expect(regBody.name).toBe('post-rotation-agent');
+    expect(regBody.name).toBe('post-rotation-bot');
   });
 
-  it('non-admin agent cannot rotate secret', async () => {
+  it('non-admin bot cannot rotate secret', async () => {
     // Register a member
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
@@ -371,7 +371,7 @@ describe('Secret Rotation and Ticket Invalidation', () => {
     const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
       body: { org_id: orgId, ticket: loginBody.ticket, name: 'member-no-rotate' },
     });
-    // member-no-rotate is a member (not first agent)
+    // member-no-rotate is a member (not first bot)
 
     // Try to rotate
     const { status, body } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
@@ -399,7 +399,7 @@ describe('Role Management', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Register first agent (admin)
+    // Register first bot (admin)
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
@@ -407,9 +407,9 @@ describe('Role Management', () => {
       body: { org_id: orgId, ticket: loginBody.ticket, name: 'role-admin' },
     });
     adminToken = adminBody.token;
-    adminId = adminBody.agent_id;
+    adminId = adminBody.bot_id;
 
-    // Register second agent (member)
+    // Register second bot (member)
     const { body: loginBody2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
@@ -417,12 +417,12 @@ describe('Role Management', () => {
       body: { org_id: orgId, ticket: loginBody2.ticket, name: 'role-member' },
     });
     memberToken = memberBody.token;
-    memberId = memberBody.agent_id;
+    memberId = memberBody.bot_id;
   });
 
   afterAll(() => env.cleanup());
 
-  it('first agent is admin, second is member', async () => {
+  it('first bot is admin, second is member', async () => {
     const { body: adminMe } = await api(env.baseUrl, 'GET', '/api/me', {
       token: adminToken,
     });
@@ -435,13 +435,13 @@ describe('Role Management', () => {
   });
 
   it('admin can promote member to admin', async () => {
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${memberId}/role`, {
       token: adminToken,
       body: { auth_role: 'admin' },
     });
     expect(status).toBe(200);
     expect(body.auth_role).toBe('admin');
-    expect(body.agent_id).toBe(memberId);
+    expect(body.bot_id).toBe(memberId);
 
     // Verify via GET /api/me
     const { body: memberMe } = await api(env.baseUrl, 'GET', '/api/me', {
@@ -452,7 +452,7 @@ describe('Role Management', () => {
 
   it('admin can demote another admin to member', async () => {
     // member was promoted to admin above; demote back
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${memberId}/role`, {
       token: adminToken,
       body: { auth_role: 'member' },
     });
@@ -461,7 +461,7 @@ describe('Role Management', () => {
   });
 
   it('admin cannot demote self (lockout prevention)', async () => {
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${adminId}/role`, {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${adminId}/role`, {
       token: adminToken,
       body: { auth_role: 'member' },
     });
@@ -470,7 +470,7 @@ describe('Role Management', () => {
   });
 
   it('member cannot change roles', async () => {
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${adminId}/role`, {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${adminId}/role`, {
       token: memberToken,
       body: { auth_role: 'member' },
     });
@@ -479,7 +479,7 @@ describe('Role Management', () => {
   });
 
   it('rejects invalid auth_role values', async () => {
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${memberId}/role`, {
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${memberId}/role`, {
       token: adminToken,
       body: { auth_role: 'superadmin' },
     });
@@ -487,18 +487,18 @@ describe('Role Management', () => {
     expect(body.code).toBe('VALIDATION_ERROR');
   });
 
-  it('rejects role change for agent in different org', async () => {
-    // Create another org + agent
+  it('rejects role change for bot in different org', async () => {
+    // Create another org + bot
     const org2 = env.createOrg('role-org-2');
     const { body: login2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: org2.id, org_secret: org2.org_secret },
     });
     const { body: otherAgent } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: org2.id, ticket: login2.ticket, name: 'other-org-agent' },
+      body: { org_id: org2.id, ticket: login2.ticket, name: 'other-org-bot' },
     });
 
-    // Try to change cross-org agent role
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/agents/${otherAgent.agent_id}/role`, {
+    // Try to change cross-org bot role
+    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/org/bots/${otherAgent.bot_id}/role`, {
       token: adminToken,
       body: { auth_role: 'admin' },
     });
@@ -507,19 +507,19 @@ describe('Role Management', () => {
   });
 });
 
-// ─── 5. Paginated Agents Endpoint ────────────────────────────
+// ─── 5. Paginated Bots Endpoint ────────────────────────────
 
-describe('Paginated Agents (GET /api/agents)', () => {
+describe('Paginated Bots (GET /api/bots)', () => {
   let env: TestEnv;
   let orgTicket: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('pag-agents-org');
+    const org = env.createOrg('pag-bots-org');
 
-    // Register 5 agents
+    // Register 5 bots
     for (let i = 1; i <= 5; i++) {
-      await env.registerAgent(org.org_secret, `agent-${String(i).padStart(2, '0')}`);
+      await env.registerBot(org.org_secret, `bot-${String(i).padStart(2, '0')}`);
     }
     orgTicket = await env.loginAsOrg(org.org_secret);
   });
@@ -527,7 +527,7 @@ describe('Paginated Agents (GET /api/agents)', () => {
   afterAll(() => env.cleanup());
 
   it('returns unpaginated array when no cursor/limit', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
       token: orgTicket,
     });
     expect(status).toBe(200);
@@ -536,7 +536,7 @@ describe('Paginated Agents (GET /api/agents)', () => {
   });
 
   it('returns paginated response with limit param', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents?limit=2', {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=2', {
       token: orgTicket,
     });
     expect(status).toBe(200);
@@ -552,8 +552,8 @@ describe('Paginated Agents (GET /api/agents)', () => {
 
     for (let page = 0; page < 10; page++) {
       const url = cursor
-        ? `/api/agents?limit=2&cursor=${cursor}`
-        : '/api/agents?limit=2';
+        ? `/api/bots?limit=2&cursor=${cursor}`
+        : '/api/bots?limit=2';
       const { body } = await api(env.baseUrl, 'GET', url, {
         token: orgTicket,
       });
@@ -572,7 +572,7 @@ describe('Paginated Agents (GET /api/agents)', () => {
   });
 
   it('returns empty result for large cursor past end', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents?limit=10&cursor=zzzzzzzz', {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=10&cursor=zzzzzzzz', {
       token: orgTicket,
     });
     expect(status).toBe(200);
@@ -581,11 +581,11 @@ describe('Paginated Agents (GET /api/agents)', () => {
   });
 
   it('clamps limit to maximum of 200', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents?limit=999', {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=999', {
       token: orgTicket,
     });
     expect(status).toBe(200);
-    // With only 5 agents and limit clamped to 200, all should be returned
+    // With only 5 bots and limit clamped to 200, all should be returned
     expect(body.items.length).toBe(5);
     expect(body.has_more).toBe(false);
   });
@@ -596,21 +596,21 @@ describe('Paginated Agents (GET /api/agents)', () => {
 describe('Paginated Org Threads (GET /api/org/threads)', () => {
   let env: TestEnv;
   let orgTicket: string;
-  let agentToken: string;
+  let botToken: string;
   const threadIds: string[] = [];
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg('pag-threads-org');
 
-    // Register an agent
-    const { token } = await env.registerAgent(org.org_secret, 'thread-maker');
-    agentToken = token;
+    // Register a bot
+    const { token } = await env.registerBot(org.org_secret, 'thread-maker');
+    botToken = token;
 
     // Create 7 threads
     for (let i = 1; i <= 7; i++) {
       const { body } = await api(env.baseUrl, 'POST', '/api/threads', {
-        token: agentToken,
+        token: botToken,
         body: { topic: `Thread ${i}` },
       });
       threadIds.push(body.id);
@@ -618,7 +618,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
     // Close one thread to test status filter
     await api(env.baseUrl, 'PATCH', `/api/threads/${threadIds[0]}`, {
-      token: agentToken,
+      token: botToken,
       body: { status: 'closed', close_reason: 'manual' },
     });
 
@@ -706,20 +706,20 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
   let env: TestEnv;
   let orgTicket: string;
-  let agentToken: string;
+  let botToken: string;
   let threadId: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg('pag-artifacts-org');
 
-    // Register agent
-    const { token } = await env.registerAgent(org.org_secret, 'artifact-maker');
-    agentToken = token;
+    // Register bot
+    const { token } = await env.registerBot(org.org_secret, 'artifact-maker');
+    botToken = token;
 
     // Create a thread
     const { body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
-      token: agentToken,
+      token: botToken,
       body: { topic: 'Artifact pagination test' },
     });
     threadId = thread.id;
@@ -727,7 +727,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
     // Create 5 artifacts with distinct keys (POST with artifact_key in body)
     for (let i = 1; i <= 5; i++) {
       await api(env.baseUrl, 'POST', `/api/threads/${threadId}/artifacts`, {
-        token: agentToken,
+        token: botToken,
         body: { artifact_key: `artifact-${String(i).padStart(2, '0')}`, type: 'text', content: `Content ${i}` },
       });
     }
@@ -785,7 +785,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
 describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => {
   let env: TestEnv;
   let orgTicket: string;
-  let agentToken: string;
+  let botToken: string;
   let threadId: string;
   const messageIds: string[] = [];
 
@@ -793,11 +793,11 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
     env = await createTestEnv();
     const org = env.createOrg('pag-msgs-org');
 
-    const { token } = await env.registerAgent(org.org_secret, 'msg-maker');
-    agentToken = token;
+    const { token } = await env.registerBot(org.org_secret, 'msg-maker');
+    botToken = token;
 
     const { body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
-      token: agentToken,
+      token: botToken,
       body: { topic: 'Message pagination test' },
     });
     threadId = thread.id;
@@ -805,7 +805,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
     // Post 6 messages
     for (let i = 1; i <= 6; i++) {
       const { body: msg } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
-        token: agentToken,
+        token: botToken,
         body: { content: `Message ${i}` },
       });
       messageIds.push(msg.id);
@@ -950,19 +950,19 @@ describe('Org Lifecycle and Auth', () => {
 
     // Pre-suspend ticket should be invalidated
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: preTicket, name: 'stale-ticket-agent' },
+      body: { org_id: orgId, ticket: preTicket, name: 'stale-ticket-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
   });
 
-  it('agent token is blocked when org is suspended', async () => {
-    // Register an agent while active
+  it('bot token is blocked when org is suspended', async () => {
+    // Register a bot while active
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'suspended-test-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'suspended-test-bot' },
     });
 
     // Verify it works
@@ -977,7 +977,7 @@ describe('Org Lifecycle and Auth', () => {
       body: { status: 'suspended' },
     });
 
-    // Agent API call blocked
+    // Bot API call blocked
     const { status: suspStatus, body: suspBody } = await api(env.baseUrl, 'GET', '/api/me', {
       token: regBody.token,
     });
@@ -1069,19 +1069,19 @@ describe('Super Admin Org Management', () => {
     });
     expect(loginBody.ticket).toBeTypeOf('string');
 
-    // Step 3: Register agent
+    // Step 3: Register bot
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'lifecycle-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'lifecycle-bot' },
     });
     expect(regBody.token).toBeTypeOf('string');
-    expect(regBody.auth_role).toBe('admin'); // first agent
+    expect(regBody.auth_role).toBe('admin'); // first bot
 
-    // Step 4: Use agent token
+    // Step 4: Use bot token
     const { status, body: meBody } = await api(env.baseUrl, 'GET', '/api/me', {
       token: regBody.token,
     });
     expect(status).toBe(200);
-    expect(meBody.name).toBe('lifecycle-agent');
+    expect(meBody.name).toBe('lifecycle-bot');
 
     // Step 5: Create thread
     const { body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
@@ -1126,7 +1126,7 @@ describe('Ticket Expiration', () => {
     await new Promise(resolve => setTimeout(resolve, 1500));
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'expired-agent' },
+      body: { org_id: orgId, ticket: loginBody.ticket, name: 'expired-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('TICKET_EXPIRED');
@@ -1150,15 +1150,15 @@ describe('Mixed Auth Types', () => {
   let env: TestEnv;
   let orgId: string;
   let orgTicket: string;
-  let agentToken: string;
+  let botToken: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg('mixed-auth-org');
     orgId = org.id;
 
-    const { token } = await env.registerAgent(org.org_secret, 'mixed-agent');
-    agentToken = token;
+    const { token } = await env.registerBot(org.org_secret, 'mixed-bot');
+    botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);
   });
 
@@ -1173,20 +1173,20 @@ describe('Mixed Auth Types', () => {
     expect(body.name).toBe('mixed-auth-org');
   });
 
-  it('agent token works for agent-level endpoints', async () => {
+  it('bot token works for bot-level endpoints', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
-      token: agentToken,
+      token: botToken,
     });
     expect(status).toBe(200);
-    expect(body.name).toBe('mixed-agent');
+    expect(body.name).toBe('mixed-bot');
   });
 
-  it('agent token cannot access org-only endpoints (GET /api/agents)', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/agents', {
-      token: agentToken,
+  it('bot token can access GET /api/bots (returns flat array for bots)', async () => {
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
+      token: botToken,
     });
-    expect(status).toBe(403);
-    expect(body.code).toBe('FORBIDDEN');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
   });
 
   it('invalid token is rejected', async () => {
@@ -1210,22 +1210,22 @@ describe('Mixed Auth Types', () => {
 describe('WS Ticket Exchange (POST /api/ws-ticket)', () => {
   let env: TestEnv;
   let orgTicket: string;
-  let agentToken: string;
+  let botToken: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg('ws-ticket-org');
 
-    const { token } = await env.registerAgent(org.org_secret, 'ws-agent');
-    agentToken = token;
+    const { token } = await env.registerBot(org.org_secret, 'ws-bot');
+    botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);
   });
 
   afterAll(() => env.cleanup());
 
-  it('agent can exchange token for ws-ticket', async () => {
+  it('bot can exchange token for ws-ticket', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/ws-ticket', {
-      token: agentToken,
+      token: botToken,
     });
     expect(status).toBe(200);
     expect(body.ticket).toBeTypeOf('string');

@@ -27,7 +27,7 @@ export interface Org {
   created_at: number;
 }
 
-export interface Agent {
+export interface Bot {
   id: string;
   org_id: string;
   name: string;
@@ -74,7 +74,7 @@ export interface Channel {
 
 export interface ChannelMember {
   channel_id: string;
-  agent_id: string;
+  bot_id: string;
   joined_at: number;
 }
 
@@ -208,9 +208,9 @@ export const SCOPE_REQUIREMENTS: Record<string, TokenScope[]> = {
   profile: ['full', 'profile'],
 };
 
-export interface AgentToken {
+export interface BotToken {
   id: string;
-  agent_id: string;
+  bot_id: string;
   token: string;
   scopes: TokenScope[];
   label: string | null;
@@ -284,7 +284,7 @@ export interface BotProtocols {
   streaming: boolean;
 }
 
-export interface AgentProfileInput {
+export interface BotProfileInput {
   bio?: string | null;
   role?: string | null;
   function?: string | null;
@@ -319,12 +319,12 @@ export interface RegisterRequest {
 }
 
 export interface RegisterResponse {
-  agent_id: string;
+  bot_id: string;
   token: string;
   name: string;
 }
 
-export interface UpdateProfileRequest extends AgentProfileInput {}
+export interface UpdateProfileRequest extends BotProfileInput {}
 
 export interface ListBotsFilters {
   role?: string;
@@ -336,7 +336,7 @@ export interface ListBotsFilters {
 export interface CreateChannelRequest {
   type: 'direct' | 'group';
   name?: string;
-  members: string[]; // agent IDs or names
+  members: string[]; // bot IDs or names
 }
 
 export interface SendMessageRequest {
@@ -346,7 +346,7 @@ export interface SendMessageRequest {
 }
 
 export interface DirectSendRequest {
-  to: string; // agent ID or name
+  to: string; // bot ID or name
   content?: string;
   content_type?: 'text' | 'json';
   parts?: MessagePart[];
@@ -366,8 +366,8 @@ export interface WireThreadMessage extends Omit<ThreadMessage, 'parts'> {
 
 export type WsServerEvent =
   | { type: 'message'; channel_id: string; message: WireMessage; sender_name: string }
-  | { type: 'agent_online'; agent: Pick<Agent, 'id' | 'name'> }
-  | { type: 'agent_offline'; agent: Pick<Agent, 'id' | 'name'> }
+  | { type: 'bot_online'; bot: Pick<Bot, 'id' | 'name'> }
+  | { type: 'bot_offline'; bot: Pick<Bot, 'id' | 'name'> }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'channel_deleted'; channel_id: string }
   | { type: 'thread_created'; thread: Thread }

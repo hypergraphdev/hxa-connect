@@ -4,12 +4,12 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type {
   Org,
-  Agent,
+  Bot,
   Channel,
   ChannelMember,
   Message,
   HubConfig,
-  AgentProfileInput,
+  BotProfileInput,
   ListBotsFilters,
   Thread,
   ThreadParticipant,
@@ -24,7 +24,7 @@ import type {
   OrgSettings,
   AuditAction,
   AuditEntry,
-  AgentToken,
+  BotToken,
   TokenScope,
   ThreadPermissionPolicy,
   OrgTicket,
@@ -37,7 +37,21 @@ export class HubDB {
 
   constructor(config: HubConfig) {
     fs.mkdirSync(config.data_dir, { recursive: true });
-    const dbPath = path.join(config.data_dir, 'botshub.db');
+    const dbPath = path.join(config.data_dir, 'hxa-connect.db');
+
+    // Auto-rename legacy DB file if new name doesn't exist yet
+    if (!fs.existsSync(dbPath)) {
+      const legacyPath = path.join(config.data_dir, 'botshub.db');
+      if (fs.existsSync(legacyPath)) {
+        fs.renameSync(legacyPath, dbPath);
+        // Also rename WAL/SHM sidecar files if present
+        const legacyWal = legacyPath + '-wal';
+        const legacyShm = legacyPath + '-shm';
+        if (fs.existsSync(legacyWal)) fs.renameSync(legacyWal, dbPath + '-wal');
+        if (fs.existsSync(legacyShm)) fs.renameSync(legacyShm, dbPath + '-shm');
+      }
+    }
+
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
@@ -54,7 +68,7 @@ export class HubDB {
         created_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS agents (
+      CREATE TABLE IF NOT EXISTS bots (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -62,6 +76,19 @@ export class HubDB {
         metadata TEXT,
         webhook_url TEXT,
         webhook_secret TEXT,
+        bio TEXT,
+        role TEXT,
+        "function" TEXT,
+        team TEXT,
+        tags TEXT,
+        languages TEXT,
+        protocols TEXT,
+        status_text TEXT,
+        timezone TEXT,
+        active_hours TEXT,
+        version TEXT,
+        runtime TEXT,
+        auth_role TEXT NOT NULL DEFAULT 'member' CHECK(auth_role IN ('admin','member')),
         online INTEGER DEFAULT 0,
         last_seen_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -78,9 +105,9 @@ export class HubDB {
 
       CREATE TABLE IF NOT EXISTS channel_members (
         channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         joined_at INTEGER NOT NULL,
-        PRIMARY KEY(channel_id, agent_id)
+        PRIMARY KEY(channel_id, bot_id)
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -99,7 +126,7 @@ export class HubDB {
         tags TEXT,
         status TEXT NOT NULL DEFAULT 'active'
           CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
-        initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        initiator_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
         context TEXT,
         close_reason TEXT
@@ -112,7 +139,7 @@ export class HubDB {
 
       CREATE TABLE IF NOT EXISTS thread_participants (
         thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        bot_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         label TEXT,
         joined_at INTEGER NOT NULL,
         PRIMARY KEY(thread_id, bot_id)
@@ -121,7 +148,7 @@ export class HubDB {
       CREATE TABLE IF NOT EXISTS thread_messages (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        sender_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        sender_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         content TEXT NOT NULL,
         content_type TEXT DEFAULT 'text',
         metadata TEXT,
@@ -139,7 +166,7 @@ export class HubDB {
         language TEXT,
         url TEXT,
         mime_type TEXT,
-        contributor_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        contributor_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         version INTEGER NOT NULL DEFAULT 1,
         format_warning INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
@@ -148,9 +175,9 @@ export class HubDB {
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
-      CREATE INDEX IF NOT EXISTS idx_agents_org ON agents(org_id);
+      CREATE INDEX IF NOT EXISTS idx_bots_org ON bots(org_id);
       CREATE INDEX IF NOT EXISTS idx_channels_org ON channels(org_id);
-      CREATE INDEX IF NOT EXISTS idx_channel_members_agent ON channel_members(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_channel_members_bot ON channel_members(bot_id);
       CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
       CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
       CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
@@ -162,7 +189,7 @@ export class HubDB {
       CREATE TABLE IF NOT EXISTS files (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-        uploader_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        uploader_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         name TEXT NOT NULL,
         mime_type TEXT,
         size INTEGER NOT NULL,
@@ -183,7 +210,7 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_catchup_occurred ON catchup_events(occurred_at);
 
       CREATE TABLE IF NOT EXISTS webhook_status (
-        agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+        bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
         last_success INTEGER,
         last_failure INTEGER,
         consecutive_failures INTEGER DEFAULT 0,
@@ -222,9 +249,9 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(org_id, action, created_at);
 
-      CREATE TABLE IF NOT EXISTS agent_tokens (
+      CREATE TABLE IF NOT EXISTS bot_tokens (
         id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         token TEXT UNIQUE NOT NULL,
         scopes TEXT NOT NULL DEFAULT '["full"]',
         label TEXT,
@@ -232,8 +259,8 @@ export class HubDB {
         created_at INTEGER NOT NULL,
         last_used_at INTEGER
       );
-      CREATE INDEX IF NOT EXISTS idx_agent_tokens_agent ON agent_tokens(agent_id);
-      CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
+      CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot ON bot_tokens(bot_id);
+      CREATE INDEX IF NOT EXISTS idx_bot_tokens_token ON bot_tokens(token);
     `);
 
     // ── Schema version tracking ──────────────────────────────
@@ -257,7 +284,7 @@ export class HubDB {
       }
       try { this.db.exec(`ALTER TABLE agents ADD COLUMN version TEXT DEFAULT '1.0.0'`); } catch { /* exists */ }
       try { this.db.exec(`ALTER TABLE agents ADD COLUMN runtime TEXT`); } catch { /* exists */ }
-      this.db.prepare(`UPDATE agents SET version = '1.0.0' WHERE version IS NULL OR version = ''`).run();
+      try { this.db.prepare(`UPDATE agents SET version = '1.0.0' WHERE version IS NULL OR version = ''`).run(); } catch { /* table may not exist on fresh DBs */ }
     });
 
     this.runMigration('003_add_parts_column', () => {
@@ -337,7 +364,7 @@ export class HubDB {
     this.runMigration('012_add_agent_auth_role', () => {
       try { this.db.exec(`ALTER TABLE agents ADD COLUMN auth_role TEXT NOT NULL DEFAULT 'member'`); } catch { /* exists */ }
       // Backfill: all existing agents were implicitly admin
-      this.db.prepare(`UPDATE agents SET auth_role = 'admin'`).run();
+      try { this.db.prepare(`UPDATE agents SET auth_role = 'admin'`).run(); } catch { /* table may not exist on fresh DBs */ }
     });
 
     // Migration: create org_tickets table (Phase 1 – org auth redesign)
@@ -356,6 +383,87 @@ export class HubDB {
         CREATE INDEX IF NOT EXISTS idx_org_tickets_org ON org_tickets(org_id);
         CREATE INDEX IF NOT EXISTS idx_org_tickets_expires ON org_tickets(expires_at);
       `);
+    });
+
+    // Migration: rename agents→bots, agent_tokens→bot_tokens, agent_id→bot_id columns
+    this.runMigration('014_rename_agents_to_bots', () => {
+      // Guard: only run if the old `agents` table exists (on fresh DBs, schema init already creates `bots`)
+      const hasAgentsTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'"
+      ).get();
+      if (!hasAgentsTable) return;
+
+      this.db.pragma('foreign_keys = OFF');
+      try {
+        this.db.exec(`
+          BEGIN TRANSACTION;
+
+          -- Rename agents → bots
+          ALTER TABLE agents RENAME TO bots;
+
+          -- Rename agent_tokens → bot_tokens (before column recreation)
+          ALTER TABLE agent_tokens RENAME TO bot_tokens;
+
+          -- Recreate bot_tokens with bot_id replacing agent_id
+          CREATE TABLE bot_tokens_new (
+            id TEXT PRIMARY KEY,
+            bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+            token TEXT UNIQUE NOT NULL,
+            scopes TEXT NOT NULL DEFAULT '["full"]',
+            label TEXT,
+            expires_at INTEGER,
+            created_at INTEGER NOT NULL,
+            last_used_at INTEGER
+          );
+          INSERT INTO bot_tokens_new (id, bot_id, token, scopes, label, expires_at, created_at, last_used_at)
+            SELECT id, agent_id, token, scopes, label, expires_at, created_at, last_used_at FROM bot_tokens;
+          DROP TABLE bot_tokens;
+          ALTER TABLE bot_tokens_new RENAME TO bot_tokens;
+
+          -- Recreate channel_members with bot_id replacing agent_id
+          CREATE TABLE channel_members_new (
+            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+            joined_at INTEGER NOT NULL,
+            PRIMARY KEY(channel_id, bot_id)
+          );
+          INSERT INTO channel_members_new (channel_id, bot_id, joined_at)
+            SELECT channel_id, agent_id, joined_at FROM channel_members;
+          DROP TABLE channel_members;
+          ALTER TABLE channel_members_new RENAME TO channel_members;
+
+          -- Recreate webhook_status with bot_id replacing agent_id
+          CREATE TABLE webhook_status_new (
+            bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+            last_success INTEGER,
+            last_failure INTEGER,
+            consecutive_failures INTEGER DEFAULT 0,
+            degraded INTEGER DEFAULT 0
+          );
+          INSERT INTO webhook_status_new (bot_id, last_success, last_failure, consecutive_failures, degraded)
+            SELECT agent_id, last_success, last_failure, consecutive_failures, degraded FROM webhook_status;
+          DROP TABLE webhook_status;
+          ALTER TABLE webhook_status_new RENAME TO webhook_status;
+
+          -- Recreate indexes with new names
+          DROP INDEX IF EXISTS idx_agents_org;
+          DROP INDEX IF EXISTS idx_channel_members_agent;
+          DROP INDEX IF EXISTS idx_agent_tokens_agent;
+          DROP INDEX IF EXISTS idx_agent_tokens_token;
+          CREATE INDEX IF NOT EXISTS idx_bots_org ON bots(org_id);
+          CREATE INDEX IF NOT EXISTS idx_channel_members_bot ON channel_members(bot_id);
+          CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot ON bot_tokens(bot_id);
+          CREATE INDEX IF NOT EXISTS idx_bot_tokens_token ON bot_tokens(token);
+
+        COMMIT;`);
+
+        console.log('  ✅ Renamed agents→bots, agent_tokens→bot_tokens, agent_id→bot_id');
+      } catch (err) {
+        try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
+        throw err;
+      } finally {
+        this.db.pragma('foreign_keys = ON');
+      }
     });
   }
 
@@ -402,7 +510,7 @@ export class HubDB {
           tags TEXT,
           status TEXT NOT NULL DEFAULT 'active'
             CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
-          initiator_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          initiator_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
           channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
           context TEXT,
           close_reason TEXT
@@ -423,7 +531,7 @@ export class HubDB {
         CREATE TABLE thread_messages_new (
           id TEXT PRIMARY KEY,
           thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-          sender_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          sender_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
           content TEXT NOT NULL,
           content_type TEXT DEFAULT 'text',
           parts TEXT,
@@ -447,7 +555,7 @@ export class HubDB {
           language TEXT,
           url TEXT,
           mime_type TEXT,
-          contributor_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          contributor_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
           version INTEGER NOT NULL DEFAULT 1,
           format_warning INTEGER DEFAULT 0,
           created_at INTEGER NOT NULL,
@@ -493,7 +601,7 @@ export class HubDB {
         CREATE TABLE files_new (
           id TEXT PRIMARY KEY,
           org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-          uploader_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+          uploader_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
           name TEXT NOT NULL,
           mime_type TEXT,
           size INTEGER NOT NULL,
@@ -524,34 +632,36 @@ export class HubDB {
    * After this migration runs, all tokens in DB are SHA-256 hashes.
    */
   private migrateHashTokens() {
-    // Migrate agents.token
-    const agentRows = this.db.prepare(`SELECT id, token FROM agents`).all() as { id: string; token: string }[];
-    let agentMigrated = 0;
-    for (const row of agentRows) {
-      // Plaintext agent tokens start with "agent_"; hashes are 64-char hex
-      if (row.token.startsWith('agent_')) {
-        const hash = HubDB.hashToken(row.token);
-        this.db.prepare('UPDATE agents SET token = ? WHERE id = ?').run(hash, row.id);
-        agentMigrated++;
+    try {
+      // Migrate agents.token
+      const agentRows = this.db.prepare(`SELECT id, token FROM agents`).all() as { id: string; token: string }[];
+      let agentMigrated = 0;
+      for (const row of agentRows) {
+        // Plaintext agent tokens start with "agent_"; hashes are 64-char hex
+        if (row.token.startsWith('agent_')) {
+          const hash = HubDB.hashToken(row.token);
+          this.db.prepare('UPDATE agents SET token = ? WHERE id = ?').run(hash, row.id);
+          agentMigrated++;
+        }
       }
-    }
-    if (agentMigrated > 0) {
-      console.log(`  🔐 Hashed ${agentMigrated} plaintext agent token(s)`);
-    }
+      if (agentMigrated > 0) {
+        console.log(`  🔐 Hashed ${agentMigrated} plaintext agent token(s)`);
+      }
 
-    // Migrate agent_tokens.token
-    const scopedRows = this.db.prepare(`SELECT id, token FROM agent_tokens`).all() as { id: string; token: string }[];
-    let scopedMigrated = 0;
-    for (const row of scopedRows) {
-      if (row.token.startsWith('agent_') || row.token.startsWith('scoped_')) {
-        const hash = HubDB.hashToken(row.token);
-        this.db.prepare('UPDATE agent_tokens SET token = ? WHERE id = ?').run(hash, row.id);
-        scopedMigrated++;
+      // Migrate agent_tokens.token
+      const scopedRows = this.db.prepare(`SELECT id, token FROM agent_tokens`).all() as { id: string; token: string }[];
+      let scopedMigrated = 0;
+      for (const row of scopedRows) {
+        if (row.token.startsWith('agent_') || row.token.startsWith('scoped_')) {
+          const hash = HubDB.hashToken(row.token);
+          this.db.prepare('UPDATE agent_tokens SET token = ? WHERE id = ?').run(hash, row.id);
+          scopedMigrated++;
+        }
       }
-    }
-    if (scopedMigrated > 0) {
-      console.log(`  🔐 Hashed ${scopedMigrated} plaintext scoped token(s)`);
-    }
+      if (scopedMigrated > 0) {
+        console.log(`  🔐 Hashed ${scopedMigrated} plaintext scoped token(s)`);
+      }
+    } catch { /* tables may not exist on fresh DBs */ }
   }
 
   /**
@@ -582,7 +692,7 @@ export class HubDB {
     };
   }
 
-  private rowToAgent(row: any): Agent {
+  private rowToBot(row: any): Bot {
     return {
       ...row,
       bio: row.bio ?? null,
@@ -655,7 +765,7 @@ export class HubDB {
     };
   }
 
-  private serializeProfileFields(fields?: AgentProfileInput): {
+  private serializeProfileFields(fields?: BotProfileInput): {
     bio?: string | null;
     role?: string | null;
     function?: string | null;
@@ -747,10 +857,10 @@ export class HubDB {
   }
 
   /**
-   * Set the auth_role for an agent ('admin' or 'member').
+   * Set the auth_role for a bot ('admin' or 'member').
    */
-  setAgentAuthRole(agentId: string, role: 'admin' | 'member'): void {
-    this.db.prepare('UPDATE agents SET auth_role = ? WHERE id = ?').run(role, agentId);
+  setBotAuthRole(botId: string, role: 'admin' | 'member'): void {
+    this.db.prepare('UPDATE bots SET auth_role = ? WHERE id = ?').run(role, botId);
   }
 
   /**
@@ -781,7 +891,7 @@ export class HubDB {
   destroyOrg(orgId: string): void {
     // Set status first (for any in-flight requests to see)
     this.db.prepare("UPDATE orgs SET status = 'destroyed' WHERE id = ?").run(orgId);
-    // CASCADE delete handles all related data (agents, channels, threads, etc.)
+    // CASCADE delete handles all related data (bots, channels, threads, etc.)
     this.db.prepare('DELETE FROM orgs WHERE id = ?').run(orgId);
   }
 
@@ -859,19 +969,19 @@ export class HubDB {
     return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
   }
 
-  // ─── Agent Operations ────────────────────────────────────
+  // ─── Bot Operations ────────────────────────────────────
 
-  registerAgent(
+  registerBot(
     orgId: string,
     name: string,
     metadata?: Record<string, unknown> | null,
     webhookUrl?: string | null,
     webhookSecret?: string | null,
-    profile?: AgentProfileInput,
-  ): { agent: Agent; created: boolean; plaintextToken: string | null } {
-    // Check if agent already exists → return existing token
+    profile?: BotProfileInput,
+  ): { bot: Bot; created: boolean; plaintextToken: string | null } {
+    // Check if bot already exists → return existing token
     const existing = this.db.prepare(
-      'SELECT * FROM agents WHERE org_id = ? AND name = ?'
+      'SELECT * FROM bots WHERE org_id = ? AND name = ?'
     ).get(orgId, name) as any;
 
     const now = Date.now();
@@ -946,18 +1056,18 @@ export class HubDB {
       params.push(existing.id);
 
       this.db.prepare(
-        `UPDATE agents SET ${updates.join(', ')} WHERE id = ?`
+        `UPDATE bots SET ${updates.join(', ')} WHERE id = ?`
       ).run(...params);
 
-      const updated = this.getAgentById(existing.id);
+      const updated = this.getBotById(existing.id);
       if (!updated) {
-        throw new Error('Agent update failed');
+        throw new Error('Bot update failed');
       }
-      return { agent: updated, created: false, plaintextToken: null };
+      return { bot: updated, created: false, plaintextToken: null };
     }
 
     const plaintextToken = `agent_${crypto.randomBytes(24).toString('hex')}`;
-    const agent: Agent = {
+    const bot: Bot = {
       id: crypto.randomUUID(),
       org_id: orgId,
       name,
@@ -983,44 +1093,44 @@ export class HubDB {
       created_at: now,
     };
 
-    const tokenHash = HubDB.hashToken(agent.token);
+    const tokenHash = HubDB.hashToken(bot.token);
 
     this.db.prepare(
-      `INSERT INTO agents (
+      `INSERT INTO bots (
         id, org_id, name, token, metadata, webhook_url, webhook_secret,
         bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
         auth_role, online, last_seen_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      agent.id,
-      agent.org_id,
-      agent.name,
+      bot.id,
+      bot.org_id,
+      bot.name,
       tokenHash, // Store hash, not plaintext
-      agent.metadata,
-      agent.webhook_url,
-      agent.webhook_secret,
-      agent.bio,
-      agent.role,
-      agent.function,
-      agent.team,
-      agent.tags,
-      agent.languages,
-      agent.protocols,
-      agent.status_text,
-      agent.timezone,
-      agent.active_hours,
-      agent.version,
-      agent.runtime,
-      agent.auth_role,
-      agent.online ? 1 : 0,
-      agent.last_seen_at,
-      agent.created_at,
+      bot.metadata,
+      bot.webhook_url,
+      bot.webhook_secret,
+      bot.bio,
+      bot.role,
+      bot.function,
+      bot.team,
+      bot.tags,
+      bot.languages,
+      bot.protocols,
+      bot.status_text,
+      bot.timezone,
+      bot.active_hours,
+      bot.version,
+      bot.runtime,
+      bot.auth_role,
+      bot.online ? 1 : 0,
+      bot.last_seen_at,
+      bot.created_at,
     );
 
-    return { agent, created: true, plaintextToken };
+    return { bot, created: true, plaintextToken };
   }
 
-  updateProfile(agentId: string, fields: AgentProfileInput): Agent | undefined {
+  updateProfile(botId: string, fields: BotProfileInput): Bot | undefined {
     const serialized = this.serializeProfileFields(fields);
     const updates: string[] = [];
     const params: any[] = [];
@@ -1075,47 +1185,41 @@ export class HubDB {
     }
 
     if (updates.length === 0) {
-      return this.getAgentById(agentId);
+      return this.getBotById(botId);
     }
 
-    params.push(agentId);
+    params.push(botId);
 
-    this.db.prepare(`UPDATE agents SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-    return this.getAgentById(agentId);
+    this.db.prepare(`UPDATE bots SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    return this.getBotById(botId);
   }
 
-  getAgentByToken(token: string): Agent | undefined {
+  getBotByToken(token: string): Bot | undefined {
     const tokenHash = HubDB.hashToken(token);
-    const row = this.db.prepare('SELECT * FROM agents WHERE token = ?').get(tokenHash) as any;
+    const row = this.db.prepare('SELECT * FROM bots WHERE token = ?').get(tokenHash) as any;
     if (!row) return undefined;
-    return this.rowToAgent(row);
+    return this.rowToBot(row);
   }
 
-  getAgentById(id: string): Agent | undefined {
-    const row = this.db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any;
+  getBotById(id: string): Bot | undefined {
+    const row = this.db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as any;
     if (!row) return undefined;
-    return this.rowToAgent(row);
+    return this.rowToBot(row);
   }
 
-  getAgentByName(orgId: string, name: string): Agent | undefined {
+  getBotByName(orgId: string, name: string): Bot | undefined {
     const row = this.db.prepare(
-      'SELECT * FROM agents WHERE org_id = ? AND name = ?'
+      'SELECT * FROM bots WHERE org_id = ? AND name = ?'
     ).get(orgId, name) as any;
     if (!row) return undefined;
-    return this.rowToAgent(row);
-  }
-
-  listAgents(orgId: string): Agent[] {
-    return (this.db.prepare(
-      'SELECT * FROM agents WHERE org_id = ? ORDER BY name'
-    ).all(orgId) as any[]).map(r => this.rowToAgent(r));
+    return this.rowToBot(row);
   }
 
   /**
-   * Paginated agent list. Cursor is an agent id; results ordered by id ASC.
+   * Paginated bot list. Cursor is a bot id; results ordered by id ASC.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listAgentsPaginated(orgId: string, cursor: string | undefined, limit: number, search?: string): Agent[] {
+  listBotsPaginated(orgId: string, cursor: string | undefined, limit: number, search?: string): Bot[] {
     const searchFilter = search ? ' AND name LIKE ?' : '';
     const searchParam = search ? `%${search}%` : undefined;
     if (cursor) {
@@ -1123,18 +1227,18 @@ export class HubDB {
       if (searchParam) params.push(searchParam);
       params.push(limit + 1);
       return (this.db.prepare(
-        `SELECT * FROM agents WHERE org_id = ? AND id > ?${searchFilter} ORDER BY id ASC LIMIT ?`
-      ).all(...params) as any[]).map(r => this.rowToAgent(r));
+        `SELECT * FROM bots WHERE org_id = ? AND id > ?${searchFilter} ORDER BY id ASC LIMIT ?`
+      ).all(...params) as any[]).map(r => this.rowToBot(r));
     }
     const params: any[] = [orgId];
     if (searchParam) params.push(searchParam);
     params.push(limit + 1);
     return (this.db.prepare(
-      `SELECT * FROM agents WHERE org_id = ?${searchFilter} ORDER BY id ASC LIMIT ?`
-    ).all(...params) as any[]).map(r => this.rowToAgent(r));
+      `SELECT * FROM bots WHERE org_id = ?${searchFilter} ORDER BY id ASC LIMIT ?`
+    ).all(...params) as any[]).map(r => this.rowToBot(r));
   }
 
-  listBots(orgId: string, filters?: ListBotsFilters): Agent[] {
+  listBots(orgId: string, filters?: ListBotsFilters): Bot[] {
     const where: string[] = ['org_id = ?'];
     const params: any[] = [orgId];
 
@@ -1166,8 +1270,8 @@ export class HubDB {
     }
 
     let bots = (this.db.prepare(
-      `SELECT * FROM agents WHERE ${where.join(' AND ')} ORDER BY name`
-    ).all(...params) as any[]).map(r => this.rowToAgent(r));
+      `SELECT * FROM bots WHERE ${where.join(' AND ')} ORDER BY name`
+    ).all(...params) as any[]).map(r => this.rowToBot(r));
 
     if (filters?.tag) {
       const wantedTag = filters.tag.toLowerCase();
@@ -1185,27 +1289,27 @@ export class HubDB {
     return bots;
   }
 
-  setAgentOnline(agentId: string, online: boolean) {
+  setBotOnline(botId: string, online: boolean) {
     this.db.prepare(
-      'UPDATE agents SET online = ?, last_seen_at = ? WHERE id = ?'
-    ).run(online ? 1 : 0, Date.now(), agentId);
+      'UPDATE bots SET online = ?, last_seen_at = ? WHERE id = ?'
+    ).run(online ? 1 : 0, Date.now(), botId);
   }
 
   /** W3: Update last_seen without changing online status (for HTTP requests) */
-  touchAgentLastSeen(agentId: string) {
+  touchBotLastSeen(botId: string) {
     this.db.prepare(
-      'UPDATE agents SET last_seen_at = ? WHERE id = ?'
-    ).run(Date.now(), agentId);
+      'UPDATE bots SET last_seen_at = ? WHERE id = ?'
+    ).run(Date.now(), botId);
   }
 
-  deleteAgent(agentId: string) {
-    // Auto-close threads where this agent is the sole remaining participant
+  deleteBot(botId: string) {
+    // Auto-close threads where this bot is the sole remaining participant
     // (ON DELETE CASCADE would orphan them, making them inaccessible via API)
     const soloThreads = this.db.prepare(`
       SELECT tp.thread_id FROM thread_participants tp
       WHERE tp.bot_id = ?
         AND (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = tp.thread_id) = 1
-    `).all(agentId) as { thread_id: string }[];
+    `).all(botId) as { thread_id: string }[];
     const now = Date.now();
     for (const { thread_id } of soloThreads) {
       this.db.prepare(`
@@ -1214,17 +1318,17 @@ export class HubDB {
       `).run(now, now, thread_id);
     }
 
-    this.db.prepare('DELETE FROM channel_members WHERE agent_id = ?').run(agentId);
-    this.db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
+    this.db.prepare('DELETE FROM channel_members WHERE bot_id = ?').run(botId);
+    this.db.prepare('DELETE FROM bots WHERE id = ?').run(botId);
   }
 
-  // ─── Agent Token Operations (Scoped Tokens) ─────────────
+  // ─── Bot Token Operations (Scoped Tokens) ─────────────
 
-  createAgentToken(agentId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): AgentToken {
+  createBotToken(botId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): BotToken {
     const plaintextToken = `scoped_${crypto.randomBytes(24).toString('hex')}`;
-    const token: AgentToken = {
+    const token: BotToken = {
       id: crypto.randomUUID(),
-      agent_id: agentId,
+      bot_id: botId,
       token: plaintextToken, // returned to caller; stored as hash
       scopes,
       label: label ?? null,
@@ -1236,11 +1340,11 @@ export class HubDB {
     const tokenHash = HubDB.hashToken(plaintextToken);
 
     this.db.prepare(`
-      INSERT INTO agent_tokens (id, agent_id, token, scopes, label, expires_at, created_at, last_used_at)
+      INSERT INTO bot_tokens (id, bot_id, token, scopes, label, expires_at, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       token.id,
-      token.agent_id,
+      token.bot_id,
       tokenHash, // Store hash, not plaintext
       JSON.stringify(token.scopes),
       token.label,
@@ -1253,41 +1357,41 @@ export class HubDB {
     return token;
   }
 
-  getAgentTokenByToken(token: string): AgentToken | undefined {
+  getBotTokenByToken(token: string): BotToken | undefined {
     const tokenHash = HubDB.hashToken(token);
-    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token = ?').get(tokenHash) as any;
+    const row = this.db.prepare('SELECT * FROM bot_tokens WHERE token = ?').get(tokenHash) as any;
     if (!row) return undefined;
-    return this.rowToAgentToken(row);
+    return this.rowToBotToken(row);
   }
 
-  listAgentTokens(agentId: string): AgentToken[] {
+  listBotTokens(botId: string): BotToken[] {
     const rows = this.db.prepare(
-      'SELECT * FROM agent_tokens WHERE agent_id = ? ORDER BY created_at DESC'
-    ).all(agentId) as any[];
-    return rows.map(row => this.rowToAgentToken(row));
+      'SELECT * FROM bot_tokens WHERE bot_id = ? ORDER BY created_at DESC'
+    ).all(botId) as any[];
+    return rows.map(row => this.rowToBotToken(row));
   }
 
-  revokeAgentToken(tokenId: string, agentId: string): boolean {
+  revokeBotToken(tokenId: string, botId: string): boolean {
     const result = this.db.prepare(
-      'DELETE FROM agent_tokens WHERE id = ? AND agent_id = ?'
-    ).run(tokenId, agentId);
+      'DELETE FROM bot_tokens WHERE id = ? AND bot_id = ?'
+    ).run(tokenId, botId);
     return result.changes > 0;
   }
 
-  touchAgentToken(tokenId: string): void {
+  touchBotToken(tokenId: string): void {
     this.db.prepare(
-      'UPDATE agent_tokens SET last_used_at = ? WHERE id = ?'
+      'UPDATE bot_tokens SET last_used_at = ? WHERE id = ?'
     ).run(Date.now(), tokenId);
   }
 
   cleanupExpiredTokens(batchSize = 1000): number {
     const result = this.db.prepare(
-      'DELETE FROM agent_tokens WHERE rowid IN (SELECT rowid FROM agent_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)'
+      'DELETE FROM bot_tokens WHERE rowid IN (SELECT rowid FROM bot_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)'
     ).run(Date.now(), batchSize);
     return result.changes;
   }
 
-  private rowToAgentToken(row: any): AgentToken {
+  private rowToBotToken(row: any): BotToken {
     let scopes: TokenScope[];
     try {
       scopes = JSON.parse(row.scopes);
@@ -1296,7 +1400,7 @@ export class HubDB {
     }
     return {
       id: row.id,
-      agent_id: row.agent_id,
+      bot_id: row.bot_id,
       token: row.token,
       scopes,
       label: row.label ?? null,
@@ -1390,7 +1494,7 @@ export class HubDB {
   // ─── Channel Operations ──────────────────────────────────
 
   createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Channel & { isNew?: boolean } {
-    // For direct channels, check if one already exists between these two agents
+    // For direct channels, check if one already exists between these two bots
     if (type === 'direct' && memberIds.length === 2) {
       const existing = this.findDirectChannel(memberIds[0], memberIds[1]);
       if (existing) return { ...existing, isNew: false };
@@ -1408,13 +1512,13 @@ export class HubDB {
       'INSERT INTO channels (id, org_id, type, name, created_at) VALUES (?, ?, ?, ?, ?)'
     );
     const insertMember = this.db.prepare(
-      'INSERT INTO channel_members (channel_id, agent_id, joined_at) VALUES (?, ?, ?)'
+      'INSERT INTO channel_members (channel_id, bot_id, joined_at) VALUES (?, ?, ?)'
     );
 
     const tx = this.db.transaction(() => {
       insertChannel.run(channel.id, channel.org_id, channel.type, channel.name, channel.created_at);
-      for (const agentId of memberIds) {
-        insertMember.run(channel.id, agentId, Date.now());
+      for (const botId of memberIds) {
+        insertMember.run(channel.id, botId, Date.now());
       }
     });
     tx();
@@ -1422,14 +1526,14 @@ export class HubDB {
     return { ...channel, isNew: true };
   }
 
-  private findDirectChannel(agentId1: string, agentId2: string): Channel | undefined {
+  private findDirectChannel(botId1: string, botId2: string): Channel | undefined {
     const row = this.db.prepare(`
       SELECT c.* FROM channels c
-      JOIN channel_members cm1 ON c.id = cm1.channel_id AND cm1.agent_id = ?
-      JOIN channel_members cm2 ON c.id = cm2.channel_id AND cm2.agent_id = ?
+      JOIN channel_members cm1 ON c.id = cm1.channel_id AND cm1.bot_id = ?
+      JOIN channel_members cm2 ON c.id = cm2.channel_id AND cm2.bot_id = ?
       WHERE c.type = 'direct'
       LIMIT 1
-    `).get(agentId1, agentId2) as any;
+    `).get(botId1, botId2) as any;
     return row || undefined;
   }
 
@@ -1443,7 +1547,7 @@ export class HubDB {
     return this.db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId) as Channel | undefined;
   }
 
-  listChannelsForAgent(agentId: string): (Channel & { members: string[]; last_activity_at: number })[] {
+  listChannelsForBot(botId: string): (Channel & { members: string[]; last_activity_at: number })[] {
     const channels = this.db.prepare(`
       SELECT c.*, COALESCE(
         (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
@@ -1451,13 +1555,13 @@ export class HubDB {
       ) AS last_activity_at
       FROM channels c
       JOIN channel_members cm ON c.id = cm.channel_id
-      WHERE cm.agent_id = ?
+      WHERE cm.bot_id = ?
       ORDER BY last_activity_at DESC
-    `).all(agentId) as (Channel & { last_activity_at: number })[];
+    `).all(botId) as (Channel & { last_activity_at: number })[];
 
     return channels.map(ch => ({
       ...ch,
-      members: this.getChannelMembers(ch.id).map(m => m.agent_id),
+      members: this.getChannelMembers(ch.id).map(m => m.bot_id),
     }));
   }
 
@@ -1474,7 +1578,7 @@ export class HubDB {
 
     return channels.map(ch => ({
       ...ch,
-      members: this.getChannelMembers(ch.id).map(m => m.agent_id),
+      members: this.getChannelMembers(ch.id).map(m => m.bot_id),
     }));
   }
 
@@ -1484,16 +1588,16 @@ export class HubDB {
     ).all(channelId) as ChannelMember[];
   }
 
-  addChannelMember(channelId: string, agentId: string) {
+  addChannelMember(channelId: string, botId: string) {
     this.db.prepare(
-      'INSERT OR IGNORE INTO channel_members (channel_id, agent_id, joined_at) VALUES (?, ?, ?)'
-    ).run(channelId, agentId, Date.now());
+      'INSERT OR IGNORE INTO channel_members (channel_id, bot_id, joined_at) VALUES (?, ?, ?)'
+    ).run(channelId, botId, Date.now());
   }
 
-  isChannelMember(channelId: string, agentId: string): boolean {
+  isChannelMember(channelId: string, botId: string): boolean {
     const row = this.db.prepare(
-      'SELECT 1 FROM channel_members WHERE channel_id = ? AND agent_id = ?'
-    ).get(channelId, agentId);
+      'SELECT 1 FROM channel_members WHERE channel_id = ? AND bot_id = ?'
+    ).get(channelId, botId);
     return !!row;
   }
 
@@ -1557,15 +1661,15 @@ export class HubDB {
     ).all(channelId, limit + 1) as Message[];
   }
 
-  getNewMessages(agentId: string, since: number): (Message & { channel_name?: string })[] {
+  getNewMessages(botId: string, since: number): (Message & { channel_name?: string })[] {
     return this.db.prepare(`
       SELECT m.*, ch.name as channel_name FROM messages m
-      JOIN channel_members cm ON m.channel_id = cm.channel_id AND cm.agent_id = ?
+      JOIN channel_members cm ON m.channel_id = cm.channel_id AND cm.bot_id = ?
       JOIN channels ch ON m.channel_id = ch.id
       WHERE m.created_at > ? AND m.sender_id != ?
       ORDER BY m.created_at ASC
       LIMIT 100
-    `).all(agentId, since, agentId) as any[];
+    `).all(botId, since, botId) as any[];
   }
 
   // ─── Thread Operations ───────────────────────────────────
@@ -1604,7 +1708,7 @@ export class HubDB {
       resolved_at: null,
     };
 
-    const getAgentOrgStmt = this.db.prepare('SELECT org_id FROM agents WHERE id = ?');
+    const getBotOrgStmt = this.db.prepare('SELECT org_id FROM bots WHERE id = ?');
     const getChannelOrgStmt = this.db.prepare('SELECT org_id FROM channels WHERE id = ?');
     const insertThreadStmt = this.db.prepare(`
       INSERT INTO threads (
@@ -1618,13 +1722,13 @@ export class HubDB {
     `);
 
     const tx = this.db.transaction(() => {
-      const initiatorRow = getAgentOrgStmt.get(initiatorId) as { org_id: string } | undefined;
+      const initiatorRow = getBotOrgStmt.get(initiatorId) as { org_id: string } | undefined;
       if (!initiatorRow || initiatorRow.org_id !== orgId) {
         throw new Error('Invalid initiator');
       }
 
       for (const participantId of uniqueParticipantIds) {
-        const participantRow = getAgentOrgStmt.get(participantId) as { org_id: string } | undefined;
+        const participantRow = getBotOrgStmt.get(participantId) as { org_id: string } | undefined;
         if (!participantRow || participantRow.org_id !== orgId) {
           throw new Error(`Participant not in org: ${participantId}`);
         }
@@ -1700,7 +1804,7 @@ export class HubDB {
     return rows.map(row => this.rowToThread(row));
   }
 
-  listThreadsForAgent(agentId: string, status?: ThreadStatus, limit = 200): Thread[] {
+  listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Thread[] {
     const base = `
       SELECT t.* FROM threads t
       JOIN thread_participants tp ON t.id = tp.thread_id
@@ -1711,8 +1815,8 @@ export class HubDB {
       ? `${base} AND t.status = ? ORDER BY t.last_activity_at DESC LIMIT ?`
       : `${base} ORDER BY t.last_activity_at DESC LIMIT ?`;
     const rows = status
-      ? (this.db.prepare(query).all(agentId, status, limit) as any[])
-      : (this.db.prepare(query).all(agentId, limit) as any[]);
+      ? (this.db.prepare(query).all(botId, status, limit) as any[])
+      : (this.db.prepare(query).all(botId, limit) as any[]);
     return rows.map(row => this.rowToThread(row));
   }
 
@@ -1817,8 +1921,8 @@ export class HubDB {
       throw new Error('Thread not found');
     }
 
-    const agent = this.getAgentById(botId);
-    if (!agent || agent.org_id !== thread.org_id) {
+    const bot = this.getBotById(botId);
+    if (!bot || bot.org_id !== thread.org_id) {
       throw new Error('Participant bot not found in thread org');
     }
 
@@ -2429,33 +2533,33 @@ export class HubDB {
 
   // ─── Webhook Status Operations ──────────────────────────
 
-  recordWebhookSuccess(agentId: string) {
+  recordWebhookSuccess(botId: string) {
     this.db.prepare(`
-      INSERT INTO webhook_status (agent_id, last_success, last_failure, consecutive_failures, degraded)
+      INSERT INTO webhook_status (bot_id, last_success, last_failure, consecutive_failures, degraded)
       VALUES (?, ?, NULL, 0, 0)
-      ON CONFLICT(agent_id) DO UPDATE SET
+      ON CONFLICT(bot_id) DO UPDATE SET
         last_success = ?,
         consecutive_failures = 0,
         degraded = 0
-    `).run(agentId, Date.now(), Date.now());
+    `).run(botId, Date.now(), Date.now());
   }
 
-  recordWebhookFailure(agentId: string) {
+  recordWebhookFailure(botId: string) {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO webhook_status (agent_id, last_success, last_failure, consecutive_failures, degraded)
+      INSERT INTO webhook_status (bot_id, last_success, last_failure, consecutive_failures, degraded)
       VALUES (?, NULL, ?, 1, 0)
-      ON CONFLICT(agent_id) DO UPDATE SET
+      ON CONFLICT(bot_id) DO UPDATE SET
         last_failure = ?,
         consecutive_failures = consecutive_failures + 1,
         degraded = CASE WHEN consecutive_failures + 1 >= 10 THEN 1 ELSE degraded END
-    `).run(agentId, now, now);
+    `).run(botId, now, now);
   }
 
-  getWebhookHealth(agentId: string): WebhookHealth | null {
+  getWebhookHealth(botId: string): WebhookHealth | null {
     const row = this.db.prepare(
-      'SELECT * FROM webhook_status WHERE agent_id = ?'
-    ).get(agentId) as any;
+      'SELECT * FROM webhook_status WHERE bot_id = ?'
+    ).get(botId) as any;
     if (!row) return null;
     return {
       healthy: row.consecutive_failures === 0,
@@ -2466,17 +2570,17 @@ export class HubDB {
     };
   }
 
-  isWebhookDegraded(agentId: string): boolean {
+  isWebhookDegraded(botId: string): boolean {
     const row = this.db.prepare(
-      'SELECT degraded FROM webhook_status WHERE agent_id = ?'
-    ).get(agentId) as any;
+      'SELECT degraded FROM webhook_status WHERE bot_id = ?'
+    ).get(botId) as any;
     return !!row?.degraded;
   }
 
-  resetWebhookDegraded(agentId: string) {
+  resetWebhookDegraded(botId: string) {
     this.db.prepare(`
-      UPDATE webhook_status SET degraded = 0, consecutive_failures = 0 WHERE agent_id = ?
-    `).run(agentId);
+      UPDATE webhook_status SET degraded = 0, consecutive_failures = 0 WHERE bot_id = ?
+    `).run(botId);
   }
 
   // ─── Org Settings Operations ────────────────────────────

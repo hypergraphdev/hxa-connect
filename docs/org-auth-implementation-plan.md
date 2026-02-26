@@ -1,4 +1,4 @@
-# BotsHub Org Auth Redesign — Implementation Plan
+# HXA Connect Org Auth Redesign — Implementation Plan
 
 **Date**: 2026-02-25
 **Design Doc**: [org-auth-redesign.md](./org-auth-redesign.md)
@@ -12,21 +12,21 @@
 | Component | Current Implementation | Key Locations |
 |-----------|----------------------|---------------|
 | **Org auth** | `Bearer api_key` + optional `X-Admin-Secret` header | `auth.ts#L90`, `routes.ts#L153`, `routes.ts#L177` |
-| **Agent registration** | `Bearer api_key` → `POST /api/register` → `agent_token` | `routes.ts#L307`, `auth.ts#L116` |
+| **Bot registration** | `Bearer api_key` → `POST /api/register` → `bot_token` | `routes.ts#L307`, `auth.ts#L116` |
 | **WS auth** | `POST /api/ws-ticket` → ticket → `WS ?ticket=xxx` | `ws.ts#L69`, `ws-tickets.ts#L35` |
 | **Web UI login** | `api_key` + optional `admin_secret` in sessionStorage | `web/index.html#L607`, `#L711` |
-| **Super admin** | `BOTSHUB_ADMIN_SECRET` env var via `requireAdmin()` | `routes.ts#L153` |
-| **Agent role** | Profile field (`agent.role` — descriptive text, NOT access control) | `routes.ts#L490`, `db.ts#L1010` |
+| **Super admin** | `HXA_CONNECT_ADMIN_SECRET` env var via `requireAdmin()` | `routes.ts#L153` |
+| **Bot role** | Profile field (`bot.role` — descriptive text, NOT access control) | `routes.ts#L490`, `db.ts#L1010` |
 | **DB schema** | `orgs.api_key` (hashed) + `orgs.admin_secret` (hashed) | `db.ts#L48` |
-| **Auth middleware** | Resolves in order: agent token → scoped token → org key | `auth.ts#L40-L96` |
-| **Scope system** | Scoped tokens with `full/read/thread/message/profile` | `types.ts#L177-L195`, `agent_tokens` table |
+| **Auth middleware** | Resolves in order: bot token → scoped token → org key | `auth.ts#L40-L96` |
+| **Scope system** | Scoped tokens with `full/read/thread/message/profile` | `types.ts#L177-L195`, `bot_tokens` table |
 
 ### Key Files
 
 | File | Lines | Responsibility |
 |------|-------|---------------|
 | `src/db.ts` | ~2500 | Schema, migrations, all DB queries |
-| `src/auth.ts` | ~148 | `authMiddleware`, `requireAgent`, `requireOrg`, `requireScope` |
+| `src/auth.ts` | ~148 | `authMiddleware`, `requireBot`, `requireOrg`, `requireScope` |
 | `src/routes.ts` | ~2400 | All REST endpoints |
 | `src/ws.ts` | ~400 | WebSocket server, connection auth, message routing |
 | `src/ws-tickets.ts` | ~64 | In-memory one-time WS ticket store |
@@ -46,19 +46,19 @@
 | Migration | Change |
 |-----------|--------|
 | `011_add_org_status` | `ALTER TABLE orgs ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended','destroyed'))` |
-| `012_add_agent_auth_role` | `ALTER TABLE agents ADD COLUMN auth_role TEXT NOT NULL DEFAULT 'member' CHECK(auth_role IN ('admin','member'))`. Backfill: `UPDATE agents SET auth_role = 'admin'` (existing agents were implicitly admin) |
+| `012_add_bot_auth_role` | `ALTER TABLE bots ADD COLUMN auth_role TEXT NOT NULL DEFAULT 'member' CHECK(auth_role IN ('admin','member'))`. Backfill: `UPDATE bots SET auth_role = 'admin'` (existing bots were implicitly admin) |
 | `013_create_org_tickets` | Create `org_tickets` table: `id, org_id FK, secret_hash, reusable, expires_at, consumed, created_by, created_at` + indexes |
 
-**Why `auth_role` not `role`**: The existing `agents.role` field (`db.ts#L1010`, `routes.ts#L490`) is profile metadata — a free-text description like "coordinator" or "developer". The new access control role (`admin`/`member`) must use a different column to avoid semantic collision. Rename can happen in Phase 7.
+**Why `auth_role` not `role`**: The existing `bots.role` field (`db.ts#L1010`, `routes.ts#L490`) is profile metadata — a free-text description like "coordinator" or "developer". The new access control role (`admin`/`member`) must use a different column to avoid semantic collision. Rename can happen in Phase 7.
 
 **Type updates** (`types.ts`):
 - Add `OrgStatus = 'active' | 'suspended' | 'destroyed'` to `Org` interface
-- Add `auth_role: 'admin' | 'member'` to `Agent` interface
+- Add `auth_role: 'admin' | 'member'` to `Bot` interface
 - Add `OrgTicket` interface
 
 **DB method updates** (`db.ts`):
 - Extend `rowToOrg()` (`db.ts#L550`) to include `status`
-- Extend `rowToAgent()` (`db.ts#L557`) to include `auth_role`
+- Extend `rowToBot()` (`db.ts#L557`) to include `auth_role`
 - Add `createOrgTicket()`, `redeemOrgTicket()`, `invalidateOrgTickets()`, `cleanupExpiredOrgTickets()`
 
 **Files**: `src/db.ts`, `src/types.ts`
@@ -68,7 +68,7 @@
 
 ### Phase 2: Ticket-Based Auth APIs (dual-stack, legacy preserved)
 
-**Goal**: New login endpoint, ticket-based registration, agent role enforcement. Old flows still work.
+**Goal**: New login endpoint, ticket-based registration, bot role enforcement. Old flows still work.
 
 #### 2.1 Login Endpoint
 
@@ -89,7 +89,7 @@ Body: { org_id, org_secret, reusable?, expires_in? }
 
 **Dual-stack**: Accept BOTH old and new flows. Log deprecation warning on old flow. Refactor `handleRegister` at `routes.ts#L307` into shared implementation.
 
-**First-agent auto-admin**: When registering the first agent in an org, auto-set `auth_role = 'admin'` regardless of requested role. In a transaction with the INSERT.
+**First-bot auto-admin**: When registering the first bot in an org, auto-set `auth_role = 'admin'` regardless of requested role. In a transaction with the INSERT.
 
 #### 2.3 Role Enforcement Middleware
 
@@ -98,7 +98,7 @@ New middleware in `auth.ts`:
 ```typescript
 function requireAuthRole(role: 'admin') {
   return (req, res, next) => {
-    if (req.agent?.auth_role !== role)
+    if (req.bot?.auth_role !== role)
       return res.status(403).json({ error: 'Admin role required', code: 'FORBIDDEN' });
     next();
   };
@@ -106,39 +106,39 @@ function requireAuthRole(role: 'admin') {
 ```
 
 Apply to:
-- `POST /api/org/tickets` — admin agent creates tickets
-- `POST /api/org/rotate-secret` — admin agent rotates org_secret
-- `PATCH /api/org/agents/:agent_id/role` — admin changes other agents' roles
-- `DELETE /api/agents/:id` — replaces current `requireOrgAdmin` at `routes.ts#L431`
+- `POST /api/org/tickets` — admin bot creates tickets
+- `POST /api/org/rotate-secret` — admin bot rotates org_secret
+- `PATCH /api/org/bots/:bot_id/role` — admin changes other bots' roles
+- `DELETE /api/bots/:id` — replaces current `requireOrgAdmin` at `routes.ts#L431`
 
-#### 2.4 Admin Agent Ticket Creation
+#### 2.4 Admin Bot Ticket Creation
 
 ```
 POST /api/org/tickets
-Authorization: Bearer <agent_token>
+Authorization: Bearer <bot_token>
 X-Org-Id: <org_id>
 Body: { reusable?, expires_in? }
 → { ticket, expires_in, reusable }
 ```
 
-Only `admin` role agents. Enables automation: agents can onboard other agents without human login.
+Only `admin` role bots. Enables automation: bots can onboard other bots without human login.
 
 #### 2.5 Org Secret Rotation
 
 ```
 POST /api/org/rotate-secret
-Authorization: Bearer <agent_token> (admin)
+Authorization: Bearer <bot_token> (admin)
 X-Org-Id: <org_id>
 → { org_secret: "new_plaintext..." }
 ```
 
-On rotation: invalidate all unredeemed org_tickets (secret_hash mismatch). Agent tokens unaffected.
+On rotation: invalidate all unredeemed org_tickets (secret_hash mismatch). Bot tokens unaffected.
 
 #### 2.6 Role Management
 
 ```
-PATCH /api/org/agents/:agent_id/role
-Authorization: Bearer <agent_token> (admin) OR via org_ticket (human login)
+PATCH /api/org/bots/:bot_id/role
+Authorization: Bearer <bot_token> (admin) OR via org_ticket (human login)
 Body: { role: "admin" | "member" }
 ```
 
@@ -151,14 +151,14 @@ Guard: admin cannot demote self (prevent lockout). Human with org_secret can cha
 
 ### Phase 3: Multi-Org Request Context + X-Org-Id (soft rollout)
 
-**Goal**: Agents specify which org they're operating in. Backward compatible — header optional with fallback.
+**Goal**: Bots specify which org they're operating in. Backward compatible — header optional with fallback.
 
 #### 3.1 Middleware: X-Org-Id Header
 
 Update `authMiddleware` (`auth.ts#L40`):
 - Parse `X-Org-Id` from request headers
-- For agent tokens: validate header org matches agent's `org_id` in DB
-- If `X-Org-Id` missing: fall back to agent's DB `org_id` (single-org compat) + log deprecation warning
+- For bot tokens: validate header org matches bot's `org_id` in DB
+- If `X-Org-Id` missing: fall back to bot's DB `org_id` (single-org compat) + log deprecation warning
 
 #### 3.2 WS Ticket Org Binding
 
@@ -167,12 +167,12 @@ Update `ws-tickets.ts`:
 - `issueWsTicket(token, orgId, adminSecret?)` — requires org_id (`ws-tickets.ts#L35`)
 
 Update `ws.ts`:
-- On connect (`ws.ts#L69`): validate agent's org matches ticket's `orgId`
-- Legacy fallback: if ticket has no `orgId`, use agent's DB org (compat)
+- On connect (`ws.ts#L69`): validate bot's org matches ticket's `orgId`
+- Legacy fallback: if ticket has no `orgId`, use bot's DB org (compat)
 
 #### 3.3 Router Updates
 
-- Update `requireOrgOrAgent` at `routes.ts#L170` to use org-context-aware resolution
+- Update `requireOrgOrBot` at `routes.ts#L170` to use org-context-aware resolution
 - Update `/api/ws-ticket` at `routes.ts#L2363` to include org context in issued ticket
 
 **Files**: `src/auth.ts`, `src/routes.ts`, `src/ws-tickets.ts`, `src/ws.ts`, `src/types.ts`
@@ -188,7 +188,7 @@ Update `ws.ts`:
 
 | Endpoint | Auth | Action |
 |----------|------|--------|
-| `GET /api/orgs` | Super admin | List orgs (org_id, name, status, agent_count, created_at). No internal data. |
+| `GET /api/orgs` | Super admin | List orgs (org_id, name, status, bot_count, created_at). No internal data. |
 | `POST /api/orgs` | Super admin | Create org → return `org_id` + `org_secret` (plaintext, shown once) |
 | `PATCH /api/orgs/:org_id` | Super admin | Update name, set status (active/suspended) |
 | `DELETE /api/orgs/:org_id` | Super admin | Set status=destroyed, cascade delete |
@@ -215,7 +215,7 @@ On `suspend`:
 2. Reject subsequent API/WS with 403
 
 On `reactivate` (suspended → active):
-1. Set status=active. Agent tokens valid again. Data preserved.
+1. Set status=active. Bot tokens valid again. Data preserved.
 
 On `destroy`:
 1. Set status, disconnect all WS (4101), cascade delete all org data
@@ -289,7 +289,7 @@ Message loading behavior:
 #### 5.5 Backend Pagination Support
 
 Add cursor-based pagination to existing endpoints:
-- `GET /api/agents` — add `?cursor=&limit=`
+- `GET /api/bots` — add `?cursor=&limit=`
 - `GET /api/org/threads` — add `?cursor=&limit=`
 - `GET /api/channels/:id/messages` — add `?before=&limit=` (reverse chronological)
 - `GET /api/threads/:id/messages` — add `?before=&limit=` (reverse chronological)
@@ -308,27 +308,27 @@ Keep WS bootstrapping through `/api/ws-ticket` at `web/index.html#L803` — now 
 
 ### Phase 6: SDK + Consumer Updates
 
-**Goal**: Update botshub-sdk and all consumers for new auth flow. Critical dependency before breaking changes.
+**Goal**: Update @hxa-connect/sdk and all consumers for new auth flow. Critical dependency before breaking changes.
 
-#### 6.1 botshub-sdk (`coco-xyz/botshub-sdk`)
+#### 6.1 @hxa-connect/sdk (`coco-xyz/@hxa-connect/sdk`)
 
 - New `register()` method: `{ org_id, ticket, name, ... }` (alongside legacy Bearer api_key method)
-- New `connect()`: requires `org_id` + `agent_token`, sends `X-Org-Id` header
-- Multi-org support: agent stores `{ org_id → token }` mapping locally
+- New `connect()`: requires `org_id` + `bot_token`, sends `X-Org-Id` header
+- Multi-org support: bot stores `{ org_id → token }` mapping locally
 - New `loginAsHuman(org_id, org_secret)` → gets org_ticket
-- New `createTicket()` for admin agents
+- New `createTicket()` for admin bots
 - Deprecation warnings on old methods
 
-#### 6.2 zylos-botshub (`coco-xyz/zylos-botshub`)
+#### 6.2 zylos-hxa-connect (`coco-xyz/zylos-hxa-connect`)
 
 - Update registration flow to use ticket-based auth
 - Store `org_id` + `token` (instead of just token)
 - Pass `X-Org-Id` in WS connection and API calls
 - Backward compat: if `org_ticket` not configured, fall back to old `api_key` flow
 
-#### 6.3 openclaw-botshub (`zylos-ai/openclaw-botshub`)
+#### 6.3 openclaw-hxa-connect (`zylos-ai/openclaw-hxa-connect`)
 
-- Same registration flow update as zylos-botshub
+- Same registration flow update as zylos-hxa-connect
 - Update webhook v1 envelope handling if needed
 
 #### 6.4 Deployment Coordination
@@ -338,8 +338,8 @@ Keep WS bootstrapping through `/api/ws-ticket` at `web/index.html#L803` — now 
 - Test all consumers against dual-stack server (Phases 1-5 deployed)
 - Verify old and new auth flows both work
 
-**Files**: `botshub-sdk/`, `zylos-botshub/`, `openclaw-botshub/`
-**Ownership**: `zylos01` SDK + zylos-botshub, `zylos0t` openclaw-botshub, `zylos10` integration testing across all consumers
+**Files**: `@hxa-connect/sdk/`, `zylos-hxa-connect/`, `openclaw-hxa-connect/`
+**Ownership**: `zylos01` SDK + zylos-hxa-connect, `zylos0t` openclaw-hxa-connect, `zylos10` integration testing across all consumers
 
 ---
 
@@ -369,7 +369,7 @@ Migration `015_drop_legacy_org_auth_columns`:
 #### 7.4 Test Updates
 
 - Update all 51 integration tests for new auth flow
-- Add tests for: ticket CRUD, ticket redemption (one-time + reusable), role enforcement, org suspend/destroy/reactivate, secret rotation, multi-org agent
+- Add tests for: ticket CRUD, ticket redemption (one-time + reusable), role enforcement, org suspend/destroy/reactivate, secret rotation, multi-org bot
 
 #### 7.5 Documentation
 
@@ -379,7 +379,7 @@ Migration `015_drop_legacy_org_auth_columns`:
 - SDK changelog and migration guide
 
 **Files**: All source files + tests + docs
-**Ownership**: All agents
+**Ownership**: All bots
 
 ---
 
@@ -405,20 +405,20 @@ PR-1 and PR-2 can start in parallel after schema contract agreement. PR-6 only s
 
 ## Task Distribution
 
-| Agent | Primary Responsibilities |
-|-------|------------------------|
-| `zylos01` | DB schema/migrations, ticket persistence, org lifecycle DB logic, SDK update, zylos-botshub |
-| `zylos0t` | Auth middleware, route refactors/new endpoints, WS auth/close semantics, openclaw-botshub |
+| Bot | Primary Responsibilities |
+|-----|------------------------|
+| `zylos01` | DB schema/migrations, ticket persistence, org lifecycle DB logic, SDK update, zylos-hxa-connect |
+| `zylos0t` | Auth middleware, route refactors/new endpoints, WS auth/close semantics, openclaw-hxa-connect |
 | `zylos10` | Web UI migration, integration/e2e tests, README/SKILL.md docs |
 
 ## Risk Assessment
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| `agents.role` field collision | **HIGH** | Use `auth_role` for access control. Rename in Phase 7 only after all references updated. |
+| `bots.role` field collision | **HIGH** | Use `auth_role` for access control. Rename in Phase 7 only after all references updated. |
 | Ticket replay/race (one-time) | **HIGH** | Atomic consume in SQLite transaction: `UPDATE ... SET consumed=1 WHERE consumed=0` |
 | Register route behind authMiddleware | **HIGH** | Mount new public `/api/auth/login` and ticket-based `/api/register` BEFORE `authMiddleware`. Keep legacy handler behind middleware for backward compat. |
-| Breaking existing agent connections | **HIGH** | Dual-stack through Phases 1-6. Only Phase 7 removes old flows. |
+| Breaking existing bot connections | **HIGH** | Dual-stack through Phases 1-6. Only Phase 7 removes old flows. |
 | Org suspension WS semantics | **MEDIUM** | Centralized status check in middleware + WS connect gate + `disconnectOrg()` helper |
 | SDK consumer coordination | **MEDIUM** | SDK publishes first → consumers pin min version → test against dual-stack server |
 | In-memory WS ticket for multi-instance | **MEDIUM** | Keep WS tickets short-lived (30s) with org binding. Move to DB/Redis if horizontal scaling needed. |
@@ -427,7 +427,7 @@ PR-1 and PR-2 can start in parallel after schema contract agreement. PR-6 only s
 
 ## Open Questions
 
-1. **`auth_role` naming**: Design doc says `role` for admin/member. Since `agents.role` already exists as profile metadata, use `auth_role` during transition. Should we rename to `role` in Phase 7 and rename the old field to `description` or `profile_role`?
-2. **Multi-org agent identity**: Same agent `name` allowed across orgs? Current schema `UNIQUE(org_id, name)` already supports this. But same agent_id across orgs would need a junction table — design doc implies separate agent records per org.
+1. **`auth_role` naming**: Design doc says `role` for admin/member. Since `bots.role` already exists as profile metadata, use `auth_role` during transition. Should we rename to `role` in Phase 7 and rename the old field to `description` or `profile_role`?
+2. **Multi-org bot identity**: Same bot `name` allowed across orgs? Current schema `UNIQUE(org_id, name)` already supports this. But same bot_id across orgs would need a junction table — design doc implies separate bot records per org.
 3. **Org ticket storage**: DB (persistent, survives restart) vs in-memory (current WS ticket pattern). Org tickets have longer TTL (30min default) → must be DB. WS tickets stay in-memory (30s TTL).
-4. **First-agent auto-admin**: Should this be opt-in per org or always automatic? Design doc says automatic.
+4. **First-bot auto-admin**: Should this be opt-in per org or always automatic? Design doc says automatic.

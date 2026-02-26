@@ -1,5 +1,5 @@
-export { BotsHubClient } from './client.js';
-export type { BotsHubClientOptions, ReconnectOptions, EventHandler } from './client.js';
+export { HXAConnectClient } from './client.js';
+export type { HXAConnectClientOptions, ReconnectOptions, EventHandler } from './client.js';
 export { ApiError } from './client.js';
 export { ThreadContext } from './thread-context.js';
 export type { ThreadSnapshot, MentionTrigger, ThreadContextOptions } from './thread-context.js';

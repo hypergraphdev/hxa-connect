@@ -1,18 +1,18 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { HubDB } from './db.js';
-import type { Agent, Org, TokenScope } from './types.js';
+import type { Bot, Org, TokenScope } from './types.js';
 import { SCOPE_REQUIREMENTS } from './types.js';
 
 // Extend Express Request to include auth context
 declare global {
   namespace Express {
     interface Request {
-      agent?: Agent;
+      bot?: Bot;
       org?: Org;
-      authType?: 'agent' | 'org';
-      /** Token scopes for the current request. Primary agent tokens have ['full']. */
+      authType?: 'bot' | 'org';
+      /** Token scopes for the current request. Primary bot tokens have ['full']. */
       tokenScopes?: TokenScope[];
-      /** ID of the scoped token used (null if primary agent token or org ticket). */
+      /** ID of the scoped token used (null if primary bot token or org ticket). */
       scopedTokenId?: string;
       /** The raw plaintext token from the request (for ws-ticket exchange). */
       rawToken?: string;
@@ -34,8 +34,8 @@ function extractToken(req: Request): string | undefined {
 }
 
 /**
- * Middleware: Authenticate as agent (via agent token) or org (via reusable ticket)
- * Sets req.agent, req.org, and req.tokenScopes
+ * Middleware: Authenticate as bot (via bot token) or org (via reusable ticket)
+ * Sets req.bot, req.org, and req.tokenScopes
  */
 export function authMiddleware(db: HubDB) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -49,26 +49,26 @@ export function authMiddleware(db: HubDB) {
     // Store raw token for downstream handlers (e.g. ws-ticket exchange)
     req.rawToken = token;
 
-    // Try primary agent token first
-    const agent = db.getAgentByToken(token);
-    if (agent) {
+    // Try primary bot token first
+    const bot = db.getBotByToken(token);
+    if (bot) {
       // Phase 3: Validate X-Org-Id header if present
       const requestedOrgId = req.headers['x-org-id'] as string | undefined;
       if (requestedOrgId) {
-        if (requestedOrgId !== agent.org_id) {
+        if (requestedOrgId !== bot.org_id) {
           res.status(403).json({
-            error: 'Agent does not belong to the requested organization',
+            error: 'Bot does not belong to the requested organization',
             code: 'ORG_MISMATCH',
           });
           return;
         }
       }
-      // No X-Org-Id header — fall back to agent's DB org (single-org compat)
+      // No X-Org-Id header — fall back to bot's DB org (single-org compat)
       // In Phase 7 this will become a deprecation warning
 
-      req.agent = agent;
-      req.org = db.getOrgById(agent.org_id);
-      req.authType = 'agent';
+      req.bot = bot;
+      req.org = db.getOrgById(bot.org_id);
+      req.authType = 'bot';
       req.tokenScopes = ['full'];
       // Check org status
       if (req.org) {
@@ -81,38 +81,38 @@ export function authMiddleware(db: HubDB) {
           return;
         }
       }
-      // W3: HTTP requests update last_seen but do NOT mark agent online.
+      // W3: HTTP requests update last_seen but do NOT mark bot online.
       // Online status is managed exclusively by WS connections.
-      db.touchAgentLastSeen(agent.id);
+      db.touchBotLastSeen(bot.id);
       next();
       return;
     }
 
-    // Try scoped agent token
-    const scopedToken = db.getAgentTokenByToken(token);
+    // Try scoped bot token
+    const scopedToken = db.getBotTokenByToken(token);
     if (scopedToken) {
       // Check expiration
       if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
         res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
         return;
       }
-      const scopedAgent = db.getAgentById(scopedToken.agent_id);
-      if (scopedAgent) {
+      const scopedBot = db.getBotById(scopedToken.bot_id);
+      if (scopedBot) {
         // Phase 3: Validate X-Org-Id header if present
         const requestedOrgId = req.headers['x-org-id'] as string | undefined;
         if (requestedOrgId) {
-          if (requestedOrgId !== scopedAgent.org_id) {
+          if (requestedOrgId !== scopedBot.org_id) {
             res.status(403).json({
-              error: 'Agent does not belong to the requested organization',
+              error: 'Bot does not belong to the requested organization',
               code: 'ORG_MISMATCH',
             });
             return;
           }
         }
 
-        req.agent = scopedAgent;
-        req.org = db.getOrgById(scopedAgent.org_id);
-        req.authType = 'agent';
+        req.bot = scopedBot;
+        req.org = db.getOrgById(scopedBot.org_id);
+        req.authType = 'bot';
         req.tokenScopes = scopedToken.scopes;
         req.scopedTokenId = scopedToken.id;
         // Check org status
@@ -126,9 +126,9 @@ export function authMiddleware(db: HubDB) {
             return;
           }
         }
-        // W3: HTTP requests update last_seen but do NOT mark agent online.
-        db.touchAgentLastSeen(scopedAgent.id);
-        db.touchAgentToken(scopedToken.id);
+        // W3: HTTP requests update last_seen but do NOT mark bot online.
+        db.touchBotLastSeen(scopedBot.id);
+        db.touchBotToken(scopedToken.id);
         next();
         return;
       }
@@ -159,11 +159,11 @@ export function authMiddleware(db: HubDB) {
 }
 
 /**
- * Middleware: Require agent authentication
+ * Middleware: Require bot authentication
  */
-export function requireAgent(req: Request, res: Response, next: NextFunction) {
-  if (!req.agent) {
-    res.status(403).json({ error: 'Agent authentication required', code: 'FORBIDDEN' });
+export function requireBot(req: Request, res: Response, next: NextFunction) {
+  if (!req.bot) {
+    res.status(403).json({ error: 'Bot authentication required', code: 'FORBIDDEN' });
     return;
   }
   next();
@@ -181,16 +181,16 @@ export function requireOrg(req: Request, res: Response, next: NextFunction) {
 }
 
 /**
- * Middleware factory: Require a specific auth_role on the current agent.
- * Only agents with the specified role can proceed.
+ * Middleware factory: Require a specific auth_role on the current bot.
+ * Only bots with the specified role can proceed.
  */
 export function requireAuthRole(role: 'admin') {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.agent) {
-      res.status(403).json({ error: 'Agent authentication required', code: 'FORBIDDEN' });
+    if (!req.bot) {
+      res.status(403).json({ error: 'Bot authentication required', code: 'FORBIDDEN' });
       return;
     }
-    if (req.agent.auth_role !== role) {
+    if (req.bot.auth_role !== role) {
       res.status(403).json({ error: `Auth role '${role}' required`, code: 'FORBIDDEN' });
       return;
     }

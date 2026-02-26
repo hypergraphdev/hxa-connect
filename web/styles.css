@@ -472,13 +472,13 @@ body {
   border-radius: 12px;
 }
 
-.agent-status {
+.bot-status {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.agent-status .agent-name {
+.bot-status .bot-name {
   flex: 1;
   font-weight: 500;
 }

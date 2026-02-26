@@ -96,7 +96,7 @@ export class WebhookManager {
 
   /**
    * Deliver a webhook payload with retry logic and HMAC signing.
-   * Returns true on success, false on failure or if agent is degraded.
+   * Returns true on success, false on failure or if bot is degraded.
    * Non-blocking: callers should fire-and-forget (no await).
    *
    * When webhook_secret is set, the request includes:
@@ -105,13 +105,13 @@ export class WebhookManager {
    * - X-Hub-Timestamp: <unix_ms> (request timestamp for replay protection)
    */
   async deliver(
-    agentId: string,
+    botId: string,
     webhookUrl: string,
     webhookSecret: string | null,
     payload: unknown,
   ): Promise<boolean> {
     // Check if degraded — skip delivery
-    if (this.db.isWebhookDegraded(agentId)) {
+    if (this.db.isWebhookDegraded(botId)) {
       return false;
     }
 
@@ -122,14 +122,14 @@ export class WebhookManager {
     try {
       parsed = new URL(webhookUrl);
     } catch {
-      webhookLogger.warn({ agentId }, 'Invalid webhook URL at delivery time');
+      webhookLogger.warn({ botId }, 'Invalid webhook URL at delivery time');
       return false;
     }
     const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
     try {
       const { address } = await lookup(hostname);
       if (isPrivateIP(address)) {
-        webhookLogger.warn({ agentId }, 'Blocked webhook — resolved to private IP at delivery time');
+        webhookLogger.warn({ botId }, 'Blocked webhook — resolved to private IP at delivery time');
         return false;
       }
     } catch {
@@ -166,19 +166,19 @@ export class WebhookManager {
         });
 
         if (res.ok || (res.status >= 200 && res.status < 300)) {
-          this.db.recordWebhookSuccess(agentId);
+          this.db.recordWebhookSuccess(botId);
           return true;
         }
 
-        webhookLogger.warn({ agentId, attempt: attempt + 1, status: res.status }, 'Webhook delivery attempt failed');
+        webhookLogger.warn({ botId, attempt: attempt + 1, status: res.status }, 'Webhook delivery attempt failed');
       } catch (err: any) {
-        webhookLogger.warn({ agentId, attempt: attempt + 1, err: err.message }, 'Webhook delivery attempt error');
+        webhookLogger.warn({ botId, attempt: attempt + 1, err: err.message }, 'Webhook delivery attempt error');
       }
     }
 
     // All retries failed
-    this.db.recordWebhookFailure(agentId);
-    webhookLogger.error({ agentId }, 'Webhook delivery failed after all retries');
+    this.db.recordWebhookFailure(botId);
+    webhookLogger.error({ botId }, 'Webhook delivery failed after all retries');
     return false;
   }
 }

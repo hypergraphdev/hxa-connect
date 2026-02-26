@@ -1,6 +1,6 @@
 import type {
-  Agent,
-  AgentProfileInput,
+  Bot,
+  BotProfileInput,
   Artifact,
   ArtifactInput,
   CatchupCountResponse,
@@ -91,10 +91,10 @@ export interface ReconnectOptions {
   maxAttempts?: number;
 }
 
-export interface BotsHubClientOptions {
-  /** Base URL of the BotsHub server (e.g. "http://localhost:4800") */
+export interface HXAConnectClientOptions {
+  /** Base URL of the HXA Connect server (e.g. "http://localhost:4800") */
   url: string;
-  /** Agent authentication token */
+  /** Bot authentication token */
   token: string;
   /** HTTP request timeout in milliseconds (default: 30000) */
   timeout?: number;
@@ -106,7 +106,7 @@ export interface BotsHubClientOptions {
 
 export type EventHandler = (data: any) => void;
 
-export class BotsHubClient {
+export class HXAConnectClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly timeout: number;
@@ -120,7 +120,7 @@ export class BotsHubClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalDisconnect = false;
 
-  constructor(options: BotsHubClientOptions) {
+  constructor(options: HXAConnectClientOptions) {
     // Strip trailing slash
     this.baseUrl = options.url.replace(/\/+$/, '');
     this.token = options.token;
@@ -190,7 +190,7 @@ export class BotsHubClient {
   // ─── WebSocket Connection ────────────────────────────────
 
   /**
-   * Connect to the BotsHub WebSocket for real-time events.
+   * Connect to the HXA Connect WebSocket for real-time events.
    * Events are received via the `.on()` method.
    * Auto-reconnects on unexpected disconnect (configurable via `reconnect` options).
    */
@@ -291,7 +291,7 @@ export class BotsHubClient {
    *
    * Supported event types match WsServerEvent.type:
    * - `message` — Channel message received
-   * - `agent_online` / `agent_offline` — Bot presence changes
+   * - `bot_online` / `bot_offline` — Bot presence changes
    * - `channel_created` — New channel created
    * - `thread_created` / `thread_updated` — Thread lifecycle
    * - `thread_message` — Message in a thread
@@ -580,7 +580,7 @@ export class BotsHubClient {
   // ─── Files ───────────────────────────────────────────────
 
   /**
-   * Upload a file to the BotsHub server.
+   * Upload a file to the HXA Connect server.
    * Works in both Node.js (Buffer) and browser (Blob/File) environments.
    */
   async uploadFile(
@@ -662,22 +662,22 @@ export class BotsHubClient {
   /**
    * Get the current bot's profile.
    */
-  getProfile(): Promise<Agent> {
-    return this.get<Agent>('/api/me');
+  getProfile(): Promise<Bot> {
+    return this.get<Bot>('/api/me');
   }
 
   /**
    * Update the current bot's profile fields.
    */
-  updateProfile(fields: AgentProfileInput): Promise<Agent> {
-    return this.patch<Agent>('/api/me/profile', fields);
+  updateProfile(fields: BotProfileInput): Promise<Bot> {
+    return this.patch<Bot>('/api/me/profile', fields);
   }
 
   /**
    * List other bots in the same organization.
    */
-  listPeers(): Promise<Agent[]> {
-    return this.get<Agent[]>('/api/peers');
+  listPeers(): Promise<Bot[]> {
+    return this.get<Bot[]>('/api/peers');
   }
 
   // ─── Scoped Tokens ──────────────────────────────────────

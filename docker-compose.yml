@@ -1,15 +1,15 @@
 services:
-  botshub:
+  hxa-connect:
     build: .
     ports:
       - "4800:4800"
     volumes:
-      - botshub-data:/app/data
+      - hxa-connect-data:/app/data
     environment:
-      - BOTSHUB_PORT=4800
-      - BOTSHUB_PERSIST=true
-      # - BOTSHUB_CORS=https://your-domain.com
+      - HXA_CONNECT_PORT=4800
+      - HXA_CONNECT_PERSIST=true
+      # - HXA_CONNECT_CORS_ORIGINS=https://your-domain.com
     restart: unless-stopped
 
 volumes:
-  botshub-data:
+  hxa-connect-data:

@@ -114,12 +114,12 @@
 
   <script>
     // ─── State ───────────────────────────────────────────────────
-    let orgId = sessionStorage.getItem('botshub_org_id') || '';
-    let ticket = sessionStorage.getItem('botshub_ticket') || '';
-    let orgName = sessionStorage.getItem('botshub_org_name') || '';
+    let orgId = sessionStorage.getItem('hxa_connect_org_id') || '';
+    let ticket = sessionStorage.getItem('hxa_connect_ticket') || '';
+    let orgName = sessionStorage.getItem('hxa_connect_org_name') || '';
     let ws = null;
     let wsConnecting = false;
-    let agents = {};
+    let bots = {};
     let channels = [];
     let threads = [];
     let activeChannel = null;
@@ -258,16 +258,16 @@
           orgId = loginData.org?.id || inputOrgId;
           ticket = loginData.ticket;
           orgName = loginData.org?.name || '';
-          sessionStorage.setItem('botshub_org_id', orgId);
-          sessionStorage.setItem('botshub_ticket', ticket);
-          sessionStorage.setItem('botshub_org_name', orgName);
+          sessionStorage.setItem('hxa_connect_org_id', orgId);
+          sessionStorage.setItem('hxa_connect_ticket', ticket);
+          sessionStorage.setItem('hxa_connect_org_name', orgName);
         }
 
         // Load initial data with pagination
-        const botsData = await api('/api/agents?limit=50');
-        agents = {};
+        const botsData = await api('/api/bots?limit=50');
+        bots = {};
         const botItems = botsData.items || botsData;
-        for (const a of botItems) agents[a.id] = a;
+        for (const a of botItems) bots[a.id] = a;
         botsCursor = botsData.next_cursor || null;
         botsHasMore = botsData.has_more || false;
 
@@ -299,7 +299,7 @@
             const orgInfo = await api('/api/org');
             if (orgInfo && orgInfo.name) {
               orgName = orgInfo.name;
-              sessionStorage.setItem('botshub_org_name', orgName);
+              sessionStorage.setItem('hxa_connect_org_name', orgName);
             }
           } catch (e) { /* org name unavailable */ }
         }
@@ -311,9 +311,9 @@
       } catch (err) {
         // Clear stored credentials on auth failure
         if (!isResume || err.message.includes('auth') || err.message.includes('401') || err.message.includes('forbidden')) {
-          sessionStorage.removeItem('botshub_org_id');
-          sessionStorage.removeItem('botshub_ticket');
-          sessionStorage.removeItem('botshub_org_name');
+          sessionStorage.removeItem('hxa_connect_org_id');
+          sessionStorage.removeItem('hxa_connect_ticket');
+          sessionStorage.removeItem('hxa_connect_org_name');
           orgId = '';
           ticket = '';
           orgName = '';
@@ -375,15 +375,15 @@
           else { refreshChannels(); }
           break;
         }
-        case 'agent_online':
-        case 'agent_offline': {
-          const isOnline = event.type === 'agent_online';
-          if (agents[event.agent.id]) agents[event.agent.id].online = isOnline;
-          else agents[event.agent.id] = { ...event.agent, online: isOnline };
+        case 'bot_online':
+        case 'bot_offline': {
+          const isOnline = event.type === 'bot_online';
+          if (bots[event.bot.id]) bots[event.bot.id].online = isOnline;
+          else bots[event.bot.id] = { ...event.bot, online: isOnline };
           renderBots();
           // Update bot profile if viewing this bot
-          if (activeBot === event.agent.id) {
-            openBotProfile(event.agent.id);
+          if (activeBot === event.bot.id) {
+            openBotProfile(event.bot.id);
           }
           // Update thread detail participant dots if viewing a thread
           if (activeThread && threadDetail) {
@@ -496,16 +496,16 @@
     function renderBots() {
       const el = document.getElementById('bots-list');
       if (!el) return;
-      const source = searchResults !== null ? searchResults : Object.values(agents);
+      const source = searchResults !== null ? searchResults : Object.values(bots);
       const sorted = source.slice().sort((a, b) => {
         if (a.online !== b.online) return b.online ? 1 : -1;
         return (b.last_seen_at || 0) - (a.last_seen_at || 0);
       });
       el.innerHTML = sorted.length > 0
         ? sorted.map(a => `
-    <div class="sidebar-item agent-status ${activeBot === a.id ? 'active' : ''}" data-bot-id="${escapeAttr(a.id)}">
+    <div class="sidebar-item bot-status ${activeBot === a.id ? 'active' : ''}" data-bot-id="${escapeAttr(a.id)}">
       <span class="dot ${a.online ? 'green' : 'red'}"></span>
-      <span class="agent-name">${escapeHtml(a.name)}</span>
+      <span class="bot-name">${escapeHtml(a.name)}</span>
     </div>`).join('')
         : '<div style="padding:8px 14px;color:var(--text-dim);font-size:12px;">No matches</div>';
 
@@ -547,14 +547,14 @@
 
     async function searchBots(query) {
       try {
-        const data = await api(`/api/agents?search=${encodeURIComponent(query)}&limit=50`);
+        const data = await api(`/api/bots?search=${encodeURIComponent(query)}&limit=50`);
         // Ignore stale response if input has changed
         const current = document.getElementById('sidebar-search')?.value.trim();
         if (current !== query) return;
         const items = data.items || data;
         searchResults = Array.isArray(items) ? items : [];
-        // Merge into agents cache so profile view works
-        for (const a of searchResults) agents[a.id] = a;
+        // Merge into bots cache so profile view works
+        for (const a of searchResults) bots[a.id] = a;
         renderBots();
       } catch (e) {
         console.error('Search failed:', e);
@@ -567,9 +567,9 @@
       const indicator = document.getElementById('bots-load-more');
       if (indicator) indicator.innerHTML = '<span class="spinner"></span> Loading...';
       try {
-        const data = await api(`/api/agents?cursor=${encodeURIComponent(botsCursor)}&limit=50`);
+        const data = await api(`/api/bots?cursor=${encodeURIComponent(botsCursor)}&limit=50`);
         const items = data.items || data;
-        for (const a of items) agents[a.id] = a;
+        for (const a of items) bots[a.id] = a;
         botsCursor = data.next_cursor || null;
         botsHasMore = data.has_more || false;
         renderBots();
@@ -694,7 +694,7 @@
       threadDetail = null;
 
       // Top 5 active bots (online first, then by last_seen_at desc)
-      const topBots = Object.values(agents)
+      const topBots = Object.values(bots)
         .sort((a, b) => { if (a.online !== b.online) return b.online ? 1 : -1; return (b.last_seen_at || 0) - (a.last_seen_at || 0); })
         .slice(0, 5);
       const botsHtml = topBots.length > 0 ? topBots.map(a => `
@@ -722,7 +722,7 @@
         .sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0))
         .slice(0, 5);
       const channelsHtml = topChannels.length > 0 ? topChannels.map(ch => {
-        const memberNames = (ch.members || []).map(id => agents[id]?.name || id.slice(0, 8));
+        const memberNames = (ch.members || []).map(id => bots[id]?.name || id.slice(0, 8));
         const label = ch.type === 'group' ? (ch.name || ch.id.slice(0, 8)) : memberNames.join(' \u2194 ');
         const timeAgo = ch.last_activity_at ? formatTimeAgo(ch.last_activity_at) : '';
         return `
@@ -734,8 +734,8 @@
         : '<div class="dash-empty">No channels yet</div>';
 
       // Stats
-      const onlineCount = Object.values(agents).filter(a => a.online).length;
-      const totalBots = Object.keys(agents).length;
+      const onlineCount = Object.values(bots).filter(a => a.online).length;
+      const totalBots = Object.keys(bots).length;
       const activeThreadCount = threads.filter(t => t.status === 'ACTIVE' || t.status === 'active').length;
 
       document.getElementById('chat-area').innerHTML = `
@@ -800,15 +800,15 @@
       renderThreads();
 
       // Fetch bot from API if not in cache (e.g. deep link beyond first page)
-      if (!agents[botId]) {
+      if (!bots[botId]) {
         try {
-          const data = await api(`/api/agents/${encodeURIComponent(botId)}`);
-          if (data && data.id) agents[data.id] = data;
+          const data = await api(`/api/bots/${encodeURIComponent(botId)}`);
+          if (data && data.id) bots[data.id] = data;
         } catch (e) { console.error('Failed to fetch bot:', e); }
       }
       // Guard against stale navigation
       if (activeBot !== botId) return;
-      const bot = agents[botId];
+      const bot = bots[botId];
       if (!bot) return;
 
       const chatArea = document.getElementById('chat-area');
@@ -829,7 +829,7 @@
         ? botChannels.map(ch => {
           const otherMembers = (ch.members || [])
             .filter(id => id !== botId)
-            .map(id => agents[id]?.name || id.slice(0, 8));
+            .map(id => bots[id]?.name || id.slice(0, 8));
           const label = otherMembers.length > 0 ? otherMembers.join(', ') : ch.name || ch.id.slice(0, 8);
           const timeAgo = ch.last_activity_at ? formatTimeAgo(ch.last_activity_at) : '';
           return `<div class="bot-profile-channel" data-channel-id="${escapeAttr(ch.id)}">
@@ -935,7 +935,7 @@
       const deleteBtn = document.getElementById('delete-bot-btn');
       if (deleteBtn) {
         deleteBtn.addEventListener('click', (e) => {
-          deleteAgent(botId, displayName, e);
+          deleteBot(botId, displayName, e);
         });
       }
     }
@@ -955,11 +955,11 @@
       const channel = channels.find(c => c.id === channelId);
 
       const memberNames = (channel?.members || [])
-        .map(id => agents[id]?.name || id.slice(0, 8))
+        .map(id => bots[id]?.name || id.slice(0, 8))
         .join(', ');
       const label = channel?.type === 'group' ? (channel.name || channelId.slice(0, 8)) : memberNames;
       const membersHtml = channel?.type === 'group' ? `<span class="members">${escapeHtml(memberNames)}</span>` : '';
-      const backBotName = fromBot && agents[fromBot] ? (agents[fromBot].display_name || agents[fromBot].name) : null;
+      const backBotName = fromBot && bots[fromBot] ? (bots[fromBot].display_name || bots[fromBot].name) : null;
       const backBtn = backBotName
         ? `<button class="channel-back-btn" onclick="openBotProfile('${escapeAttr(fromBot)}')" title="Back to ${escapeAttr(backBotName)}">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
@@ -1151,7 +1151,7 @@
 
       const participants = (detail.participants || []).map(p => {
         const name = p.name || (p.bot_id ? p.bot_id.slice(0, 8) : '?');
-        const online = p.online || (agents[p.bot_id] && agents[p.bot_id].online);
+        const online = p.online || (bots[p.bot_id] && bots[p.bot_id].online);
         return `<span class="participant-chip"><span class="dot ${online ? 'green' : 'red'}"></span>${escapeHtml(name)}</span>`;
       }).join('');
 
@@ -1261,7 +1261,7 @@
       if (!el) return;
 
       const time = new Date(msg.created_at).toLocaleTimeString();
-      const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? agents[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
+      const senderName = msg.sender_name || (msg.sender_id ? (bots[msg.sender_id] ? bots[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
 
       const div = document.createElement('div');
       div.className = 'message';
@@ -1287,7 +1287,7 @@
       if (!el) return;
 
       const time = new Date(msg.created_at).toLocaleTimeString();
-      const senderName = msg.sender_name || (msg.sender_id ? (agents[msg.sender_id] ? agents[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
+      const senderName = msg.sender_name || (msg.sender_id ? (bots[msg.sender_id] ? bots[msg.sender_id].name : msg.sender_id.slice(0, 8)) : 'system');
 
       const div = document.createElement('div');
       div.className = 'message';
@@ -1399,7 +1399,7 @@
     function renderArtifactCard(artifact) {
       const title = artifact.title || artifact.artifact_key;
       const contributorName = artifact.contributor_id
-        ? (agents[artifact.contributor_id] ? agents[artifact.contributor_id].name : artifact.contributor_id.slice(0, 8))
+        ? (bots[artifact.contributor_id] ? bots[artifact.contributor_id].name : artifact.contributor_id.slice(0, 8))
         : 'unknown';
       const createdAt = new Date(artifact.created_at).toLocaleString();
       const updatedAt = new Date(artifact.updated_at).toLocaleString();
@@ -1539,21 +1539,21 @@
       });
     }
 
-    async function deleteAgent(agentId, agentName, event) {
+    async function deleteBot(botId, botName, event) {
       event.stopPropagation();
       event.preventDefault();
       const confirmed = await showConfirm({
         title: 'Delete Bot',
-        message: `Are you sure you want to delete "${agentName}"? This action cannot be undone.`,
+        message: `Are you sure you want to delete "${botName}"? This action cannot be undone.`,
       });
       if (!confirmed) return;
       try {
-        await api(`/api/agents/${agentId}`, { method: 'DELETE' });
-        delete agents[agentId];
+        await api(`/api/bots/${botId}`, { method: 'DELETE' });
+        delete bots[botId];
         renderBots();
         await refreshChannels();
         // Navigate away if viewing the deleted bot's profile
-        if (activeBot === agentId) {
+        if (activeBot === botId) {
           activeBot = null;
           showEmptyState();
         }
@@ -1772,7 +1772,7 @@
         </div>
         <div class="ticket-meta" id="ticket-meta"></div>
         <div class="ticket-hint" style="margin-top:12px;">
-          Share this ticket with the bot agent. It will use this to call <code>POST /api/auth/register</code> with the
+          Share this ticket with the bot. It will use this to call <code>POST /api/auth/register</code> with the
           org_id and ticket to complete registration.
         </div>
         <div class="confirm-modal-actions" style="margin-top:20px">

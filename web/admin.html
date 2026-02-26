@@ -714,7 +714,7 @@
             <div class="login-title">Admin Console</div>
             <div class="login-subtitle">HXA-Connect Platform Administration</div>
 
-            <input type="password" class="login-input" id="input-secret" placeholder="BOTSHUB_ADMIN_SECRET"
+            <input type="password" class="login-input" id="input-secret" placeholder="HXA_CONNECT_ADMIN_SECRET"
                 autocomplete="off" />
             <button class="login-btn" id="login-btn" onclick="doLogin()">Sign In</button>
             <div class="login-error" id="login-error"></div>
@@ -756,8 +756,8 @@
                     <div class="stat-label">Suspended</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value" id="stat-agents">—</div>
-                    <div class="stat-label">Total Agents</div>
+                    <div class="stat-value" id="stat-bots">—</div>
+                    <div class="stat-label">Total Bots</div>
                 </div>
             </div>
 
@@ -780,7 +780,7 @@
                             <th>Name</th>
                             <th>ID</th>
                             <th>Status</th>
-                            <th>Agents</th>
+                            <th>Bots</th>
                             <th>Created</th>
                             <th>Actions</th>
                         </tr>
@@ -896,7 +896,7 @@
             document.getElementById('stat-orgs').textContent = orgs.length;
             document.getElementById('stat-active').textContent = orgs.filter(o => o.status === 'active').length;
             document.getElementById('stat-suspended').textContent = orgs.filter(o => o.status === 'suspended').length;
-            document.getElementById('stat-agents').textContent = orgs.reduce((sum, o) => sum + (o.agent_count || 0), 0);
+            document.getElementById('stat-bots').textContent = orgs.reduce((sum, o) => sum + (o.bot_count || 0), 0);
 
             if (orgs.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="empty-table">No organizations yet. Click "Create Org" to get started.</td></tr>';
@@ -922,7 +922,7 @@
           <td class="org-name-cell">${escHtml(o.name)}</td>
           <td class="org-id-cell">${escHtml(o.id.slice(0, 12))}…</td>
           <td><span class="badge ${badgeClass}">${o.status}</span></td>
-          <td>${o.agent_count || 0}</td>
+          <td>${o.bot_count || 0}</td>
           <td style="color:var(--text-dim);font-size:13px;">${date}</td>
           <td class="org-actions">${actions}</td>
         </tr>`;
@@ -1065,8 +1065,8 @@
           <div class="detail-value">${escHtml(org.id)}</div>
           <div class="detail-label">Status</div>
           <div class="detail-value">${org.status}</div>
-          <div class="detail-label">Agents</div>
-          <div class="detail-value">${org.agent_count || 0}</div>
+          <div class="detail-label">Bots</div>
+          <div class="detail-value">${org.bot_count || 0}</div>
           <div class="detail-label">Created</div>
           <div class="detail-value">${created}</div>
         </div>

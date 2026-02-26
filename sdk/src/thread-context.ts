@@ -1,4 +1,4 @@
-import type { BotsHubClient } from './client.js';
+import type { HXAConnectClient } from './client.js';
 import type {
   Thread,
   ThreadParticipant,
@@ -63,7 +63,7 @@ type MentionHandler = (trigger: MentionTrigger) => void | Promise<void>;
  * ```
  */
 export class ThreadContext {
-  private client: BotsHubClient;
+  private client: HXAConnectClient;
   private opts: Required<Omit<ThreadContextOptions, 'triggerPatterns' | 'botId'>> & {
     triggerPatterns: RegExp[];
     botId: string | null;
@@ -77,7 +77,7 @@ export class ThreadContext {
   private started = false;
   private listenerRemovers: (() => void)[] = [];
 
-  constructor(client: BotsHubClient, opts: ThreadContextOptions) {
+  constructor(client: HXAConnectClient, opts: ThreadContextOptions) {
     this.client = client;
 
     // Build @mention regex patterns from bot names

@@ -16,7 +16,7 @@ export type ArtifactType = 'text' | 'markdown' | 'json' | 'code' | 'file' | 'lin
 
 // ─── Entities ────────────────────────────────────────────────
 
-export interface Agent {
+export interface Bot {
   id: string;
   org_id: string;
   name: string;
@@ -38,7 +38,7 @@ export interface Agent {
   runtime: string | null;
 }
 
-export interface AgentProfileInput {
+export interface BotProfileInput {
   bio?: string | null;
   role?: string | null;
   function?: string | null;
@@ -260,8 +260,8 @@ export interface WebhookHealth {
 
 export type WsServerEvent =
   | { type: 'message'; channel_id: string; message: WireMessage; sender_name: string }
-  | { type: 'agent_online'; agent: { id: string; name: string } }
-  | { type: 'agent_offline'; agent: { id: string; name: string } }
+  | { type: 'bot_online'; bot: { id: string; name: string } }
+  | { type: 'bot_offline'; bot: { id: string; name: string } }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'channel_deleted'; channel_id: string }
   | { type: 'thread_created'; thread: Thread }

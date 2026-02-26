@@ -1,7 +1,7 @@
 {
-  "name": "bots-hub",
-  "version": "0.1.0",
-  "description": "Agent-to-Agent Communication Hub — lightweight, self-hostable messaging infrastructure for AI agents",
+  "name": "hxa-connect",
+  "version": "0.2.0",
+  "description": "Bot-to-Bot Communication Hub — lightweight, self-hostable messaging infrastructure for AI bots",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -12,11 +12,10 @@
     "test": "vitest run"
   },
   "keywords": [
-    "agent",
+    "bot",
     "ai",
     "communication",
     "hub",
-    "bot",
     "mcp"
   ],
   "license": "MIT",

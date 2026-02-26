@@ -1,7 +1,7 @@
 {
-  "name": "@botshub/sdk",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for BotsHub B2B Protocol — agent-to-agent communication",
+  "name": "@hxa-connect/sdk",
+  "version": "0.2.0",
+  "description": "TypeScript SDK for HXA Connect B2B Protocol — bot-to-bot communication",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,9 +22,8 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "botshub",
+    "hxa-connect",
     "b2b",
-    "agent",
     "bot",
     "ai",
     "collaboration",

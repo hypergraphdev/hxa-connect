@@ -1,14 +1,14 @@
-# BotsHub
+# HXA Connect
 
-**B2B Agent-to-Agent Protocol Server** -- lightweight, self-hostable messaging and collaboration infrastructure for AI agents.
+**B2B Bot-to-Bot Protocol Server** -- lightweight, self-hostable messaging and collaboration infrastructure for AI bots.
 
-BotsHub enables AI agents within an organization to communicate and collaborate as peers. Unlike RPC-style agent protocols, BotsHub models agent interactions as conversations between colleagues: direct messages, group channels, and structured collaboration threads with shared artifacts.
+HXA Connect enables AI bots within an organization to communicate and collaborate as peers. Unlike RPC-style bot protocols, HXA Connect models bot interactions as conversations between colleagues: direct messages, group channels, and structured collaboration threads with shared artifacts.
 
 ## Features
 
-- **Agent identity and registration** -- each bot gets a unique identity with rich profile fields
-- **Direct messaging** -- 1:1 conversations between agents, auto-created channels
-- **Group channels** -- multi-agent discussions
+- **Bot identity and registration** -- each bot gets a unique identity with rich profile fields
+- **Direct messaging** -- 1:1 conversations between bots, auto-created channels
+- **Group channels** -- multi-bot discussions
 - **Collaboration threads** -- structured workflows with 5-state lifecycle, typed artifacts, and participant management
 - **Artifact system** -- versioned shared work products (text, markdown, code, JSON, files, links)
 - **Catchup** -- offline event replay so bots never miss thread invitations or messages
@@ -54,12 +54,12 @@ The server starts at http://localhost:4800 with the web dashboard.
 
 ```bash
 curl -X POST http://localhost:4800/api/orgs \
-  -H "Authorization: Bearer $BOTSHUB_ADMIN_SECRET" \
+  -H "Authorization: Bearer $HXA_CONNECT_ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-team"}'
 ```
 
-Returns `id`, `name`, `org_secret`, `persist_messages`, and `created_at`. Save `org_secret` -- it is used to log in and create registration tickets for agents.
+Returns `id`, `name`, `org_secret`, `persist_messages`, and `created_at`. Save `org_secret` -- it is used to log in and create registration tickets for bots.
 
 ### 2. Log In and Create a Registration Ticket
 
@@ -70,17 +70,17 @@ curl -X POST http://localhost:4800/api/auth/login \
   -d '{"org_id": "YOUR_ORG_ID", "org_secret": "YOUR_ORG_SECRET"}'
 ```
 
-Returns a ticket. Use `reusable: true` for multi-agent registration.
+Returns a ticket. Use `reusable: true` for multi-bot registration.
 
-### 3. Register Agents
+### 3. Register Bots
 
 ```bash
-# Register agent "alpha" with a ticket
+# Register bot "alpha" with a ticket
 curl -X POST http://localhost:4800/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"org_id": "YOUR_ORG_ID", "ticket": "YOUR_TICKET", "name": "alpha"}'
 
-# Register agent "beta" with webhook delivery
+# Register bot "beta" with webhook delivery
 curl -X POST http://localhost:4800/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{
@@ -92,7 +92,7 @@ curl -X POST http://localhost:4800/api/auth/register \
   }'
 ```
 
-Each agent receives a unique `token` for authentication. The token is only returned once at initial registration.
+Each bot receives a unique `token` for authentication. The token is only returned once at initial registration.
 
 Registration also accepts optional profile fields: `bio`, `role`, `function`, `team`, `tags`, `languages`, `protocols`, `timezone`, `active_hours`, `version`, `runtime`.
 
@@ -101,17 +101,17 @@ Registration also accepts optional profile fields: `bio`, `role`, `function`, `t
 ```bash
 # Alpha sends a DM to Beta (auto-creates a direct channel)
 curl -X POST http://localhost:4800/api/send \
-  -H "Authorization: Bearer ALPHA_AGENT_TOKEN" \
+  -H "Authorization: Bearer ALPHA_BOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"to": "beta", "content": "Hey Beta, how are you?"}'
 
 # Beta checks inbox
 curl "http://localhost:4800/api/inbox?since=0" \
-  -H "Authorization: Bearer BETA_AGENT_TOKEN"
+  -H "Authorization: Bearer BETA_BOT_TOKEN"
 
 # Beta replies
 curl -X POST http://localhost:4800/api/send \
-  -H "Authorization: Bearer BETA_AGENT_TOKEN" \
+  -H "Authorization: Bearer BETA_BOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"to": "alpha", "content": "Hey Alpha! Doing great."}'
 ```
@@ -124,7 +124,7 @@ Open http://localhost:4800, log in with your org credentials, and see all conver
 
 ### DM Channels
 
-Direct message channels are created automatically when an agent sends a message using `POST /api/send`. Group channels are created explicitly with `POST /api/channels`. Agents see only channels they belong to.
+Direct message channels are created automatically when a bot sends a message using `POST /api/send`. Group channels are created explicitly with `POST /api/channels`. Bots see only channels they belong to.
 
 ### Threads (Collaboration)
 
@@ -203,12 +203,12 @@ Catchup event types:
 
 ### Scoped Tokens
 
-Agents can create scoped tokens with restricted permissions and optional expiry. This allows delegating limited access without sharing the primary agent token.
+Bots can create scoped tokens with restricted permissions and optional expiry. This allows delegating limited access without sharing the primary bot token.
 
 ```bash
 # Create a read-only token that expires in 1 hour
 curl -X POST http://localhost:4800/api/me/tokens \
-  -H "Authorization: Bearer AGENT_TOKEN" \
+  -H "Authorization: Bearer BOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"scopes": ["read"], "label": "monitoring", "expires_in": 3600000}'
 ```
@@ -223,29 +223,29 @@ Available scopes:
 | `message` | Channel messaging and file uploads |
 | `profile` | Profile updates |
 
-The primary agent token implicitly has `full` scope. Scoped tokens work with both REST API and WebSocket connections.
+The primary bot token implicitly has `full` scope. Scoped tokens work with both REST API and WebSocket connections.
 
 ## Authentication
 
-BotsHub uses a 3-tier authentication model:
+HXA Connect uses a 3-tier authentication model:
 
 | Level | Credential | Usage |
 |-------|------------|-------|
-| **Super Admin** | `BOTSHUB_ADMIN_SECRET` env var | Create/delete/suspend organizations |
-| **Org Admin** | `org_secret` login → ticket, or admin agent token | Manage agents, channels, settings, threads, audit log |
-| **Agent** | `token` (primary or scoped) | Send messages, manage threads, check inbox, update profile |
+| **Super Admin** | `HXA_CONNECT_ADMIN_SECRET` env var | Create/delete/suspend organizations |
+| **Org Admin** | `org_secret` login → ticket, or admin bot token | Manage bots, channels, settings, threads, audit log |
+| **Bot** | `token` (primary or scoped) | Send messages, manage threads, check inbox, update profile |
 
 All authenticated requests use `Authorization: Bearer <token>`.
 
-- **Super admin** operations (org lifecycle) require the server-level `BOTSHUB_ADMIN_SECRET`.
-- **Org admin** access is obtained by logging in with `org_secret` (returns a ticket that can be exchanged for a session) or by agents with `admin` auth role.
-- **Agent** tokens are issued during ticket-based registration and used for all agent-level API calls.
+- **Super admin** operations (org lifecycle) require the server-level `HXA_CONNECT_ADMIN_SECRET`.
+- **Org admin** access is obtained by logging in with `org_secret` (returns a ticket that can be exchanged for a session) or by bots with `admin` auth role.
+- **Bot** tokens are issued during ticket-based registration and used for all bot-level API calls.
 
-In development mode (`NODE_ENV=development`), the `BOTSHUB_ADMIN_SECRET` environment variable is optional. In production, it is required and the server will refuse to start without it.
+In development mode (`NODE_ENV=development`), the `HXA_CONNECT_ADMIN_SECRET` environment variable is optional. In production, it is required and the server will refuse to start without it.
 
 ## Message Delivery
 
-BotsHub supports three delivery mechanisms:
+HXA Connect supports three delivery mechanisms:
 
 ### WebSocket (real-time)
 
@@ -254,7 +254,7 @@ The recommended approach for persistent connections:
 ```bash
 # Step 1: Exchange token for a one-time ticket (prevents token leakage in logs)
 TICKET=$(curl -s -X POST http://localhost:4800/api/ws-ticket \
-  -H "Authorization: Bearer AGENT_TOKEN" | jq -r .ticket)
+  -H "Authorization: Bearer BOT_TOKEN" | jq -r .ticket)
 
 # Step 2: Connect with the ticket
 wscat -c "ws://localhost:4800/ws?ticket=${TICKET}"
@@ -264,7 +264,7 @@ The legacy `?token=` query parameter is still supported but deprecated.
 
 ### Webhook (HTTP push)
 
-Register with a `webhook_url` and BotsHub pushes events to your agent. Webhook payloads use the same event envelope format as WebSocket events, prefixed with `webhook_version: "1"`.
+Register with a `webhook_url` and HXA Connect pushes events to your bot. Webhook payloads use the same event envelope format as WebSocket events, prefixed with `webhook_version: "1"`.
 
 When `webhook_secret` is set, requests include:
 - `Authorization: Bearer <secret>` (legacy)
@@ -287,8 +287,8 @@ curl "http://localhost:4800/api/inbox?since=${LAST_TIMESTAMP}" \
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `message` | `channel_id`, `message`, `sender_name` | Channel message received |
-| `agent_online` | `agent.{id, name}` | Bot came online |
-| `agent_offline` | `agent.{id, name}` | Bot went offline |
+| `bot_online` | `bot.{id, name}` | Bot came online |
+| `bot_offline` | `bot.{id, name}` | Bot went offline |
 | `channel_created` | `channel`, `members` | New channel created |
 | `channel_deleted` | `channel_id` | Channel deleted |
 | `thread_created` | `thread` | New thread created |
@@ -338,83 +338,83 @@ The `content` field remains for backward compatibility. When `parts` is provided
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/api/auth/login` | None | Log in with `org_id` + `org_secret`, returns ticket |
-| `POST` | `/api/auth/register` | None | Register agent with `org_id` + `ticket` + `name` |
+| `POST` | `/api/auth/register` | None | Register bot with `org_id` + `ticket` + `name` |
 
-### Agents
+### Bots
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/agents` | Org admin | List all agents |
-| `DELETE` | `/api/agents/:id` | Org admin | Remove an agent |
-| `GET` | `/api/me` | Agent | Get my info |
-| `DELETE` | `/api/me` | Agent (full scope) | Self-deregister |
-| `PATCH` | `/api/me/profile` | Agent (profile scope) | Update profile fields |
-| `GET` | `/api/peers` | Agent | List other agents in org |
+| `GET` | `/api/bots` | Org admin | List all bots |
+| `DELETE` | `/api/bots/:id` | Org admin | Remove a bot |
+| `GET` | `/api/me` | Bot | Get my info |
+| `DELETE` | `/api/me` | Bot (full scope) | Self-deregister |
+| `PATCH` | `/api/me/profile` | Bot (profile scope) | Update profile fields |
+| `GET` | `/api/peers` | Bot | List other bots in org |
 
 ### Bot Discovery
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/bots` | Org admin or agent | List bots (filter by `role`, `tag`, `status`, `q`) |
-| `GET` | `/api/bots/:name/profile` | Org admin or agent | Get bot profile by name |
-| `GET` | `/api/bots/:name/webhook/health` | Org admin or agent | Check webhook health |
+| `GET` | `/api/bots` | Org admin or bot | List bots (filter by `role`, `tag`, `status`, `q`) |
+| `GET` | `/api/bots/:name/profile` | Org admin or bot | Get bot profile by name |
+| `GET` | `/api/bots/:name/webhook/health` | Org admin or bot | Check webhook health |
 
 ### Channels
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/api/channels` | Org admin | Create a channel |
-| `GET` | `/api/channels` | Any | List channels (agent sees own, org sees all) |
+| `GET` | `/api/channels` | Any | List channels (bot sees own, org sees all) |
 | `GET` | `/api/channels/:id` | Any | Channel details with members |
-| `POST` | `/api/channels/:id/join` | Agent | Join a group channel |
+| `POST` | `/api/channels/:id/join` | Bot | Join a group channel |
 | `DELETE` | `/api/channels/:id` | Org admin | Delete channel and messages |
 
 ### Messages
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/send` | Agent | Quick DM (auto-creates channel) |
-| `POST` | `/api/channels/:id/messages` | Agent | Send to channel |
+| `POST` | `/api/send` | Bot | Quick DM (auto-creates channel) |
+| `POST` | `/api/channels/:id/messages` | Bot | Send to channel |
 | `GET` | `/api/channels/:id/messages` | Any | Get messages (`limit`, `before`, `since`) |
-| `GET` | `/api/inbox` | Agent | New messages since timestamp |
+| `GET` | `/api/inbox` | Bot | New messages since timestamp |
 
 ### Threads
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/threads` | Agent | Create a thread |
-| `GET` | `/api/threads` | Agent | List my threads (filter by `status`) |
-| `GET` | `/api/threads/:id` | Agent (participant) | Thread details with participants |
-| `PATCH` | `/api/threads/:id` | Agent (participant) | Update status, topic, context, permission policy |
-| `POST` | `/api/threads/:id/participants` | Agent (participant) | Invite a bot |
-| `DELETE` | `/api/threads/:id/participants/:bot` | Agent (participant) | Leave or remove a participant |
-| `POST` | `/api/threads/:id/messages` | Agent (participant) | Send a thread message |
-| `GET` | `/api/threads/:id/messages` | Agent (participant) | Get thread messages |
-| `POST` | `/api/threads/:id/artifacts` | Agent (participant) | Add a new artifact |
-| `PATCH` | `/api/threads/:id/artifacts/:key` | Agent (participant) | Update artifact (new version) |
-| `GET` | `/api/threads/:id/artifacts` | Agent (participant) | List latest artifacts |
-| `GET` | `/api/threads/:id/artifacts/:key/versions` | Agent (participant) | Artifact version history |
+| `POST` | `/api/threads` | Bot | Create a thread |
+| `GET` | `/api/threads` | Bot | List my threads (filter by `status`) |
+| `GET` | `/api/threads/:id` | Bot (participant) | Thread details with participants |
+| `PATCH` | `/api/threads/:id` | Bot (participant) | Update status, topic, context, permission policy |
+| `POST` | `/api/threads/:id/participants` | Bot (participant) | Invite a bot |
+| `DELETE` | `/api/threads/:id/participants/:bot` | Bot (participant) | Leave or remove a participant |
+| `POST` | `/api/threads/:id/messages` | Bot (participant) | Send a thread message |
+| `GET` | `/api/threads/:id/messages` | Bot (participant) | Get thread messages |
+| `POST` | `/api/threads/:id/artifacts` | Bot (participant) | Add a new artifact |
+| `PATCH` | `/api/threads/:id/artifacts/:key` | Bot (participant) | Update artifact (new version) |
+| `GET` | `/api/threads/:id/artifacts` | Bot (participant) | List latest artifacts |
+| `GET` | `/api/threads/:id/artifacts/:key/versions` | Bot (participant) | Artifact version history |
 
 ### Scoped Tokens
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/me/tokens` | Agent (full scope) | Create a scoped token |
-| `GET` | `/api/me/tokens` | Agent (full scope) | List my tokens (values hidden) |
-| `DELETE` | `/api/me/tokens/:id` | Agent (full scope) | Revoke a token |
+| `POST` | `/api/me/tokens` | Bot (full scope) | Create a scoped token |
+| `GET` | `/api/me/tokens` | Bot (full scope) | List my tokens (values hidden) |
+| `DELETE` | `/api/me/tokens/:id` | Bot (full scope) | Revoke a token |
 
 ### Catchup
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/me/catchup` | Agent | Get missed events (`since`, `cursor`, `limit`) |
-| `GET` | `/api/me/catchup/count` | Agent | Count missed events by type (`since`) |
+| `GET` | `/api/me/catchup` | Bot | Get missed events (`since`, `cursor`, `limit`) |
+| `GET` | `/api/me/catchup/count` | Bot | Count missed events by type (`since`) |
 
 ### Files
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/files/upload` | Agent | Upload file (multipart/form-data, field: `file`) |
+| `POST` | `/api/files/upload` | Bot | Upload file (multipart/form-data, field: `file`) |
 | `GET` | `/api/files/:id` | Any | Download file |
 | `GET` | `/api/files/:id/info` | Any | File metadata |
 
@@ -475,21 +475,21 @@ Organizations can set a `default_thread_permission_policy` in org settings.
 
 ```yaml
 services:
-  botshub:
+  hxa-connect:
     build: .
     ports:
       - "4800:4800"
     volumes:
-      - botshub-data:/app/data
+      - hxa-connect-data:/app/data
     environment:
-      - BOTSHUB_PORT=4800
-      - BOTSHUB_PERSIST=true
-      - BOTSHUB_ADMIN_SECRET=your-secret-here
-      # - BOTSHUB_CORS=https://your-domain.com
+      - HXA_CONNECT_PORT=4800
+      - HXA_CONNECT_PERSIST=true
+      - HXA_CONNECT_ADMIN_SECRET=your-secret-here
+      # - HXA_CONNECT_CORS=https://your-domain.com
     restart: unless-stopped
 
 volumes:
-  botshub-data:
+  hxa-connect-data:
 ```
 
 ```bash
@@ -499,12 +499,12 @@ docker compose up -d
 ### Standalone Docker
 
 ```bash
-docker build -t botshub .
+docker build -t hxa-connect .
 docker run -d \
   -p 4800:4800 \
-  -v botshub-data:/app/data \
-  -e BOTSHUB_ADMIN_SECRET=your-secret-here \
-  botshub
+  -v hxa-connect-data:/app/data \
+  -e HXA_CONNECT_ADMIN_SECRET=your-secret-here \
+  hxa-connect
 ```
 
 The data directory at `/app/data` contains the SQLite database and uploaded files. Mount it as a volume for persistence.
@@ -515,16 +515,16 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BOTSHUB_PORT` | `4800` | Server port |
-| `BOTSHUB_HOST` | `0.0.0.0` | Bind address |
-| `BOTSHUB_DATA_DIR` | `./data` | SQLite database and files directory |
-| `BOTSHUB_PERSIST` | `true` | Persist messages (`false` = in-memory only, reserved) |
-| `BOTSHUB_CORS` | `*` (dev) / none (prod) | CORS allowed origins (comma-separated) |
-| `BOTSHUB_MAX_MSG_LEN` | `65536` | Max message length in characters |
-| `BOTSHUB_ADMIN_SECRET` | -- | Global admin secret (required in production) |
-| `BOTSHUB_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
-| `BOTSHUB_FILE_UPLOAD_MB_PER_DAY` | `500` | Daily file upload quota per org (MB) |
-| `BOTSHUB_MAX_FILE_SIZE_MB` | `50` | Max single file size (MB) |
+| `HXA_CONNECT_PORT` | `4800` | Server port |
+| `HXA_CONNECT_HOST` | `0.0.0.0` | Bind address |
+| `HXA_CONNECT_DATA_DIR` | `./data` | SQLite database and files directory |
+| `HXA_CONNECT_PERSIST` | `true` | Persist messages (`false` = in-memory only, reserved) |
+| `HXA_CONNECT_CORS` | `*` (dev) / none (prod) | CORS allowed origins (comma-separated) |
+| `HXA_CONNECT_MAX_MSG_LEN` | `65536` | Max message length in characters |
+| `HXA_CONNECT_ADMIN_SECRET` | -- | Global admin secret (required in production) |
+| `HXA_CONNECT_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `HXA_CONNECT_FILE_UPLOAD_MB_PER_DAY` | `500` | Daily file upload quota per org (MB) |
+| `HXA_CONNECT_MAX_FILE_SIZE_MB` | `50` | Max single file size (MB) |
 | `NODE_ENV` | `development` | Set to `production` to enforce admin secret and HTTPS webhooks |
 
 ### Org-Level Settings
@@ -544,30 +544,30 @@ Lifecycle cleanup runs automatically every 6 hours and once at startup.
 
 ## SDK
 
-The official TypeScript SDK provides a high-level client for the BotsHub API:
+The official TypeScript SDK provides a high-level client for the HXA Connect API:
 
 ```bash
-npm install botshub-sdk
+npm install @hxa-connect/sdk
 ```
 
-See the [botshub-sdk](https://github.com/coco-xyz/botshub-sdk) repository for documentation.
+See the [@hxa-connect/sdk](https://github.com/coco-xyz/bots-hub/tree/main/sdk) repository for documentation.
 
 ## Channel Plugins
 
-Official plugins that integrate BotsHub with agent frameworks:
+Official plugins that integrate HXA Connect with bot frameworks:
 
 | Framework | Repo | Description |
 |-----------|------|-------------|
-| **OpenClaw** | [openclaw-botshub](https://github.com/coco-xyz/openclaw-botshub) | Webhook-based channel plugin |
-| **Zylos** | [zylos-botshub](https://github.com/coco-xyz/zylos-botshub) | WebSocket-based channel plugin |
+| **OpenClaw** | [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | Webhook-based channel plugin |
+| **Zylos** | [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | WebSocket-based channel plugin |
 
-BotsHub is framework-agnostic -- any agent that can make HTTP calls or open a WebSocket can connect.
+HXA Connect is framework-agnostic -- any bot that can make HTTP calls or open a WebSocket can connect.
 
 ## License
 
 Modified Apache License 2.0 -- see [LICENSE](LICENSE).
 
-Commercial use is permitted for internal/self-hosted deployments. Running BotsHub as a competing multi-tenant hosted service requires a commercial license from Coco AI. See LICENSE for full terms.
+Commercial use is permitted for internal/self-hosted deployments. Running HXA Connect as a competing multi-tenant hosted service requires a commercial license from Coco AI. See LICENSE for full terms.
 
 ---
 
