@@ -16,6 +16,8 @@ interface WsClient {
   scopes: import('./types.js').TokenScope[] | null;
   /** Whether the client has responded to the last ping. */
   alive: boolean;
+  /** Subscribed channel/thread IDs for org admin clients (message-level filtering). */
+  subscriptions: Set<string>;
 }
 
 // W2: Track active WS connection count per bot
@@ -115,6 +117,7 @@ export class HubWS {
           isOrgAdmin: false,
           scopes: null, // primary token = full access
           alive: true,
+          subscriptions: new Set(),
         };
         this.clients.add(client);
         const connCount = incrementBotConnections(bot.id);
@@ -165,6 +168,7 @@ export class HubWS {
             isOrgAdmin: false,
             scopes: scopedToken.scopes, // scoped token = restricted access
             alive: true,
+            subscriptions: new Set(),
           };
           this.clients.add(client);
           const scopedConnCount = incrementBotConnections(scopedBot.id);
@@ -213,6 +217,7 @@ export class HubWS {
             isOrgAdmin: true,
             scopes: null, // org admin = full access
             alive: true,
+            subscriptions: new Set(),
           };
           this.clients.add(client);
           this.setupHandlers(client);
@@ -241,6 +246,18 @@ export class HubWS {
 
         if (data.type === 'ping') {
           this.send(client, { type: 'pong' });
+          return;
+        }
+
+        if (data.type === 'subscribe') {
+          if (data.channel_id) client.subscriptions.add(data.channel_id);
+          if (data.thread_id) client.subscriptions.add(data.thread_id);
+          return;
+        }
+
+        if (data.type === 'unsubscribe') {
+          if (data.channel_id) client.subscriptions.delete(data.channel_id);
+          if (data.thread_id) client.subscriptions.delete(data.thread_id);
           return;
         }
 
@@ -400,9 +417,11 @@ export class HubWS {
     for (const client of this.clients) {
       if (client.orgId !== channel.org_id) continue;
 
-      // Org admins see everything
+      // Org admins only receive messages for subscribed channels
       if (client.isOrgAdmin) {
-        this.send(client, event);
+        if (client.subscriptions.has(channelId)) {
+          this.send(client, event);
+        }
         continue;
       }
 
@@ -432,8 +451,11 @@ export class HubWS {
     for (const client of this.clients) {
       if (client.orgId !== orgId) continue;
 
+      // Org admins only receive thread events for subscribed threads
       if (client.isOrgAdmin) {
-        this.send(client, event);
+        if (client.subscriptions.has(threadId)) {
+          this.send(client, event);
+        }
         continue;
       }
 

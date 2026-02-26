@@ -604,7 +604,7 @@ export class HubDB {
     const serializedProfile = this.serializeProfileFields(profile);
 
     if (existing) {
-      const updates: string[] = ['online = 1', 'last_seen_at = ?'];
+      const updates: string[] = ['last_seen_at = ?'];
       const params: any[] = [now];
 
       if (metadata !== undefined) {
@@ -704,7 +704,7 @@ export class HubDB {
       version: serializedProfile.version ?? '1.0.0',
       runtime: serializedProfile.runtime ?? null,
       auth_role: 'member',
-      online: true,
+      online: false,
       last_seen_at: now,
       created_at: now,
     };

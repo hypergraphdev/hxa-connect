@@ -27,6 +27,8 @@ export interface TestEnv {
   registerBot(orgSecret: string, name: string, opts?: Record<string, unknown>): Promise<{ bot: any; token: string }>;
   /** Login as org and get a reusable ticket that works as Bearer token for org-level endpoints. */
   loginAsOrg(orgSecret: string): Promise<string>;
+  /** Promote a bot to admin using org_secret (login as org, then PATCH role). */
+  promoteBot(orgSecret: string, botId: string): Promise<void>;
   /** Cleanup — close server, remove temp dir */
   cleanup(): Promise<void>;
 }
@@ -136,6 +138,16 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     return loginData.ticket;
   }
 
+  async function promoteBot(orgSecret: string, botId: string) {
+    const orgTicket = await loginAsOrg(orgSecret);
+    const res = await fetch(`${baseUrl}/api/org/bots/${botId}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${orgTicket}` },
+      body: JSON.stringify({ auth_role: 'admin' }),
+    });
+    if (!res.ok) throw new Error(`Promote failed: ${res.status} ${await res.text()}`);
+  }
+
   async function cleanup() {
     await hubWs.shutdown();
     await new Promise<void>((resolve, reject) => {
@@ -145,7 +157,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 
-  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerBot, loginAsOrg, cleanup };
+  return { app, server, db, ws: hubWs, config, baseUrl, dataDir, createOrg, registerBot, loginAsOrg, promoteBot, cleanup };
 }
 
 /** Simple fetch helper that returns { status, headers, body } */

@@ -921,13 +921,13 @@ describe('Phase 2: Ticket-Based Registration', () => {
 
   afterAll(() => env.cleanup());
 
-  it('first bot via ticket gets admin role', async () => {
+  it('all bots register as member by default', async () => {
     // Login to get a ticket
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
 
-    // Register via ticket
+    // Register first bot
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
       body: { org_id: orgId, ticket: loginBody.ticket, name: 'first-bot' },
     });
@@ -935,10 +935,10 @@ describe('Phase 2: Ticket-Based Registration', () => {
     expect(body.bot_id).toBeTypeOf('string');
     expect(body.token).toBeTypeOf('string');
     expect(body.name).toBe('first-bot');
-    expect(body.auth_role).toBe('admin');
+    expect(body.auth_role).toBe('member');
   });
 
-  it('second bot via ticket gets member role', async () => {
+  it('second bot also registers as member', async () => {
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: orgId, org_secret: orgSecret },
     });
@@ -1068,25 +1068,17 @@ describe('Phase 2: Role Enforcement & Management', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Create admin bot (first via ticket = auto-admin)
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const { body: adminBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'admin-bot' },
-    });
-    adminToken = adminBody.token;
-    adminId = adminBody.bot_id;
+    // Create bots (both register as member by default)
+    const { bot: adminBot, token: aToken } = await env.registerBot(orgSecret, 'admin-bot');
+    adminToken = aToken;
+    adminId = adminBot.bot_id;
 
-    // Create member bot (second = member)
-    const { body: loginBody2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody2.ticket, name: 'member-bot' },
-    });
-    memberToken = memberBody.token;
-    memberId = memberBody.bot_id;
+    const { bot: memberBot, token: mToken } = await env.registerBot(orgSecret, 'member-bot');
+    memberToken = mToken;
+    memberId = memberBot.bot_id;
+
+    // Promote admin-bot via org admin
+    await env.promoteBot(orgSecret, adminId);
   });
 
   afterAll(() => env.cleanup());
@@ -1176,23 +1168,15 @@ describe('Phase 2: Org Secret Rotation', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Create admin bot
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const { body: adminBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'rotate-admin-bot' },
-    });
-    adminToken = adminBody.token;
+    // Create bots
+    const { bot: adminBot, token: aToken } = await env.registerBot(orgSecret, 'rotate-admin-bot');
+    adminToken = aToken;
 
-    // Create member bot
-    const { body: loginBody2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody2.ticket, name: 'rotate-member-bot' },
-    });
-    memberToken = memberBody.token;
+    const { token: mToken } = await env.registerBot(orgSecret, 'rotate-member-bot');
+    memberToken = mToken;
+
+    // Promote admin bot via org admin
+    await env.promoteBot(orgSecret, adminBot.bot_id);
   });
 
   afterAll(() => env.cleanup());

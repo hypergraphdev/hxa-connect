@@ -74,7 +74,7 @@ body {
 
 /* ─── Login Screen ─── */
 #login-screen {
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   position: fixed;
@@ -1045,6 +1045,33 @@ body {
   flex-shrink: 0;
 }
 
+.bot-role-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bot-role-select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+.bot-role-select:focus {
+  border-color: var(--border-focus);
+}
+
+.bot-role-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .bot-profile-tags {
   display: flex;
   flex-wrap: wrap;
@@ -1319,7 +1346,44 @@ body {
 
 @media (max-width: 768px) {
   #header {
+    padding: 0 12px;
+    height: 48px;
+    gap: 8px;
+  }
+
+  #header .org-name {
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100px;
+  }
+
+  #header .status {
     display: none;
+  }
+
+  #header .btn-text {
+    display: none;
+  }
+
+  .btn-invite-bot,
+  .btn-rotate-secret {
+    padding: 6px 8px !important;
+    gap: 0 !important;
+  }
+
+  .btn-logout {
+    padding: 6px 8px !important;
+    gap: 0 !important;
+  }
+
+  .btn-logout .btn-text {
+    display: none !important;
+  }
+
+  .btn-logout .logout-icon {
+    display: inline-block !important;
   }
 
   #sidebar {
@@ -1369,6 +1433,32 @@ body {
   }
 }
 
+/* ─── Logout Button ─── */
+.btn-logout {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-family: var(--font);
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-logout .logout-icon {
+  display: none;
+}
+
+.btn-logout:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
 /* ─── Invite Bot Button ─── */
 .btn-invite-bot {
   display: inline-flex;
@@ -1389,6 +1479,27 @@ body {
 .btn-invite-bot:hover {
   background: rgba(45, 212, 191, 0.2);
   border-color: rgba(45, 212, 191, 0.4);
+}
+
+.btn-rotate-secret {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  color: #fbbf24;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  white-space: nowrap;
+}
+
+.btn-rotate-secret:hover {
+  background: rgba(251, 191, 36, 0.2);
+  border-color: rgba(251, 191, 36, 0.4);
 }
 
 /* ─── Ticket Modal Elements ─── */
@@ -1630,4 +1741,45 @@ body {
   background: rgba(239, 68, 68, 0.35);
   border-color: rgba(239, 68, 68, 0.6);
   color: #fca5a5;
+}
+
+/* ─── Toast Notifications ─── */
+#toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  max-width: 380px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateX(40px);
+  transition: opacity 0.3s, transform 0.3s;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.toast-error {
+  background: rgba(239, 68, 68, 0.9);
+  border: 1px solid rgba(239, 68, 68, 1);
+  color: #fff;
+}
+
+.toast-success {
+  background: rgba(45, 212, 191, 0.9);
+  border: 1px solid rgba(45, 212, 191, 1);
+  color: #fff;
 }

@@ -253,7 +253,7 @@ export interface OrgSettings {
 // ─── Audit Log ──────────────────────────────────────────────
 
 export type AuditAction =
-  | 'bot.register' | 'bot.delete' | 'bot.profile_update'
+  | 'bot.register' | 'bot.delete' | 'bot.profile_update' | 'bot.role_change'
   | 'bot.token_create' | 'bot.token_revoke'
   | 'thread.create' | 'thread.status_changed' | 'thread.invite' | 'thread.remove_participant'
   | 'thread.permission_denied'
@@ -380,6 +380,8 @@ export type WsServerEvent =
 
 export type WsClientEvent =
   | { type: 'send'; channel_id: string; content?: string; content_type?: string; parts?: MessagePart[] }
+  | { type: 'subscribe'; channel_id?: string; thread_id?: string }
+  | { type: 'unsubscribe'; channel_id?: string; thread_id?: string }
   | { type: 'ping' };
 
 // ─── Webhook Health ──────────────────────────────────────────

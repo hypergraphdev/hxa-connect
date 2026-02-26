@@ -372,6 +372,33 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.status(204).end();
   });
 
+  /**
+   * POST /api/orgs/:org_id/rotate-secret — Rotate org secret (super admin)
+   * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
+   * Returns: { org_secret }
+   */
+  router.post('/api/orgs/:org_id/rotate-secret', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const org = db.getOrgById(req.params.org_id);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    if (org.status === 'destroyed') {
+      res.status(409).json({ error: 'Cannot rotate secret for destroyed org', code: 'ORG_DESTROYED' });
+      return;
+    }
+
+    const newSecret = crypto.randomBytes(24).toString('hex');
+    const newSecretHash = HubDB.hashToken(newSecret);
+    db.rotateOrgSecret(org.id, newSecretHash);
+    db.invalidateOrgTickets(org.id);
+
+    res.json({ org_secret: newSecret });
+  });
+
   // ─── Shared Registration Validation ───────────────────────
 
   /**
@@ -600,11 +627,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    // First-bot auto-admin
-    const existingBots = db.listBots(org_id);
-    const authRole: 'admin' | 'member' = existingBots.length === 0 ? 'admin' : 'member';
-
-    // Register the bot
+    // Register the bot (always as member — org admin promotes via Web UI)
     const { bot, created, plaintextToken } = db.registerBot(
       org_id,
       validated.name,
@@ -614,20 +637,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       validated.profile,
     );
 
-    // Set auth_role (registerBot defaults to 'member', override if first bot)
-    if (authRole === 'admin' && created) {
-      db.setBotAuthRole(bot.id, 'admin');
-      bot.auth_role = 'admin';
-    }
-
     // Audit
     db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, { name: bot.name, reregister: !created, via: 'ticket' });
-
-    // Broadcast bot online
-    ws.broadcastToOrg(org_id, {
-      type: 'bot_online',
-      bot: { id: bot.id, name: bot.name },
-    });
 
     const response: Record<string, unknown> = {
       bot_id: bot.id,
@@ -1923,7 +1934,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       partsJson,
     );
 
-    const enriched = enrichThreadMessage(message);
+    const enriched = { ...enrichThreadMessage(message), sender_name: req.bot!.name };
 
     // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
     db.recordAudit(thread.org_id, req.bot!.id, 'message.send', 'thread_message', message.id, { thread_id: thread.id });
@@ -2741,16 +2752,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   // ─── Org Auth Management (Admin Bot) ─────────────────────
 
   /**
-   * POST /api/org/tickets — Create an org ticket (admin bots only)
-   * Auth: Bot token (admin role)
+   * POST /api/org/tickets — Create an org ticket (org admin or admin bot)
+   * Auth: Org ticket (org_secret login) or Bot token (admin role)
    * Body: { reusable?: boolean, expires_in?: number }
    * Returns: { ticket, expires_at, reusable }
    */
-  auth.post('/api/org/tickets', requireBot, requireAuthRole('admin'), (req, res) => {
+  auth.post('/api/org/tickets', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
     const { reusable, expires_in } = req.body;
 
-    const orgId = req.bot!.org_id;
-    const org = db.getOrgById(orgId);
+    const orgId = req.bot?.org_id || req.org?.id;
+    const org = orgId ? db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -2766,10 +2779,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const secretHash = org.org_secret;
 
     const isReusable = reusable === true;
-    const ticket = db.createOrgTicket(orgId, secretHash, {
+    const ticket = db.createOrgTicket(orgId!, secretHash, {
       reusable: isReusable,
       expiresAt,
-      createdBy: req.bot!.id,
+      createdBy: req.bot?.id,
     });
 
     res.json({
@@ -2780,15 +2793,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
-   * POST /api/org/rotate-secret — Rotate the org secret (admin bots only)
-   * Auth: Bot token (admin role)
+   * POST /api/org/rotate-secret — Rotate the org secret (org admin or admin bot)
+   * Auth: Org ticket (org_secret login) or Bot token (admin role)
    * Returns: { org_secret }
    */
-  auth.post('/api/org/rotate-secret', requireBot, requireAuthRole('admin'), (req, res) => {
-    const orgId = req.bot!.org_id;
-    const org = db.getOrgById(orgId);
+  auth.post('/api/org/rotate-secret', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const orgId = req.bot?.org_id || req.org?.id;
+    const org = orgId ? db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    if (org.status === 'destroyed') {
+      res.status(409).json({ error: 'Cannot rotate secret for destroyed org', code: 'ORG_DESTROYED' });
       return;
     }
 
@@ -2797,21 +2817,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const newSecretHash = HubDB.hashToken(newSecret);
 
     // Update in DB
-    db.rotateOrgSecret(orgId, newSecretHash);
+    db.rotateOrgSecret(orgId!, newSecretHash);
 
     // Invalidate all unredeemed org_tickets for this org
-    db.invalidateOrgTickets(orgId);
+    db.invalidateOrgTickets(orgId!);
 
     res.json({ org_secret: newSecret });
   });
 
   /**
-   * PATCH /api/org/bots/:bot_id/role — Update a bot's auth_role (admin bots only)
-   * Auth: Bot token (admin role)
+   * PATCH /api/org/bots/:bot_id/role — Update a bot's auth_role (org admin or admin bot)
+   * Auth: Org ticket (org_secret login) or Bot token (admin role)
    * Body: { auth_role: 'admin' | 'member' }
    * Returns: { bot_id, auth_role }
    */
-  auth.patch('/api/org/bots/:bot_id/role', requireBot, requireAuthRole('admin'), (req, res) => {
+  auth.patch('/api/org/bots/:bot_id/role', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
     const { auth_role } = req.body;
 
     // Validate auth_role
@@ -2820,6 +2842,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
+    const orgId = req.bot?.org_id || req.org?.id;
     const targetBotId = req.params.bot_id as string;
     const targetBot = db.getBotById(targetBotId);
     if (!targetBot) {
@@ -2828,18 +2851,21 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Verify same org
-    if (targetBot.org_id !== req.bot!.org_id) {
+    if (targetBot.org_id !== orgId) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
-    // Guard: admin cannot demote self (prevent lockout)
-    if (targetBotId === req.bot!.id && auth_role === 'member') {
+    // Guard: admin bot cannot demote self (prevent lockout)
+    if (req.bot && targetBotId === req.bot.id && auth_role === 'member') {
       res.status(400).json({ error: 'Cannot demote yourself', code: 'SELF_DEMOTION' });
       return;
     }
 
     db.setBotAuthRole(targetBotId, auth_role);
+
+    const actorId = req.bot?.id || 'org_admin';
+    db.recordAudit(orgId!, actorId, 'bot.role_change', 'bot', targetBotId, { auth_role });
 
     res.json({ bot_id: targetBotId, auth_role });
   });
