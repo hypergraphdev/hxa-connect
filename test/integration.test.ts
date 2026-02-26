@@ -534,12 +534,9 @@ describe('Migration & Schema', () => {
     expect(row.name).toBe('schema_versions');
   });
 
-  it('records applied migrations', () => {
+  it('schema_versions table exists and is empty on fresh install', () => {
     const rows = env.db['db'].prepare(`SELECT * FROM schema_versions`).all() as any[];
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows[0]).toHaveProperty('name');
-    expect(rows[0]).toHaveProperty('applied_at');
-    expect(rows[0].applied_at).toBeTypeOf('number');
+    expect(rows.length).toBe(0);
   });
 
   it('migration is idempotent (creating second HubDB on same dir succeeds)', () => {

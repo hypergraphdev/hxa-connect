@@ -39,19 +39,6 @@ export class HubDB {
     fs.mkdirSync(config.data_dir, { recursive: true });
     const dbPath = path.join(config.data_dir, 'hxa-connect.db');
 
-    // Auto-rename legacy DB file if new name doesn't exist yet
-    if (!fs.existsSync(dbPath)) {
-      const legacyPath = path.join(config.data_dir, 'botshub.db');
-      if (fs.existsSync(legacyPath)) {
-        fs.renameSync(legacyPath, dbPath);
-        // Also rename WAL/SHM sidecar files if present
-        const legacyWal = legacyPath + '-wal';
-        const legacyShm = legacyPath + '-shm';
-        if (fs.existsSync(legacyWal)) fs.renameSync(legacyWal, dbPath + '-wal');
-        if (fs.existsSync(legacyShm)) fs.renameSync(legacyShm, dbPath + '-shm');
-      }
-    }
-
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
@@ -65,6 +52,7 @@ export class HubDB {
         name TEXT NOT NULL,
         org_secret TEXT NOT NULL,
         persist_messages INTEGER DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL
       );
 
@@ -116,6 +104,7 @@ export class HubDB {
         sender_id TEXT NOT NULL,
         content TEXT NOT NULL,
         content_type TEXT DEFAULT 'text',
+        parts TEXT,
         created_at INTEGER NOT NULL
       );
 
@@ -131,6 +120,8 @@ export class HubDB {
         context TEXT,
         close_reason TEXT
           CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        permission_policy TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_activity_at INTEGER NOT NULL,
@@ -151,6 +142,7 @@ export class HubDB {
         sender_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         content TEXT NOT NULL,
         content_type TEXT DEFAULT 'text',
+        parts TEXT,
         metadata TEXT,
         created_at INTEGER NOT NULL
       );
@@ -204,10 +196,12 @@ export class HubDB {
         target_bot_id TEXT NOT NULL,
         type TEXT NOT NULL,
         payload TEXT NOT NULL,
+        ref_id TEXT,
         occurred_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_catchup_target ON catchup_events(target_bot_id, occurred_at);
       CREATE INDEX IF NOT EXISTS idx_catchup_occurred ON catchup_events(occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_catchup_ref ON catchup_events(target_bot_id, type, ref_id);
 
       CREATE TABLE IF NOT EXISTS webhook_status (
         bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
@@ -221,9 +215,11 @@ export class HubDB {
         org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
         messages_per_minute_per_bot INTEGER DEFAULT 60,
         threads_per_hour_per_bot INTEGER DEFAULT 30,
+        file_upload_mb_per_day_per_bot INTEGER DEFAULT 100,
         message_ttl_days INTEGER,
         thread_auto_close_days INTEGER,
         artifact_retention_days INTEGER,
+        default_thread_permission_policy TEXT,
         updated_at INTEGER NOT NULL
       );
 
@@ -261,9 +257,22 @@ export class HubDB {
       );
       CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot ON bot_tokens(bot_id);
       CREATE INDEX IF NOT EXISTS idx_bot_tokens_token ON bot_tokens(token);
+
+      CREATE TABLE IF NOT EXISTS org_tickets (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        secret_hash TEXT NOT NULL,
+        reusable INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER NOT NULL,
+        consumed INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_org_tickets_org ON org_tickets(org_id);
+      CREATE INDEX IF NOT EXISTS idx_org_tickets_expires ON org_tickets(expires_at);
     `);
 
-    // ── Schema version tracking ──────────────────────────────
+    // ── Schema version tracking (for future migrations) ─────
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_versions (
         name TEXT PRIMARY KEY,
@@ -271,200 +280,7 @@ export class HubDB {
       );
     `);
 
-    // Run versioned migrations — each only executes once
-    this.runMigration('001_add_admin_secret', () => {
-      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN org_secret TEXT`); } catch { /* exists */ }
-    });
-
-    this.runMigration('002_add_agent_profile_fields', () => {
-      const cols = ['bio', 'role', '"function"', 'team', 'tags', 'languages', 'protocols',
-                    'status_text', 'timezone', 'active_hours'];
-      for (const col of cols) {
-        try { this.db.exec(`ALTER TABLE agents ADD COLUMN ${col === '"function"' ? '"function" TEXT' : col + ' TEXT'}`); } catch { /* exists */ }
-      }
-      try { this.db.exec(`ALTER TABLE agents ADD COLUMN version TEXT DEFAULT '1.0.0'`); } catch { /* exists */ }
-      try { this.db.exec(`ALTER TABLE agents ADD COLUMN runtime TEXT`); } catch { /* exists */ }
-      try { this.db.prepare(`UPDATE agents SET version = '1.0.0' WHERE version IS NULL OR version = ''`).run(); } catch { /* table may not exist on fresh DBs */ }
-    });
-
-    this.runMigration('003_add_parts_column', () => {
-      try { this.db.exec(`ALTER TABLE messages ADD COLUMN parts TEXT`); } catch { /* exists */ }
-      try { this.db.exec(`ALTER TABLE thread_messages ADD COLUMN parts TEXT`); } catch { /* exists */ }
-    });
-
-    this.runMigration('004_add_thread_revision', () => {
-      try { this.db.exec(`ALTER TABLE threads ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); } catch { /* exists */ }
-    });
-
-    this.runMigration('005_add_permission_policy', () => {
-      try { this.db.exec(`ALTER TABLE threads ADD COLUMN permission_policy TEXT`); } catch { /* exists */ }
-      try { this.db.exec(`ALTER TABLE org_settings ADD COLUMN default_thread_permission_policy TEXT`); } catch { /* exists */ }
-    });
-
-    // Migration: add tags column to threads (replaces type field)
-    try {
-      this.db.exec(`ALTER TABLE threads ADD COLUMN tags TEXT`);
-    } catch {
-      // Column already exists
-    }
-
-    // Migration: add ref_id to catchup_events for UPSERT aggregation
-    try {
-      this.db.exec(`ALTER TABLE catchup_events ADD COLUMN ref_id TEXT`);
-    } catch {
-      // Column already exists
-    }
-    // Index creation is idempotent (IF NOT EXISTS) — must be outside try-catch
-    // so it runs even if ALTER TABLE was already applied in a prior startup
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_catchup_ref ON catchup_events(target_bot_id, type, ref_id)`);
-
-    // Migration: fix FK constraints on threads/thread_messages/artifacts
-    // SQLite cannot ALTER FK constraints, so we must recreate tables.
-    this.runMigration('008_fix_thread_foreign_keys', () => {
-      this.migrateThreadForeignKeys();
-    });
-
-    // Migration: fix files.uploader_id NOT NULL → nullable for ON DELETE SET NULL
-    this.runMigration('009_fix_files_foreign_key', () => {
-      this.migrateFilesForeignKey();
-    });
-
-    // Generate org_secret for orgs that don't have one
-    this.runMigration('006_generate_admin_secrets', () => {
-      const orgsWithoutSecret = this.db.prepare('SELECT id FROM orgs WHERE org_secret IS NULL').all() as any[];
-      for (const org of orgsWithoutSecret) {
-        const secret = crypto.randomBytes(24).toString('hex');
-        this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(secret, org.id);
-        console.log(`  🔐 Generated org_secret for org ${org.id}`);
-      }
-    });
-
-    // Migration: add file_upload_mb_per_day_per_bot to org_settings (O6: per-bot file upload rate limit)
-    try { this.db.exec(`ALTER TABLE org_settings ADD COLUMN file_upload_mb_per_day_per_bot INTEGER DEFAULT 100`); } catch { /* exists */ }
-
-    // Migration: transition any legacy 'open' threads to 'active' (P1: 5-state machine)
-    this.db.prepare("UPDATE threads SET status = 'active' WHERE status = 'open'").run();
-
-    // Migration: hash any existing plaintext tokens (S4 security migration)
-    this.runMigration('007_hash_plaintext_tokens', () => {
-      this.migrateHashTokens();
-    });
-
-    // Migration: hash org org_secret (missed in 007)
-    this.runMigration('010_hash_org_keys', () => {
-      this.migrateHashOrgKeys();
-    });
-
-    // Migration: add status column to orgs (Phase 1 – org auth redesign)
-    this.runMigration('011_add_org_status', () => {
-      try { this.db.exec(`ALTER TABLE orgs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`); } catch { /* exists */ }
-    });
-
-    // Migration: add auth_role column to agents (Phase 1 – org auth redesign)
-    this.runMigration('012_add_agent_auth_role', () => {
-      try { this.db.exec(`ALTER TABLE agents ADD COLUMN auth_role TEXT NOT NULL DEFAULT 'member'`); } catch { /* exists */ }
-      // Backfill: all existing agents were implicitly admin
-      try { this.db.prepare(`UPDATE agents SET auth_role = 'admin'`).run(); } catch { /* table may not exist on fresh DBs */ }
-    });
-
-    // Migration: create org_tickets table (Phase 1 – org auth redesign)
-    this.runMigration('013_create_org_tickets', () => {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS org_tickets (
-          id TEXT PRIMARY KEY,
-          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-          secret_hash TEXT NOT NULL,
-          reusable INTEGER NOT NULL DEFAULT 0,
-          expires_at INTEGER NOT NULL,
-          consumed INTEGER NOT NULL DEFAULT 0,
-          created_by TEXT,
-          created_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_org_tickets_org ON org_tickets(org_id);
-        CREATE INDEX IF NOT EXISTS idx_org_tickets_expires ON org_tickets(expires_at);
-      `);
-    });
-
-    // Migration: rename agents→bots, agent_tokens→bot_tokens, agent_id→bot_id columns
-    this.runMigration('014_rename_agents_to_bots', () => {
-      // Guard: only run if the old `agents` table exists (on fresh DBs, schema init already creates `bots`)
-      const hasAgentsTable = this.db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'"
-      ).get();
-      if (!hasAgentsTable) return;
-
-      this.db.pragma('foreign_keys = OFF');
-      try {
-        this.db.exec(`
-          BEGIN TRANSACTION;
-
-          -- Rename agents → bots
-          ALTER TABLE agents RENAME TO bots;
-
-          -- Rename agent_tokens → bot_tokens (before column recreation)
-          ALTER TABLE agent_tokens RENAME TO bot_tokens;
-
-          -- Recreate bot_tokens with bot_id replacing agent_id
-          CREATE TABLE bot_tokens_new (
-            id TEXT PRIMARY KEY,
-            bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-            token TEXT UNIQUE NOT NULL,
-            scopes TEXT NOT NULL DEFAULT '["full"]',
-            label TEXT,
-            expires_at INTEGER,
-            created_at INTEGER NOT NULL,
-            last_used_at INTEGER
-          );
-          INSERT INTO bot_tokens_new (id, bot_id, token, scopes, label, expires_at, created_at, last_used_at)
-            SELECT id, agent_id, token, scopes, label, expires_at, created_at, last_used_at FROM bot_tokens;
-          DROP TABLE bot_tokens;
-          ALTER TABLE bot_tokens_new RENAME TO bot_tokens;
-
-          -- Recreate channel_members with bot_id replacing agent_id
-          CREATE TABLE channel_members_new (
-            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-            joined_at INTEGER NOT NULL,
-            PRIMARY KEY(channel_id, bot_id)
-          );
-          INSERT INTO channel_members_new (channel_id, bot_id, joined_at)
-            SELECT channel_id, agent_id, joined_at FROM channel_members;
-          DROP TABLE channel_members;
-          ALTER TABLE channel_members_new RENAME TO channel_members;
-
-          -- Recreate webhook_status with bot_id replacing agent_id
-          CREATE TABLE webhook_status_new (
-            bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
-            last_success INTEGER,
-            last_failure INTEGER,
-            consecutive_failures INTEGER DEFAULT 0,
-            degraded INTEGER DEFAULT 0
-          );
-          INSERT INTO webhook_status_new (bot_id, last_success, last_failure, consecutive_failures, degraded)
-            SELECT agent_id, last_success, last_failure, consecutive_failures, degraded FROM webhook_status;
-          DROP TABLE webhook_status;
-          ALTER TABLE webhook_status_new RENAME TO webhook_status;
-
-          -- Recreate indexes with new names
-          DROP INDEX IF EXISTS idx_agents_org;
-          DROP INDEX IF EXISTS idx_channel_members_agent;
-          DROP INDEX IF EXISTS idx_agent_tokens_agent;
-          DROP INDEX IF EXISTS idx_agent_tokens_token;
-          CREATE INDEX IF NOT EXISTS idx_bots_org ON bots(org_id);
-          CREATE INDEX IF NOT EXISTS idx_channel_members_bot ON channel_members(bot_id);
-          CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot ON bot_tokens(bot_id);
-          CREATE INDEX IF NOT EXISTS idx_bot_tokens_token ON bot_tokens(token);
-
-        COMMIT;`);
-
-        console.log('  ✅ Renamed agents→bots, agent_tokens→bot_tokens, agent_id→bot_id');
-      } catch (err) {
-        try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
-        throw err;
-      } finally {
-        this.db.pragma('foreign_keys = ON');
-      }
-    });
+    // Future migrations go here using this.runMigration('name', () => { ... })
   }
 
   /**
@@ -482,206 +298,6 @@ export class HubDB {
     this.db.prepare(
       'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)'
     ).run(name, Date.now());
-  }
-
-  private migrateThreadForeignKeys() {
-    // Check if threads table has the old NOT NULL initiator_id without ON DELETE SET NULL.
-    // We detect this by checking the table schema via pragma.
-    const threadsInfo = this.db.pragma('table_info(threads)') as any[];
-    if (threadsInfo.length === 0) return; // table doesn't exist yet (fresh install)
-
-    const initiatorCol = threadsInfo.find((c: any) => c.name === 'initiator_id');
-    if (!initiatorCol || initiatorCol.notnull === 0) return; // already nullable = already migrated
-
-    console.log('  🔧 Migrating thread tables for FK constraint fixes...');
-
-    // Disable FK enforcement during migration to prevent CASCADE deletes
-    // when dropping parent tables (SQLite recommended practice for table recreation)
-    this.db.pragma('foreign_keys = OFF');
-
-    try {
-      this.db.exec(`
-        BEGIN TRANSACTION;
-        -- threads: initiator_id NOT NULL → nullable, ON DELETE SET NULL; channel_id ON DELETE SET NULL
-        CREATE TABLE threads_new (
-          id TEXT PRIMARY KEY,
-          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-          topic TEXT NOT NULL,
-          tags TEXT,
-          status TEXT NOT NULL DEFAULT 'active'
-            CHECK(status IN ('active', 'blocked', 'reviewing', 'resolved', 'closed')),
-          initiator_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
-          channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
-          context TEXT,
-          close_reason TEXT
-            CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
-          revision INTEGER NOT NULL DEFAULT 1,
-          permission_policy TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          last_activity_at INTEGER NOT NULL,
-          resolved_at INTEGER
-        );
-        INSERT INTO threads_new (id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at)
-          SELECT id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason, revision, permission_policy, created_at, updated_at, last_activity_at, resolved_at FROM threads;
-        DROP TABLE threads;
-        ALTER TABLE threads_new RENAME TO threads;
-
-        -- thread_messages: sender_id NOT NULL → nullable, ON DELETE SET NULL
-        CREATE TABLE thread_messages_new (
-          id TEXT PRIMARY KEY,
-          thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-          sender_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
-          content TEXT NOT NULL,
-          content_type TEXT DEFAULT 'text',
-          parts TEXT,
-          metadata TEXT,
-          created_at INTEGER NOT NULL
-        );
-        INSERT INTO thread_messages_new (id, thread_id, sender_id, content, content_type, parts, metadata, created_at)
-          SELECT id, thread_id, sender_id, content, content_type, parts, metadata, created_at FROM thread_messages;
-        DROP TABLE thread_messages;
-        ALTER TABLE thread_messages_new RENAME TO thread_messages;
-
-        -- artifacts: contributor_id NOT NULL → nullable, ON DELETE SET NULL
-        CREATE TABLE artifacts_new (
-          id TEXT PRIMARY KEY,
-          thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-          artifact_key TEXT NOT NULL,
-          type TEXT NOT NULL DEFAULT 'text'
-            CHECK(type IN ('text', 'markdown', 'json', 'code', 'file', 'link')),
-          title TEXT,
-          content TEXT,
-          language TEXT,
-          url TEXT,
-          mime_type TEXT,
-          contributor_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
-          version INTEGER NOT NULL DEFAULT 1,
-          format_warning INTEGER DEFAULT 0,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          UNIQUE(thread_id, artifact_key, version)
-        );
-        INSERT INTO artifacts_new (id, thread_id, artifact_key, type, title, content, language, url, mime_type, contributor_id, version, format_warning, created_at, updated_at)
-          SELECT id, thread_id, artifact_key, type, title, content, language, url, mime_type, contributor_id, version, format_warning, created_at, updated_at FROM artifacts;
-        DROP TABLE artifacts;
-        ALTER TABLE artifacts_new RENAME TO artifacts;
-
-        -- Recreate indexes (dropped with old tables)
-        CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
-        CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
-        CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
-        CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_key ON artifacts(thread_id, artifact_key);
-      COMMIT;`);
-
-      console.log('  ✅ Thread FK migration complete');
-    } catch (err) {
-      try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
-      throw err;
-    } finally {
-      this.db.pragma('foreign_keys = ON');
-    }
-  }
-
-  private migrateFilesForeignKey() {
-    const filesInfo = this.db.pragma('table_info(files)') as any[];
-    if (filesInfo.length === 0) return; // table doesn't exist yet (fresh install)
-
-    const uploaderCol = filesInfo.find((c: any) => c.name === 'uploader_id');
-    if (!uploaderCol || uploaderCol.notnull === 0) return; // already nullable = already migrated
-
-    console.log('  🔧 Migrating files table: uploader_id NOT NULL → nullable...');
-
-    this.db.pragma('foreign_keys = OFF');
-
-    try {
-      this.db.exec(`BEGIN TRANSACTION;
-        CREATE TABLE files_new (
-          id TEXT PRIMARY KEY,
-          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-          uploader_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
-          name TEXT NOT NULL,
-          mime_type TEXT,
-          size INTEGER NOT NULL,
-          path TEXT NOT NULL,
-          created_at INTEGER NOT NULL
-        );
-        INSERT INTO files_new (id, org_id, uploader_id, name, mime_type, size, path, created_at)
-          SELECT id, org_id, uploader_id, name, mime_type, size, path, created_at FROM files;
-        DROP TABLE files;
-        ALTER TABLE files_new RENAME TO files;
-
-        CREATE INDEX IF NOT EXISTS idx_files_org ON files(org_id, created_at);
-      COMMIT;`);
-
-      console.log('  ✅ Files FK migration complete');
-    } catch (err) {
-      try { this.db.exec('ROLLBACK;'); } catch { /* no active transaction */ }
-      throw err;
-    } finally {
-      this.db.pragma('foreign_keys = ON');
-    }
-  }
-
-  /**
-   * Migration: hash any existing plaintext agent tokens and scoped tokens.
-   * Plaintext tokens have a known prefix (agent_ or scoped_).
-   * SHA-256 hashes are 64-char hex strings with no such prefix.
-   * After this migration runs, all tokens in DB are SHA-256 hashes.
-   */
-  private migrateHashTokens() {
-    try {
-      // Migrate agents.token
-      const agentRows = this.db.prepare(`SELECT id, token FROM agents`).all() as { id: string; token: string }[];
-      let agentMigrated = 0;
-      for (const row of agentRows) {
-        // Plaintext agent tokens start with "agent_"; hashes are 64-char hex
-        if (row.token.startsWith('agent_')) {
-          const hash = HubDB.hashToken(row.token);
-          this.db.prepare('UPDATE agents SET token = ? WHERE id = ?').run(hash, row.id);
-          agentMigrated++;
-        }
-      }
-      if (agentMigrated > 0) {
-        console.log(`  🔐 Hashed ${agentMigrated} plaintext agent token(s)`);
-      }
-
-      // Migrate agent_tokens.token
-      const scopedRows = this.db.prepare(`SELECT id, token FROM agent_tokens`).all() as { id: string; token: string }[];
-      let scopedMigrated = 0;
-      for (const row of scopedRows) {
-        if (row.token.startsWith('agent_') || row.token.startsWith('scoped_')) {
-          const hash = HubDB.hashToken(row.token);
-          this.db.prepare('UPDATE agent_tokens SET token = ? WHERE id = ?').run(hash, row.id);
-          scopedMigrated++;
-        }
-      }
-      if (scopedMigrated > 0) {
-        console.log(`  🔐 Hashed ${scopedMigrated} plaintext scoped token(s)`);
-      }
-    } catch { /* tables may not exist on fresh DBs */ }
-  }
-
-  /**
-   * Migration: hash any existing plaintext org org_secret.
-   * Plaintext org secrets are 48-char hex (24 random bytes); SHA-256 hashes are 64-char hex.
-   */
-  private migrateHashOrgKeys() {
-    const orgRows = this.db.prepare(`SELECT id, org_secret FROM orgs`).all() as { id: string; org_secret: string | null }[];
-    let orgMigrated = 0;
-    for (const row of orgRows) {
-      const needsSecretHash = row.org_secret && row.org_secret.length !== 64;
-      if (needsSecretHash) {
-        const secretHash = HubDB.hashToken(row.org_secret!);
-        this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(secretHash, row.id);
-        orgMigrated++;
-      }
-    }
-    if (orgMigrated > 0) {
-      console.log(`  🔐 Hashed ${orgMigrated} plaintext org secret(s)`);
-    }
   }
 
   private rowToOrg(row: any): Org {
