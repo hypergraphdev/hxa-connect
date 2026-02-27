@@ -810,6 +810,19 @@ export class HubDB {
     return this.getBotById(botId);
   }
 
+  renameBot(botId: string, newName: string): { bot: Bot; conflict: false } | { bot: undefined; conflict: true } {
+    try {
+      this.db.prepare('UPDATE bots SET name = ? WHERE id = ?').run(newName, botId);
+    } catch (err: any) {
+      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return { bot: undefined, conflict: true };
+      }
+      throw err;
+    }
+    const bot = this.getBotById(botId);
+    return { bot: bot!, conflict: false };
+  }
+
   getBotByToken(token: string): Bot | undefined {
     const tokenHash = HubDB.hashToken(token);
     const row = this.db.prepare('SELECT * FROM bots WHERE token = ?').get(tokenHash) as any;

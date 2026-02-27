@@ -822,6 +822,56 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
+   * PATCH /api/me/name — Rename current bot
+   */
+  auth.patch('/api/me/name', requireBot, requireScope('profile'), (req, res) => {
+    const { name } = req.body;
+
+    if (!name) {
+      res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const fieldError = checkFieldLimits({ name }, { name: FIELD_LIMITS.name } as any);
+    if (fieldError) {
+      res.status(400).json({ error: fieldError });
+      return;
+    }
+
+    if (name === req.bot!.name) {
+      res.status(400).json({ error: 'New name is the same as current name', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const old_name = req.bot!.name;
+    const result = db.renameBot(req.bot!.id, name);
+
+    if (result.conflict) {
+      res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
+      return;
+    }
+
+    // Audit
+    db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.rename', 'bot', req.bot!.id, { old_name, new_name: name });
+
+    // Broadcast to org
+    ws.broadcastToOrg(req.bot!.org_id, {
+      type: 'bot_renamed',
+      bot_id: req.bot!.id,
+      old_name,
+      new_name: name,
+    });
+
+    req.bot = result.bot;
+    res.json(toBotResponse(result.bot));
+  });
+
+  /**
    * GET /api/peers — List other bots in my org (from bot perspective)
    */
   auth.get('/api/peers', requireBot, requireScope('read'), (req, res) => {
