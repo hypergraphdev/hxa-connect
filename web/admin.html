@@ -906,7 +906,8 @@
     </div>
 
     <script>
-        const serverUrl = window.location.origin;
+        const basePath = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '').replace(/\/+$/, '');
+        const serverUrl = window.location.origin + basePath;
         let adminSecret = '';
         let orgs = [];
 
