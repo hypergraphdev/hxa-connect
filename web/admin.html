@@ -349,6 +349,18 @@
             border: 1px solid rgba(239, 68, 68, 0.2);
         }
 
+        .badge-expired {
+            background: rgba(245, 158, 11, 0.12);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .badge-exhausted {
+            background: rgba(239, 68, 68, 0.12);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
         .org-actions {
             display: flex;
             gap: 6px;
@@ -854,6 +866,10 @@
                     <div class="stat-value" id="stat-bots">—</div>
                     <div class="stat-label">Total Bots</div>
                 </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-codes">—</div>
+                    <div class="stat-label">Invite Codes</div>
+                </div>
             </div>
 
             <!-- Org List View -->
@@ -890,6 +906,40 @@
                 </div>
             </div>
 
+            <!-- Invite Codes Section -->
+            <div id="view-invite-codes" style="margin-top:32px;">
+                <div class="section-header">
+                    <div class="section-title">Invite Codes</div>
+                    <button class="btn-create" onclick="showCreateCodeModal()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        Create Code
+                    </button>
+                </div>
+                <div class="org-table-wrap">
+                <table class="org-table">
+                    <thead>
+                        <tr>
+                            <th>Label</th>
+                            <th>Code ID</th>
+                            <th>Uses</th>
+                            <th>Expires</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="invite-codes-tbody">
+                        <tr>
+                            <td colspan="6" class="empty-table">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+
             <!-- Org Detail View -->
             <div id="view-detail" style="display:none">
                 <button class="back-link" onclick="showListView()">
@@ -910,6 +960,7 @@
         const serverUrl = window.location.origin + basePath;
         let adminSecret = '';
         let orgs = [];
+        let inviteCodes = [];
 
         // ─── Auth ───
         function doLogin() {
@@ -936,6 +987,7 @@
                     document.getElementById('login-screen').style.display = 'none';
                     document.getElementById('console').style.display = 'block';
                     renderOrgs();
+                    loadInviteCodes();
                 })
                 .catch(err => {
                     document.getElementById('login-screen').style.display = 'flex';
@@ -1190,6 +1242,7 @@
 
         function showDetailView(org) {
             document.getElementById('view-list').style.display = 'none';
+            document.getElementById('view-invite-codes').style.display = 'none';
             document.getElementById('view-detail').style.display = '';
 
             const badgeClass = org.status === 'active' ? 'badge-active' : org.status === 'suspended' ? 'badge-suspended' : 'badge-destroyed';
@@ -1216,6 +1269,7 @@
         function showListView() {
             document.getElementById('view-detail').style.display = 'none';
             document.getElementById('view-list').style.display = '';
+            document.getElementById('view-invite-codes').style.display = '';
         }
 
         // ─── Create Org Modal ───
@@ -1355,6 +1409,178 @@
             } catch {
                 toast('Copy failed — use manual selection');
             }
+        }
+
+        // ─── Invite Codes ───
+
+        async function loadInviteCodes() {
+            try {
+                inviteCodes = await adminApi('GET', '/api/platform/invite-codes');
+                document.getElementById('stat-codes').textContent = inviteCodes.length;
+                renderInviteCodes(inviteCodes);
+            } catch (e) {
+                document.getElementById('stat-codes').textContent = '—';
+                document.getElementById('invite-codes-tbody').innerHTML =
+                    '<tr><td colspan="6" class="empty-table">Failed to load invite codes.</td></tr>';
+            }
+        }
+
+        function renderInviteCodes(codes) {
+            const tbody = document.getElementById('invite-codes-tbody');
+
+            if (codes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-table">No invite codes yet. Click "Create Code" to generate one.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = codes.map(c => {
+                let statusLabel, badgeClass;
+                if (c.exhausted) {
+                    statusLabel = 'exhausted';
+                    badgeClass = 'badge-exhausted';
+                } else if (c.expired) {
+                    statusLabel = 'expired';
+                    badgeClass = 'badge-expired';
+                } else {
+                    statusLabel = 'active';
+                    badgeClass = 'badge-active';
+                }
+
+                const uses = c.max_uses === 0
+                    ? `${c.use_count} / \u221e`
+                    : `${c.use_count} / ${c.max_uses}`;
+                const expires = c.expires_at
+                    ? new Date(c.expires_at).toLocaleDateString()
+                    : 'Never';
+                const label = c.label || '<span style="color:var(--text-dim);">—</span>';
+
+                return `<tr>
+          <td>${c.label ? escHtml(c.label) : '<span style="color:var(--text-dim);">\u2014</span>'}</td>
+          <td class="org-id-cell">${escHtml(c.id.slice(0, 12))}\u2026</td>
+          <td style="font-family:var(--font-mono);font-size:13px;">${uses}</td>
+          <td style="color:var(--text-dim);font-size:13px;">${expires}</td>
+          <td><span class="badge ${badgeClass}">${statusLabel}</span></td>
+          <td class="org-actions"><button class="btn-sm btn-sm-destroy" onclick="deleteInviteCode('${esc(c.id)}','${esc(c.label || c.id.slice(0, 8))}')">Delete</button></td>
+        </tr>`;
+            }).join('');
+        }
+
+        function showCreateCodeModal() {
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay';
+            overlay.id = 'create-code-modal';
+            overlay.innerHTML = `
+        <div class="modal">
+          <div class="modal-title">Create Invite Code</div>
+          <div class="modal-field">
+            <label for="new-code-label">Label (optional)</label>
+            <input type="text" id="new-code-label" placeholder="e.g. Partner onboarding" />
+          </div>
+          <div class="modal-field">
+            <label for="new-code-max-uses">Max Uses (0 = unlimited)</label>
+            <input type="number" id="new-code-max-uses" placeholder="0" min="0" />
+          </div>
+          <div class="modal-field">
+            <label for="new-code-expires">Expires In</label>
+            <select id="new-code-expires">
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+              <option value="90d" selected>90 days</option>
+              <option value="365d">1 year</option>
+            </select>
+          </div>
+          <div class="modal-actions">
+            <button class="modal-btn modal-btn-cancel" onclick="closeModal('create-code-modal')">Cancel</button>
+            <button class="modal-btn modal-btn-primary" id="create-code-btn" onclick="doCreateCode()">Create</button>
+          </div>
+        </div>
+      `;
+            document.body.appendChild(overlay);
+            overlay.addEventListener('click', e => { if (e.target === overlay) closeModal('create-code-modal'); });
+            document.getElementById('new-code-label').focus();
+        }
+
+        async function doCreateCode() {
+            const btn = document.getElementById('create-code-btn');
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+
+            const label = document.getElementById('new-code-label').value.trim() || undefined;
+            const maxUsesVal = document.getElementById('new-code-max-uses').value;
+            const max_uses = maxUsesVal !== '' ? parseInt(maxUsesVal, 10) : undefined;
+            const expiresMap = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, '365d': 365 * 86400 };
+            const expires_in = expiresMap[document.getElementById('new-code-expires').value] || 90 * 86400;
+
+            try {
+                const result = await adminApi('POST', '/api/platform/invite-codes', {
+                    label,
+                    max_uses,
+                    expires_in,
+                });
+                closeModal('create-code-modal');
+
+                // Show the plaintext code (only returned on creation)
+                const overlay = document.createElement('div');
+                overlay.className = 'modal-overlay';
+                overlay.id = 'code-created-modal';
+                overlay.innerHTML = `
+          <div class="modal" style="text-align:center;">
+            <div style="color:var(--green);margin-bottom:12px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
+            </div>
+            <div class="modal-title" style="margin-bottom:8px;">Invite Code Created</div>
+            <div style="font-size:13px;color:var(--text-dim);margin-bottom:20px;">Share this code with the intended recipient.</div>
+            <div style="text-align:left;">
+              <div class="modal-field">
+                <label>Invite Code</label>
+                <div style="display:flex;align-items:center;gap:8px;padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <span class="detail-value" style="flex:1;color:var(--accent);user-select:all;word-break:break-all;">${escHtml(result.code)}</span>
+                  <button class="modal-btn modal-btn-primary" id="copy-code-btn" style="padding:6px 14px;white-space:nowrap;">Copy</button>
+                </div>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:-6px;margin-bottom:12px;">This code will not be shown again.</div>
+            </div>
+            <div class="modal-actions" style="justify-content:center;">
+              <button class="modal-btn modal-btn-cancel" onclick="closeModal('code-created-modal')">Done</button>
+            </div>
+          </div>
+        `;
+                document.body.appendChild(overlay);
+                overlay.addEventListener('click', e => { if (e.target === overlay) closeModal('code-created-modal'); });
+                overlay.querySelector('#copy-code-btn').onclick = () => {
+                    navigator.clipboard.writeText(result.code)
+                        .then(() => {
+                            toast('Invite code copied to clipboard');
+                            overlay.querySelector('#copy-code-btn').textContent = 'Copied!';
+                            setTimeout(() => {
+                                const b = overlay.querySelector('#copy-code-btn');
+                                if (b) b.textContent = 'Copy';
+                            }, 2000);
+                        })
+                        .catch(() => toast('Copy failed — use manual selection'));
+                };
+
+                await loadInviteCodes();
+            } catch (e) {
+                toast('Failed: ' + e.message);
+                btn.disabled = false;
+                btn.textContent = 'Create';
+            }
+        }
+
+        async function deleteInviteCode(id, label) {
+            const ok = await showAdminConfirm({
+                title: 'Delete Invite Code',
+                message: `Are you sure you want to delete invite code <strong>"${escHtml(label)}"</strong>?<br>This action cannot be undone.`,
+                confirmText: 'Delete',
+                danger: true,
+            });
+            if (!ok) return;
+            try {
+                await adminApi('DELETE', `/api/platform/invite-codes/${id}`);
+                toast('Invite code deleted');
+                await loadInviteCodes();
+            } catch (e) { toast('Failed: ' + e.message); }
         }
     </script>
 </body>

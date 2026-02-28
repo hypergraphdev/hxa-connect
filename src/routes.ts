@@ -450,6 +450,130 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json({ org_secret: newSecret });
   });
 
+  // ─── Platform Invite Codes (Self-Service Org Creation) ────
+
+  /**
+   * POST /api/platform/invite-codes — Create a reusable invite code
+   * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
+   * Body: { label?, max_uses?, expires_in? }
+   * Returns: { id, code, label, max_uses, use_count, expires_at, created_at }
+   */
+  router.post('/api/platform/invite-codes', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const { label, max_uses, expires_in } = req.body;
+
+    // Validate max_uses
+    if (max_uses !== undefined && (typeof max_uses !== 'number' || max_uses < 0 || !Number.isInteger(max_uses))) {
+      res.status(400).json({ error: 'max_uses must be a non-negative integer', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Validate expires_in (seconds, default 90 days)
+    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 90 * 86400;
+    const expiresAt = Date.now() + expiresInSec * 1000;
+
+    // Validate label
+    if (label !== undefined && (typeof label !== 'string' || label.length > 256)) {
+      res.status(400).json({ error: 'label must be a string up to 256 characters', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Generate a plaintext invite code
+    const plaintextCode = crypto.randomBytes(24).toString('hex');
+    const codeHash = HubDB.hashToken(plaintextCode);
+
+    const inviteCode = db.createInviteCode(codeHash, {
+      label: label ?? undefined,
+      maxUses: max_uses ?? 0,
+      expiresAt,
+    });
+
+    // Return with plaintext code (shown only once)
+    res.status(201).json({
+      id: inviteCode.id,
+      code: plaintextCode,
+      label: inviteCode.label,
+      max_uses: inviteCode.max_uses,
+      use_count: inviteCode.use_count,
+      expires_at: inviteCode.expires_at,
+      created_at: inviteCode.created_at,
+    });
+  });
+
+  /**
+   * GET /api/platform/invite-codes — List all invite codes
+   * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
+   */
+  router.get('/api/platform/invite-codes', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const codes = db.listInviteCodes().map(c => ({
+      id: c.id,
+      label: c.label,
+      max_uses: c.max_uses,
+      use_count: c.use_count,
+      expires_at: c.expires_at,
+      created_at: c.created_at,
+      expired: c.expires_at <= Date.now(),
+      exhausted: c.max_uses > 0 && c.use_count >= c.max_uses,
+    }));
+
+    res.json(codes);
+  });
+
+  /**
+   * DELETE /api/platform/invite-codes/:id — Revoke an invite code
+   * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
+   */
+  router.delete('/api/platform/invite-codes/:id', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const deleted = db.deleteInviteCode(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Invite code not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    res.status(204).end();
+  });
+
+  /**
+   * POST /api/platform/orgs — Create an org using an invite code (self-service)
+   * No auth required — the invite code IS the authorization.
+   * Body: { invite_code, name }
+   * Returns: { org_id, name, org_secret }
+   */
+  router.post('/api/platform/orgs', (req, res) => {
+    const { invite_code, name } = req.body;
+
+    if (!invite_code || typeof invite_code !== 'string') {
+      res.status(400).json({ error: 'invite_code is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (!name || typeof name !== 'string') {
+      res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (name.length > 128) {
+      res.status(400).json({ error: 'name must be 128 characters or fewer', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const codeHash = HubDB.hashToken(invite_code);
+    const result = db.createOrgWithInviteCode(codeHash, name, config.default_persist);
+    if ('error' in result) {
+      res.status(401).json({ error: result.error, code: 'INVALID_INVITE_CODE' });
+      return;
+    }
+
+    res.status(201).json({
+      org_id: result.org.id,
+      name: result.org.name,
+      org_secret: result.org.org_secret,
+    });
+  });
+
   // ─── Shared Registration Validation ───────────────────────
 
   /**

@@ -153,6 +153,16 @@ export interface Artifact {
   updated_at: number;
 }
 
+export interface PlatformInviteCode {
+  id: string;
+  code_hash: string;
+  label: string | null;
+  max_uses: number;
+  use_count: number;
+  expires_at: number;
+  created_at: number;
+}
+
 export interface FileRecord {
   id: string;
   org_id: string;
