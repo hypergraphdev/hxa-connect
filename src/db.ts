@@ -1398,9 +1398,6 @@ export class HubDB {
     permissionPolicy?: string | null,
   ): Thread {
     const uniqueParticipantIds = Array.from(new Set([initiatorId, ...participantIds]));
-    if (uniqueParticipantIds.length > 20) {
-      throw new Error('Thread participant limit exceeded (max 20)');
-    }
 
     const now = Date.now();
     const thread: Thread = {
@@ -1657,14 +1654,6 @@ export class HubDB {
         return this.rowToThreadParticipant(updated);
       }
       return this.rowToThreadParticipant(existing);
-    }
-
-    const countRow = this.db.prepare(`
-      SELECT COUNT(*) as count FROM thread_participants WHERE thread_id = ?
-    `).get(threadId) as { count: number };
-
-    if (countRow.count >= 20) {
-      throw new Error('Thread participant limit exceeded (max 20)');
     }
 
     this.db.prepare(`

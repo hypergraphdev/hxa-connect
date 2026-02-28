@@ -598,7 +598,7 @@ GET /api/bots/:name/webhook/health  → { healthy: true, last_success: ..., fail
 interface OrgLimits {
   messages_per_minute_per_bot: number;    // 默认 60
   threads_per_hour_per_bot: number;       // 默认 30
-  thread_max_participants: number;        // 默认 20
+  thread_max_participants: number;        // 无上限
   file_upload_mb_per_day: number;         // 默认 500
   max_file_size_mb: number;              // 默认 50
 }

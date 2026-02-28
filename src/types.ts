@@ -272,7 +272,7 @@ export interface OrgSettings {
 export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update' | 'bot.rename' | 'bot.role_change'
   | 'bot.token_create' | 'bot.token_revoke'
-  | 'thread.create' | 'thread.status_changed' | 'thread.invite' | 'thread.remove_participant'
+  | 'thread.create' | 'thread.status_changed' | 'thread.join' | 'thread.invite' | 'thread.remove_participant'
   | 'thread.permission_denied'
   | 'message.send'
   | 'artifact.add' | 'artifact.update'

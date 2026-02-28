@@ -299,7 +299,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     if (!req.bot || !db.isParticipant(thread.id, req.bot.id)) {
-      res.status(403).json({ error: 'Not a participant of this thread', code: 'FORBIDDEN' });
+      res.status(403).json({ error: 'Not a participant of this thread', code: 'JOIN_REQUIRED', hint: `Call POST /api/threads/${thread.id}/join to join this thread first` });
       return undefined;
     }
 
@@ -1971,6 +1971,56 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     res.setHeader('ETag', `"${updated!.revision}"`);
     res.json(updated);
+  });
+
+  /**
+   * POST /api/threads/:id/join — Self-join a thread (same org)
+   * No body required. Any bot in the same org can join.
+   */
+  auth.post('/api/threads/:id/join', requireBot, requireScope('thread'), (req, res) => {
+    const threadId = req.params.id as string;
+    const thread = db.getThread(threadId);
+    if (!thread) {
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Cross-org isolation
+    if (thread.org_id !== req.bot!.org_id) {
+      res.status(403).json({ error: 'Thread not in your org', code: 'FORBIDDEN' });
+      return;
+    }
+
+    // Cannot join terminal threads
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: `Thread is ${thread.status}; cannot join`, code: 'THREAD_CLOSED' });
+      return;
+    }
+
+    // Already a participant — idempotent success
+    if (db.isParticipant(thread.id, req.bot!.id)) {
+      res.json({ status: 'already_joined' });
+      return;
+    }
+
+    try {
+      const participant = db.addParticipant(thread.id, req.bot!.id);
+
+      // Broadcast join event
+      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+        type: 'thread_participant',
+        thread_id: thread.id,
+        bot_id: req.bot!.id,
+        bot_name: req.bot!.name,
+        action: 'joined',
+      });
+
+      db.recordAudit(thread.org_id, req.bot!.id, 'thread.join', 'thread', thread.id);
+
+      res.json({ status: 'joined', joined_at: participant.joined_at });
+    } catch (error: any) {
+      res.status(409).json({ error: error.message || 'Failed to join thread', code: 'JOIN_FAILED' });
+    }
   });
 
   /**
