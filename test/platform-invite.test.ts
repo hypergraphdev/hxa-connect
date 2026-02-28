@@ -109,6 +109,26 @@ describe('Platform Invite Codes — Admin CRUD', () => {
     expect(found).toBeUndefined();
   });
 
+  it('POST /api/platform/invite-codes with expires_in=0 creates a never-expiring code', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
+      token: ADMIN_SECRET,
+      body: { label: 'never-expires', expires_in: 0 },
+    });
+    expect(status).toBe(201);
+    expect(body.expires_at).toBe(0);
+    expect(body.label).toBe('never-expires');
+  });
+
+  it('never-expiring code shows expired=false in listing', async () => {
+    const { body: list } = await api(env.baseUrl, 'GET', '/api/platform/invite-codes', {
+      token: ADMIN_SECRET,
+    });
+    const neverExpires = list.find((c: any) => c.label === 'never-expires');
+    expect(neverExpires).toBeDefined();
+    expect(neverExpires.expires_at).toBe(0);
+    expect(neverExpires.expired).toBe(false);
+  });
+
   it('DELETE /api/platform/invite-codes/:id returns 404 for unknown id', async () => {
     const { status, body } = await api(env.baseUrl, 'DELETE', '/api/platform/invite-codes/nonexistent', {
       token: ADMIN_SECRET,
@@ -217,6 +237,23 @@ describe('Platform Orgs — Self-Service Creation', () => {
     expect(found).toBeDefined();
     expect(found.exhausted).toBe(true);
     expect(found.use_count).toBe(2);
+  });
+
+  it('never-expiring code can be used to create orgs', async () => {
+    // Create a never-expiring code
+    const { body: created } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
+      token: ADMIN_SECRET,
+      body: { label: 'never-expire-use-test', expires_in: 0 },
+    });
+    expect(created.expires_at).toBe(0);
+
+    // Use it to create an org
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/orgs', {
+      body: { invite_code: created.code, name: 'never-expire-org' },
+    });
+    expect(status).toBe(201);
+    expect(body.org_id).toBeTypeOf('string');
+    expect(body.name).toBe('never-expire-org');
   });
 
   it('rejects invalid invite code', async () => {

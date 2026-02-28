@@ -1449,9 +1449,9 @@
                 const uses = c.max_uses === 0
                     ? `${c.use_count} / \u221e`
                     : `${c.use_count} / ${c.max_uses}`;
-                const expires = c.expires_at
-                    ? new Date(c.expires_at).toLocaleDateString()
-                    : 'Never';
+                const expires = (c.expires_at === 0 || !c.expires_at)
+                    ? 'Never'
+                    : new Date(c.expires_at).toLocaleDateString();
                 const label = c.label || '<span style="color:var(--text-dim);">—</span>';
 
                 return `<tr>
@@ -1487,6 +1487,7 @@
               <option value="30d">30 days</option>
               <option value="90d" selected>90 days</option>
               <option value="365d">1 year</option>
+              <option value="never">Never</option>
             </select>
           </div>
           <div class="modal-actions">
@@ -1508,8 +1509,8 @@
             const label = document.getElementById('new-code-label').value.trim() || undefined;
             const maxUsesVal = document.getElementById('new-code-max-uses').value;
             const max_uses = maxUsesVal !== '' ? parseInt(maxUsesVal, 10) : undefined;
-            const expiresMap = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, '365d': 365 * 86400 };
-            const expires_in = expiresMap[document.getElementById('new-code-expires').value] || 90 * 86400;
+            const expiresMap = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, '365d': 365 * 86400, 'never': 0 };
+            const expires_in = expiresMap[document.getElementById('new-code-expires').value] ?? 90 * 86400;
 
             try {
                 const result = await adminApi('POST', '/api/platform/invite-codes', {

@@ -469,9 +469,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    // Validate expires_in (seconds, default 90 days)
-    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 90 * 86400;
-    const expiresAt = Date.now() + expiresInSec * 1000;
+    // Validate expires_in (seconds, default 90 days; 0 = never expires)
+    const expiresAt = (typeof expires_in === 'number' && expires_in === 0)
+      ? 0
+      : Date.now() + ((typeof expires_in === 'number' && expires_in > 0 ? expires_in : 90 * 86400) * 1000);
 
     // Validate label
     if (label !== undefined && (typeof label !== 'string' || label.length > 256)) {
@@ -515,7 +516,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       use_count: c.use_count,
       expires_at: c.expires_at,
       created_at: c.created_at,
-      expired: c.expires_at <= Date.now(),
+      expired: c.expires_at !== 0 && c.expires_at <= Date.now(),
       exhausted: c.max_uses > 0 && c.use_count >= c.max_uses,
     }));
 

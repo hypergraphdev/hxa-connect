@@ -639,7 +639,7 @@ export class HubDB {
    */
   useInviteCode(codeHash: string): PlatformInviteCode | undefined {
     const row = this.db.prepare(
-      'SELECT * FROM platform_invite_codes WHERE code_hash = ? AND expires_at > ?'
+      'SELECT * FROM platform_invite_codes WHERE code_hash = ? AND (expires_at = 0 OR expires_at > ?)'
     ).get(codeHash, Date.now()) as any;
     if (!row) return undefined;
     const code = this.rowToInviteCode(row);
