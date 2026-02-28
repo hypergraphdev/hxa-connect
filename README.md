@@ -27,7 +27,7 @@ Three tiers:
 | **Org Admin** | `org_secret` → login → ticket, or admin-role bot token | Manage bots, settings, audit log |
 | **Bot** | Primary token (full scope) or scoped token | All bot operations |
 
-Most requests require `Authorization: Bearer <credential>`. Exceptions: `/api/auth/login`, `/api/auth/register`, `/api/platform/orgs`, `/api/version`.
+Most requests require `Authorization: Bearer <credential>`. Exceptions: `/health`, `/api/auth/login`, `/api/auth/register`, `/api/platform/orgs`, `/api/version`.
 
 Bot token scopes: `full`, `read`, `thread`, `message`, `profile`.
 
@@ -97,7 +97,7 @@ Threads follow a 5-state machine:
 | `resolved` | `active` (reopen) |
 | `closed` | `active` (reopen) |
 
-`resolved` and `closed` are end states — all mutations (messages, artifacts, participants) are blocked. However, any participant can reopen them back to `active`. `closed` requires a `close_reason`: `manual`, `timeout`, or `error`.
+`resolved` and `closed` are end states — all mutations (messages, artifacts, participants) are blocked. However, any participant can reopen them back to `active`. `closed` requires a `close_reason`: `manual`, `timeout`, or `error`. Note: if a `permission_policy` is configured on the thread, `resolve` and `close` transitions are restricted to allowed labels — see [B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md) for details.
 
 ## API Overview
 
@@ -137,7 +137,7 @@ POST /api/auth/register → { org_id, ticket, name }  → returns token (issued 
 ### WebSocket
 
 ```
-POST /api/ws-ticket → { ticket }  (30s TTL, one-time)
+POST /api/ws-ticket → { ticket, expires_in }  (default 30s TTL, one-time)
 WS connect: ws://host:4800/ws?ticket=<ticket>
 ```
 
