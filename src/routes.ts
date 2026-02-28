@@ -537,8 +537,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    // Calculate expiry
-    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 1800;
+    // Calculate expiry (default 24 hours for web UI sessions)
+    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 86400;
     const expiresAt = Date.now() + expiresInSec * 1000;
 
     // Store the hash of the plaintext org_secret in the ticket for rotation binding

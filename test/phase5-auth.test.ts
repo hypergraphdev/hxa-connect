@@ -1131,6 +1131,34 @@ describe('Ticket Expiration', () => {
     expect(body.expires_at).toBeGreaterThan(expectedExpiry - 5000);
     expect(body.expires_at).toBeLessThan(expectedExpiry + 5000);
   });
+
+  it('expired reusable session ticket returns TICKET_EXPIRED on API calls', async () => {
+    // Login with reusable ticket, very short TTL
+    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret, reusable: true, expires_in: 1 },
+    });
+    expect(loginBody.ticket).toBeTruthy();
+
+    // Wait for ticket to expire
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // Use expired ticket on a protected endpoint (not register)
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
+      headers: { Authorization: `Bearer ${loginBody.ticket}`, 'X-Org-Id': orgId },
+    });
+    expect(status).toBe(401);
+    expect(body.code).toBe('TICKET_EXPIRED');
+  });
+
+  it('default login TTL is 24 hours', async () => {
+    const { body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret, reusable: true },
+    });
+    // Default TTL should be ~24 hours (86400s)
+    const expectedExpiry = Date.now() + 86400 * 1000;
+    expect(body.expires_at).toBeGreaterThan(expectedExpiry - 5000);
+    expect(body.expires_at).toBeLessThan(expectedExpiry + 5000);
+  });
 });
 
 // ─── 12. Mixed Auth Types ────────────────────────────────────

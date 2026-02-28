@@ -209,6 +209,52 @@
 
 
 
+    // ─── Session Expiry ──────────────────────────────────────────
+    let sessionExpiresAt = null;
+    let sessionExpiryTimer = null;
+    let sessionWarningTimer = null;
+    let sessionExpired = false;
+
+    function handleSessionExpiry() {
+      if (sessionExpired) return;
+      sessionExpired = true;
+      clearSessionTimers();
+      if (ws) { ws.close(); ws = null; }
+      sessionStorage.removeItem('hxa_connect_org_id');
+      sessionStorage.removeItem('hxa_connect_ticket');
+      sessionStorage.removeItem('hxa_connect_org_name');
+      sessionStorage.removeItem('hxa_connect_expires_at');
+      orgId = ''; ticket = ''; orgName = '';
+      location.hash = '#/';
+      document.getElementById('app').classList.remove('visible');
+      document.getElementById('login-screen').style.display = 'flex';
+      showToast('Session expired — please log in again', 'warning');
+    }
+
+    function scheduleSessionTimers(expiresAt) {
+      clearSessionTimers();
+      sessionExpiresAt = expiresAt;
+      const now = Date.now();
+      const msUntilExpiry = expiresAt - now;
+      if (msUntilExpiry <= 0) { handleSessionExpiry(); return; }
+
+      // Warn 5 minutes before expiry (only if session > 10 min)
+      const warnMs = msUntilExpiry - 5 * 60 * 1000;
+      if (warnMs > 5 * 60 * 1000) {
+        sessionWarningTimer = setTimeout(() => {
+          showToast('Session expires in 5 minutes — save your work', 'warning');
+        }, warnMs);
+      }
+
+      // Auto-expire
+      sessionExpiryTimer = setTimeout(handleSessionExpiry, msUntilExpiry);
+    }
+
+    function clearSessionTimers() {
+      if (sessionExpiryTimer) { clearTimeout(sessionExpiryTimer); sessionExpiryTimer = null; }
+      if (sessionWarningTimer) { clearTimeout(sessionWarningTimer); sessionWarningTimer = null; }
+    }
+
     // ─── API Helpers ─────────────────────────────────────────────
     async function api(path, opts = {}) {
       const headers = {
@@ -220,6 +266,12 @@
       const res = await fetch(API + path, { ...opts, headers });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
+        if (res.status === 401) {
+          handleSessionExpiry();
+          const e = new Error(err.error || 'Session expired');
+          e.sessionExpired = true;
+          throw e;
+        }
         throw new Error(err.error || 'API error');
       }
       return res.json();
@@ -248,10 +300,13 @@
         cancelText: 'Cancel',
       });
       if (!confirmed) return;
+      sessionExpired = true; // suppress reconnect/expiry toast during logout
+      clearSessionTimers();
       if (ws) { ws.close(); ws = null; }
       sessionStorage.removeItem('hxa_connect_org_id');
       sessionStorage.removeItem('hxa_connect_ticket');
       sessionStorage.removeItem('hxa_connect_org_name');
+      sessionStorage.removeItem('hxa_connect_expires_at');
       orgId = ''; ticket = ''; orgName = '';
       location.hash = '#/';
       document.getElementById('login-screen').style.display = 'flex';
@@ -259,6 +314,7 @@
     }
 
     async function login() {
+      sessionExpired = false;
       const orgIdInput = document.getElementById('org-id-input');
       const orgSecretInput = document.getElementById('org-secret-input');
       const errorEl = document.getElementById('login-error');
@@ -301,6 +357,9 @@
           sessionStorage.setItem('hxa_connect_org_id', orgId);
           sessionStorage.setItem('hxa_connect_ticket', ticket);
           sessionStorage.setItem('hxa_connect_org_name', orgName);
+          if (loginData.expires_at) {
+            sessionStorage.setItem('hxa_connect_expires_at', String(loginData.expires_at));
+          }
         }
 
         // Load initial data with pagination
@@ -347,13 +406,20 @@
 
         renderSidebar();
         handleRoute();
+
+        // Schedule session expiry timers
+        const storedExpiry = sessionStorage.getItem('hxa_connect_expires_at');
+        if (storedExpiry) scheduleSessionTimers(Number(storedExpiry));
+
         connectWS();
       } catch (err) {
+        if (err.sessionExpired) return; // already handled by handleSessionExpiry
         // Clear stored credentials on auth failure
         if (!isResume || err.message.includes('auth') || err.message.includes('401') || err.message.includes('forbidden')) {
           sessionStorage.removeItem('hxa_connect_org_id');
           sessionStorage.removeItem('hxa_connect_ticket');
           sessionStorage.removeItem('hxa_connect_org_name');
+          sessionStorage.removeItem('hxa_connect_expires_at');
           orgId = '';
           ticket = '';
           orgName = '';
@@ -379,15 +445,16 @@
     }
 
     async function connectWS() {
-      if (wsConnecting) return;
+      if (wsConnecting || sessionExpired) return;
       wsConnecting = true;
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       let ticketData;
       try {
         ticketData = await api('/api/ws-ticket', { method: 'POST' });
       } catch (e) {
-        console.error('Failed to obtain WS ticket, retrying in 3s:', e);
         wsConnecting = false;
+        if (e.sessionExpired) return; // handled by api() interceptor
+        console.error('Failed to obtain WS ticket, retrying in 3s:', e);
         setTimeout(connectWS, 3000);
         return;
       }
@@ -401,7 +468,12 @@
       wsConnecting = false;
 
       ws.onopen = () => setWsStatus(true);
-      ws.onclose = () => { setWsStatus(false); setTimeout(connectWS, 3000); };
+      ws.onclose = (event) => {
+        setWsStatus(false);
+        // 4001 = auth failure (expired ticket, invalid token)
+        if (event.code === 4001) { handleSessionExpiry(); return; }
+        if (!sessionExpired) setTimeout(connectWS, 3000);
+      };
       ws.onmessage = (e) => handleWsEvent(JSON.parse(e.data));
     }
 

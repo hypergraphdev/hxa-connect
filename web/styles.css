@@ -1802,3 +1802,9 @@ body {
   border: 1px solid rgba(45, 212, 191, 1);
   color: #fff;
 }
+
+.toast-warning {
+  background: rgba(245, 158, 11, 0.9);
+  border: 1px solid rgba(245, 158, 11, 1);
+  color: #fff;
+}

@@ -136,7 +136,11 @@ export function authMiddleware(db: HubDB) {
 
     // Try org ticket (reusable session token from login)
     const ticket = db.getOrgTicket(token);
-    if (ticket && ticket.reusable && !ticket.consumed && ticket.expires_at > Date.now()) {
+    if (ticket && ticket.reusable && !ticket.consumed) {
+      if (ticket.expires_at <= Date.now()) {
+        res.status(401).json({ error: 'Session expired', code: 'TICKET_EXPIRED' });
+        return;
+      }
       const ticketOrg = db.getOrgById(ticket.org_id);
       if (ticketOrg) {
         if (ticketOrg.status === 'suspended') {
