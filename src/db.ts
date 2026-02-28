@@ -280,7 +280,12 @@ export class HubDB {
       );
     `);
 
-    // Future migrations go here using this.runMigration('name', () => { ... })
+    this.runMigration('thread_messages_mentions', () => {
+      this.db.exec(`
+        ALTER TABLE thread_messages ADD COLUMN mentions TEXT DEFAULT NULL;
+        ALTER TABLE thread_messages ADD COLUMN mention_all INTEGER DEFAULT 0;
+      `);
+    });
   }
 
   /**
@@ -359,6 +364,8 @@ export class HubDB {
       content_type: row.content_type ?? 'text',
       parts: row.parts ?? null,
       metadata: row.metadata ?? null,
+      mentions: row.mentions ?? null,
+      mention_all: row.mention_all ?? 0,
     };
   }
 
@@ -1607,6 +1614,8 @@ export class HubDB {
     contentType = 'text',
     metadata?: string | null,
     parts?: string | null,
+    mentions?: string | null,
+    mentionAll?: number,
   ): ThreadMessage {
     const msg: ThreadMessage = {
       id: crypto.randomUUID(),
@@ -1616,12 +1625,14 @@ export class HubDB {
       content_type: contentType,
       parts: parts ?? null,
       metadata: metadata ?? null,
+      mentions: mentions ?? null,
+      mention_all: mentionAll ?? 0,
       created_at: Date.now(),
     };
 
     const insertMessageStmt = this.db.prepare(`
-      INSERT INTO thread_messages (id, thread_id, sender_id, content, content_type, parts, metadata, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO thread_messages (id, thread_id, sender_id, content, content_type, parts, metadata, mentions, mention_all, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const updateActivityStmt = this.db.prepare(`
       UPDATE threads SET last_activity_at = ? WHERE id = ?
@@ -1636,6 +1647,8 @@ export class HubDB {
         msg.content_type,
         msg.parts,
         msg.metadata,
+        msg.mentions,
+        msg.mention_all,
         msg.created_at,
       );
       updateActivityStmt.run(msg.created_at, threadId);
@@ -1654,7 +1667,7 @@ export class HubDB {
 
     params.push(limit);
     const rows = this.db.prepare(
-      `SELECT * FROM thread_messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
+      `SELECT * FROM thread_messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(...params) as any[];
 
     return rows.map(row => this.rowToThreadMessage(row));

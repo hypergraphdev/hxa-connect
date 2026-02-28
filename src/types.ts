@@ -116,6 +116,11 @@ export interface ThreadParticipant {
   joined_at: number;
 }
 
+export interface MentionRef {
+  bot_id: string;
+  name: string;
+}
+
 export interface ThreadMessage {
   id: string;
   thread_id: string;
@@ -124,6 +129,8 @@ export interface ThreadMessage {
   content_type: string;
   parts: string | null; // JSON string of MessagePart[]
   metadata: string | null; // JSON string
+  mentions: string | null; // JSON string of MentionRef[]
+  mention_all: number; // 0 or 1
   created_at: number;
 }
 
@@ -351,8 +358,10 @@ export interface WireMessage extends Omit<Message, 'parts'> {
   parts: MessagePart[];
 }
 
-export interface WireThreadMessage extends Omit<ThreadMessage, 'parts'> {
+export interface WireThreadMessage extends Omit<ThreadMessage, 'parts' | 'mentions' | 'mention_all'> {
   parts: MessagePart[];
+  mentions: MentionRef[];
+  mention_all: boolean;
 }
 
 // ─── WebSocket Events ────────────────────────────────────────

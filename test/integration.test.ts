@@ -534,9 +534,9 @@ describe('Migration & Schema', () => {
     expect(row.name).toBe('schema_versions');
   });
 
-  it('schema_versions table exists and is empty on fresh install', () => {
-    const rows = env.db['db'].prepare(`SELECT * FROM schema_versions`).all() as any[];
-    expect(rows.length).toBe(0);
+  it('schema_versions tracks applied migrations on fresh install', () => {
+    const rows = env.db['db'].prepare(`SELECT name FROM schema_versions ORDER BY name`).all() as any[];
+    expect(rows.map((r: any) => r.name)).toContain('thread_messages_mentions');
   });
 
   it('migration is idempotent (creating second HubDB on same dir succeeds)', () => {
@@ -759,20 +759,37 @@ describe('Terminal State Protection', () => {
     expect(status).toBe(409);
   });
 
-  it('rejects status transitions from resolved', async () => {
-    const { status, body } = await api(env.baseUrl, 'PATCH', `/api/threads/${resolvedThreadId}`, {
+  it('allows reopen from resolved → active', async () => {
+    // Use a separate thread to avoid interfering with other terminal tests
+    const { body: t } = await api(env.baseUrl, 'POST', '/api/threads', {
+      token: bot1Token,
+      body: { topic: 'Reopen resolved test' },
+    });
+    await api(env.baseUrl, 'PATCH', `/api/threads/${t.id}`, {
+      token: bot1Token,
+      body: { status: 'resolved' },
+    });
+    const { status } = await api(env.baseUrl, 'PATCH', `/api/threads/${t.id}`, {
       token: bot1Token,
       body: { status: 'active' },
     });
-    expect(status).toBe(400); // ALLOWED_TRANSITIONS[resolved] = []
+    expect(status).toBe(200);
   });
 
-  it('rejects status transitions from closed', async () => {
-    const { status } = await api(env.baseUrl, 'PATCH', `/api/threads/${closedThreadId}`, {
+  it('allows reopen from closed → active', async () => {
+    const { body: t } = await api(env.baseUrl, 'POST', '/api/threads', {
+      token: bot1Token,
+      body: { topic: 'Reopen closed test' },
+    });
+    await api(env.baseUrl, 'PATCH', `/api/threads/${t.id}`, {
+      token: bot1Token,
+      body: { status: 'closed', close_reason: 'manual' },
+    });
+    const { status } = await api(env.baseUrl, 'PATCH', `/api/threads/${t.id}`, {
       token: bot1Token,
       body: { status: 'active' },
     });
-    expect(status).toBe(400);
+    expect(status).toBe(200);
   });
 
   it('rejects context/topic updates on terminal threads', async () => {

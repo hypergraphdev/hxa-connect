@@ -8,7 +8,7 @@ import { HubDB } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireBot, requireOrg, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
-import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
+import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 // routeLogger available for future use: import { routeLogger } from './logger.js';
 
@@ -129,7 +129,58 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
   } catch {
     parsed = [{ type: 'text', content: msg.content }];
   }
-  return { ...msg, parts: parsed };
+  let mentions: MentionRef[];
+  try {
+    mentions = msg.mentions ? JSON.parse(msg.mentions) : [];
+  } catch {
+    mentions = [];
+  }
+  const { mentions: _m, mention_all: _ma, ...rest } = msg;
+  return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all };
+}
+
+const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
+const MAX_MENTIONS = 20;
+
+function parseMentions(
+  content: string,
+  participants: Array<{ bot_id: string }>,
+  getBotById: (id: string) => Bot | undefined,
+): { mentions: MentionRef[] | null; mentionAll: boolean } {
+  const seen = new Set<string>();
+  const mentions: MentionRef[] = [];
+  let mentionAll = false;
+
+  const participantBots = participants
+    .map(p => getBotById(p.bot_id))
+    .filter((b): b is Bot => !!b);
+
+  let match;
+  MENTION_REGEX.lastIndex = 0;
+  while ((match = MENTION_REGEX.exec(content)) !== null) {
+    const name = match[1];
+    const key = name.toLowerCase();
+
+    if (key === 'all') {
+      mentionAll = true;
+      continue;
+    }
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const bot = participantBots.find(b => b.name.toLowerCase() === key);
+    if (bot) {
+      mentions.push({ bot_id: bot.id, name: bot.name });
+    }
+
+    if (mentions.length >= MAX_MENTIONS) break;
+  }
+
+  return {
+    mentions: mentions.length > 0 ? mentions : null,
+    mentionAll,
+  };
 }
 
 const MAX_THREAD_TAGS = 10;
@@ -1638,7 +1689,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
     }
 
-    // Block all mutations on terminal threads (status transitions handled separately in updateThreadStatus)
+    // Block non-status mutations on terminal threads (status change = reopen is allowed)
     if ((thread.status === 'resolved' || thread.status === 'closed') && statusInput === undefined) {
       res.status(409).json({ error: 'Thread is in terminal state; no updates allowed', code: 'THREAD_CLOSED' });
       return;
@@ -1656,12 +1707,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         return;
       }
       status = statusInput as ThreadStatus;
-    }
-
-    // Only org admins can reopen terminal threads
-    if (status === 'active' && (thread.status === 'resolved' || thread.status === 'closed')) {
-      res.status(403).json({ error: 'Only org admin can reopen resolved/closed threads', code: 'FORBIDDEN' });
-      return;
     }
 
     let closeReason: CloseReason | undefined;
@@ -1996,6 +2041,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
     }
 
+    // Parse @mentions from content against thread participants
+    const threadParticipants = db.getParticipants(thread.id);
+    const { mentions: mentionRefs, mentionAll } = parseMentions(
+      resolvedContent,
+      threadParticipants,
+      (id) => db.getBotById(id),
+    );
+
     const message = db.createThreadMessage(
       thread.id,
       req.bot!.id,
@@ -2003,6 +2056,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       typeof content_type === 'string' ? content_type : 'text',
       metadataJson,
       partsJson,
+      mentionRefs ? JSON.stringify(mentionRefs) : null,
+      mentionAll ? 1 : 0,
     );
 
     const enriched = { ...enrichThreadMessage(message), sender_name: req.bot!.name };
@@ -2011,7 +2066,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     db.recordAudit(thread.org_id, req.bot!.id, 'message.send', 'thread_message', message.id, { thread_id: thread.id });
 
     // Record catchup events for all participants except the sender
-    const threadParticipants = db.getParticipants(thread.id);
     for (const p of threadParticipants) {
       if (p.bot_id === req.bot!.id) continue;
       db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
