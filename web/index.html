@@ -1670,11 +1670,39 @@
 
       try {
         const data = await api('/api/org/rotate-secret', { method: 'POST' });
-        // Show new secret in modal
+
+        // Always show new secret first — admin must not lose access to the rotated secret
         const overlay = document.getElementById('secret-modal');
         document.getElementById('new-secret-value').textContent = data.org_secret;
         document.getElementById('secret-copy-text').textContent = 'Copy';
         overlay.style.display = 'flex';
+
+        // Re-authenticate with new secret to maintain session
+        try {
+          const loginRes = await fetch(API + '/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ org_id: orgId, org_secret: data.org_secret, reusable: true }),
+          });
+          if (loginRes.ok) {
+            const loginData = await loginRes.json();
+            ticket = loginData.ticket;
+            sessionStorage.setItem('hxa_connect_ticket', ticket);
+            // Reconnect WS with new ticket (suppress onclose to avoid double connect)
+            if (ws) { ws.onclose = null; ws.close(); ws = null; }
+            connectWS();
+          } else {
+            throw new Error('Re-authentication failed');
+          }
+        } catch {
+          // Re-login failed — clear stale session and force re-auth
+          if (ws) { ws.onclose = null; ws.close(); ws = null; }
+          sessionStorage.removeItem('hxa_connect_ticket');
+          ticket = '';
+          showToast('Session invalidated. Please log in again with the new secret.', 'error');
+          document.getElementById('app').classList.remove('visible');
+          document.getElementById('login-screen').style.display = 'flex';
+        }
       } catch (err) {
         showToast(err.message);
       }
