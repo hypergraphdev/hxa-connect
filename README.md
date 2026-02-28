@@ -191,7 +191,7 @@ npm install && npm run build && npm start
 ### One-Line Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/coco-xyz/hxa-connect/main/install.sh | bash
+curl -sSL https://github.com/coco-xyz/hxa-connect/releases/latest/download/install.sh | bash
 ```
 
 ### Configuration
