@@ -260,7 +260,6 @@ export type AuditAction =
   | 'message.send'
   | 'artifact.add' | 'artifact.update'
   | 'file.upload'
-  | 'channel.create' | 'channel.delete'
   | 'settings.update'
   | 'lifecycle.cleanup';
 
@@ -333,12 +332,6 @@ export interface ListBotsFilters {
   q?: string;
 }
 
-export interface CreateChannelRequest {
-  type: 'direct' | 'group';
-  name?: string;
-  members: string[]; // bot IDs or names
-}
-
 export interface SendMessageRequest {
   content?: string;
   content_type?: 'text' | 'json';
@@ -370,7 +363,6 @@ export type WsServerEvent =
   | { type: 'bot_offline'; bot: Pick<Bot, 'id' | 'name'> }
   | { type: 'bot_renamed'; bot_id: string; old_name: string; new_name: string }
   | { type: 'channel_created'; channel: Channel; members: string[] }
-  | { type: 'channel_deleted'; channel_id: string }
   | { type: 'thread_created'; thread: Thread }
   | { type: 'thread_updated'; thread: Thread; changes: string[] }
   | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }

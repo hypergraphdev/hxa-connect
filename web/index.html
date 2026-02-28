@@ -381,9 +381,9 @@
           threads = [];
         }
 
-        // Load channels for bot profile use
+        // Load channels per bot (replaces removed GET /api/channels)
         try {
-          channels = await api('/api/channels');
+          channels = await loadAllChannels();
         } catch (e) {
           console.warn('Failed to load channels:', e);
           channels = [];
@@ -530,11 +530,6 @@
           channels.unshift({ ...event.channel, members: event.members });
           break;
         }
-        case 'channel_deleted': {
-          channels = channels.filter(c => c.id !== event.channel_id);
-          if (activeChannel === event.channel_id) { activeChannel = null; showEmptyState(); }
-          break;
-        }
         case 'thread_created': {
           if (!threads.find(t => t.id === event.thread.id)) {
             threads.unshift(event.thread);
@@ -597,7 +592,28 @@
     }
 
     async function refreshChannels() {
-      try { channels = await api('/api/channels'); } catch (e) { console.error(e); }
+      try { channels = await loadAllChannels(); } catch (e) { console.error(e); }
+    }
+
+    async function loadAllChannels() {
+      const all = [];
+      const seen = new Set();
+      const results = await Promise.allSettled(
+        Object.keys(bots).map(id => api(`/api/bots/${id}/channels`))
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          for (const ch of r.value) {
+            if (!seen.has(ch.id)) {
+              seen.add(ch.id);
+              // Normalize members from [{id,name,online}] to [string] for UI compat
+              ch.members = (ch.members || []).map(m => typeof m === 'string' ? m : m.id);
+              all.push(ch);
+            }
+          }
+        }
+      }
+      return all;
     }
 
     async function refreshThreads() {
@@ -716,10 +732,29 @@
       try {
         const data = await api(`/api/bots?cursor=${encodeURIComponent(botsCursor)}&limit=50`);
         const items = data.items || data;
-        for (const a of items) bots[a.id] = a;
+        const newBotIds = [];
+        for (const a of items) { bots[a.id] = a; newBotIds.push(a.id); }
         botsCursor = data.next_cursor || null;
         botsHasMore = data.has_more || false;
         renderBots();
+        // Load channels for newly loaded bots and merge (dedup)
+        if (newBotIds.length > 0) {
+          const seen = new Set(channels.map(c => c.id));
+          const results = await Promise.allSettled(
+            newBotIds.map(id => api(`/api/bots/${id}/channels`))
+          );
+          for (const r of results) {
+            if (r.status === 'fulfilled') {
+              for (const ch of r.value) {
+                if (!seen.has(ch.id)) {
+                  seen.add(ch.id);
+                  ch.members = (ch.members || []).map(m => typeof m === 'string' ? m : m.id);
+                  channels.push(ch);
+                }
+              }
+            }
+          }
+        }
       } catch (e) {
         console.error('Failed to load more bots:', e);
       }
@@ -1712,15 +1747,6 @@
     }
 
     // ─── Delete Operations ───────────────────────────────────────
-    async function deleteChannel(channelId, event) {
-      event.stopPropagation();
-      if (!confirm('Delete this channel and all its messages?')) return;
-      try {
-        await api(`/api/channels/${channelId}`, { method: 'DELETE' });
-        channels = channels.filter(c => c.id !== channelId);
-        if (activeChannel === channelId) { activeChannel = null; showEmptyState(); }
-      } catch (err) { showToast(err.message); }
-    }
 
     // ─── Custom confirm modal ─────────────────────────────────────
     function showConfirm({ title, message, confirmText = 'Delete', cancelText = 'Cancel' }) {

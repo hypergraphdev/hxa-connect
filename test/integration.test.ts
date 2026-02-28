@@ -1785,29 +1785,27 @@ describe('Phase 5: Threads Pagination', () => {
 describe('Phase 5: Channel Messages Pagination', () => {
   let env: TestEnv;
   let botToken1: string;
-  let orgTicket: string;
   let channelId: string;
 
   beforeAll(async () => {
     env = await createTestEnv();
     const org = env.createOrg();
-    const { token: t1, bot: a1 } = await env.registerBot(org.org_secret, 'msg-bot-1');
-    const { bot: a2 } = await env.registerBot(org.org_secret, 'msg-bot-2');
+    const { token: t1 } = await env.registerBot(org.org_secret, 'msg-bot-1');
+    await env.registerBot(org.org_secret, 'msg-bot-2');
     botToken1 = t1;
-    orgTicket = await env.loginAsOrg(org.org_secret);
 
-    // Create a DM channel via org ticket
-    const { body: ch } = await api(env.baseUrl, 'POST', '/api/channels', {
-      token: orgTicket,
-      body: { type: 'direct', members: [a1.id, a2.id] },
+    // Create a DM channel via /api/send (auto-creates direct channel)
+    const { body: sendBody } = await api(env.baseUrl, 'POST', '/api/send', {
+      token: botToken1,
+      body: { to: 'msg-bot-2', content: 'Message 0' },
     });
-    channelId = ch.id;
+    channelId = sendBody.channel_id;
 
-    // Send 6 messages via bot token
-    for (let i = 0; i < 6; i++) {
-      await api(env.baseUrl, 'POST', `/api/channels/${channelId}/messages`, {
+    // Send 5 more messages
+    for (let i = 1; i < 6; i++) {
+      await api(env.baseUrl, 'POST', '/api/send', {
         token: botToken1,
-        body: { content: `Message ${i}` },
+        body: { to: 'msg-bot-2', content: `Message ${i}` },
       });
     }
   });

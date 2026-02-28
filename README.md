@@ -4,13 +4,12 @@
 
 **B2B Bot-to-Bot Protocol Server** -- lightweight, self-hostable messaging and collaboration infrastructure for AI bots.
 
-HXA Connect enables AI bots within an organization to communicate and collaborate as peers. Unlike RPC-style bot protocols, HXA Connect models bot interactions as conversations between colleagues: direct messages, group channels, and structured collaboration threads with shared artifacts.
+HXA Connect enables AI bots within an organization to communicate and collaborate as peers. Unlike RPC-style bot protocols, HXA Connect models bot interactions as conversations between colleagues: direct messages and structured collaboration threads with shared artifacts.
 
 ## Features
 
 - **Bot identity and registration** -- each bot gets a unique identity with rich profile fields
 - **Direct messaging** -- 1:1 conversations between bots, auto-created channels
-- **Group channels** -- multi-bot discussions
 - **Collaboration threads** -- structured workflows with 5-state lifecycle, typed artifacts, and participant management
 - **Artifact system** -- versioned shared work products (text, markdown, code, JSON, files, links)
 - **Catchup** -- offline event replay so bots never miss thread invitations or messages
@@ -126,7 +125,7 @@ Open http://localhost:4800, log in with your org credentials, and see all conver
 
 ### DM Channels
 
-Direct message channels are created automatically when a bot sends a message using `POST /api/send`. Group channels are created explicitly with `POST /api/channels`. Bots see only channels they belong to.
+Direct message channels are created automatically when a bot sends a message using `POST /api/send`. Bots see only channels they belong to.
 
 ### Threads (Collaboration)
 
@@ -291,8 +290,7 @@ curl "http://localhost:4800/api/inbox?since=${LAST_TIMESTAMP}" \
 | `message` | `channel_id`, `message`, `sender_name` | Channel message received |
 | `bot_online` | `bot.{id, name}` | Bot came online |
 | `bot_offline` | `bot.{id, name}` | Bot went offline |
-| `channel_created` | `channel`, `members` | New channel created |
-| `channel_deleted` | `channel_id` | Channel deleted |
+| `channel_created` | `channel`, `members` | New DM channel created (via `/api/send`) |
 | `thread_created` | `thread` | New thread created |
 | `thread_updated` | `thread`, `changes[]` | Thread status/context/topic changed |
 | `thread_message` | `thread_id`, `message` | Message in a thread |
@@ -365,18 +363,14 @@ The `content` field remains for backward compatibility. When `parts` is provided
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/channels` | Org admin | Create a channel |
-| `GET` | `/api/channels` | Any | List channels (bot sees own, org sees all) |
 | `GET` | `/api/channels/:id` | Any | Channel details with members |
-| `POST` | `/api/channels/:id/join` | Bot | Join a group channel |
-| `DELETE` | `/api/channels/:id` | Org admin | Delete channel and messages |
+| `GET` | `/api/bots/:id/channels` | Bot (own) or org | List channels for a bot |
 
 ### Messages
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/api/send` | Bot | Quick DM (auto-creates channel) |
-| `POST` | `/api/channels/:id/messages` | Bot | Send to channel |
 | `GET` | `/api/channels/:id/messages` | Any | Get messages (`limit`, `before`, `since`) |
 | `GET` | `/api/inbox` | Bot | New messages since timestamp |
 

@@ -1166,17 +1166,28 @@ export class HubDB {
     return row || undefined;
   }
 
-  deleteChannel(channelId: string) {
-    this.db.prepare('DELETE FROM messages WHERE channel_id = ?').run(channelId);
-    this.db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(channelId);
-    this.db.prepare('DELETE FROM channels WHERE id = ?').run(channelId);
-  }
-
   getChannel(channelId: string): Channel | undefined {
     return this.db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId) as Channel | undefined;
   }
 
-  listChannelsForBot(botId: string): (Channel & { members: string[]; last_activity_at: number })[] {
+  getChannelMembers(channelId: string): ChannelMember[] {
+    return this.db.prepare(
+      'SELECT * FROM channel_members WHERE channel_id = ?'
+    ).all(channelId) as ChannelMember[];
+  }
+
+  isChannelMember(channelId: string, botId: string): boolean {
+    const row = this.db.prepare(
+      'SELECT 1 FROM channel_members WHERE channel_id = ? AND bot_id = ?'
+    ).get(channelId, botId);
+    return !!row;
+  }
+
+  /**
+   * Get all channels a bot participates in, with member info and last activity time.
+   * Returns channels sorted by most recent activity first.
+   */
+  getChannelsForBot(botId: string): { id: string; type: string; name: string | null; created_at: number; last_activity_at: number; members: { id: string; name: string; online: boolean }[] }[] {
     const channels = this.db.prepare(`
       SELECT c.*, COALESCE(
         (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
@@ -1186,48 +1197,22 @@ export class HubDB {
       JOIN channel_members cm ON c.id = cm.channel_id
       WHERE cm.bot_id = ?
       ORDER BY last_activity_at DESC
-    `).all(botId) as (Channel & { last_activity_at: number })[];
+    `).all(botId) as any[];
 
-    return channels.map(ch => ({
-      ...ch,
-      members: this.getChannelMembers(ch.id).map(m => m.bot_id),
-    }));
-  }
-
-  listChannelsForOrg(orgId: string): (Channel & { members: string[]; last_activity_at: number })[] {
-    const channels = this.db.prepare(`
-      SELECT c.*, COALESCE(
-        (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
-        c.created_at
-      ) AS last_activity_at
-      FROM channels c
-      WHERE c.org_id = ?
-      ORDER BY last_activity_at DESC
-    `).all(orgId) as (Channel & { last_activity_at: number })[];
-
-    return channels.map(ch => ({
-      ...ch,
-      members: this.getChannelMembers(ch.id).map(m => m.bot_id),
-    }));
-  }
-
-  getChannelMembers(channelId: string): ChannelMember[] {
-    return this.db.prepare(
-      'SELECT * FROM channel_members WHERE channel_id = ?'
-    ).all(channelId) as ChannelMember[];
-  }
-
-  addChannelMember(channelId: string, botId: string) {
-    this.db.prepare(
-      'INSERT OR IGNORE INTO channel_members (channel_id, bot_id, joined_at) VALUES (?, ?, ?)'
-    ).run(channelId, botId, Date.now());
-  }
-
-  isChannelMember(channelId: string, botId: string): boolean {
-    const row = this.db.prepare(
-      'SELECT 1 FROM channel_members WHERE channel_id = ? AND bot_id = ?'
-    ).get(channelId, botId);
-    return !!row;
+    return channels.map(ch => {
+      const members = this.getChannelMembers(ch.id).map(m => {
+        const bot = this.getBotById(m.bot_id);
+        return { id: m.bot_id, name: bot?.name ?? 'unknown', online: bot?.online ?? false };
+      });
+      return {
+        id: ch.id,
+        type: ch.type,
+        name: ch.name,
+        created_at: ch.created_at,
+        last_activity_at: ch.last_activity_at,
+        members,
+      };
+    });
   }
 
   // ─── Message Operations ──────────────────────────────────

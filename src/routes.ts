@@ -1062,67 +1062,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   // ─── Channels ─────────────────────────────────────────────
 
   /**
-   * POST /api/channels — Create a channel
-   * Auth: Org ticket or admin bot token
-   * Body: { type: 'direct'|'group', members: [bot_id_or_name, ...], name? }
-   */
-  auth.post('/api/channels', (req, res) => {
-    if (!requireOrgAdmin(req, res)) return;
-    const { type, members, name } = req.body;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
-
-    if (!type || !members || !Array.isArray(members) || members.length < 2) {
-      res.status(400).json({ error: 'type and members (≥2) are required' });
-      return;
-    }
-
-    if (type === 'direct' && members.length !== 2) {
-      res.status(400).json({ error: 'Direct channels require exactly 2 members' });
-      return;
-    }
-
-    // Resolve member names to IDs
-    const memberIds: string[] = [];
-    for (const m of members) {
-      const bot = db.getBotById(m) || db.getBotByName(orgId, m);
-      if (!bot || bot.org_id !== orgId) {
-        res.status(400).json({ error: `Bot not found: ${m}` });
-        return;
-      }
-      memberIds.push(bot.id);
-    }
-
-    const channel = db.createChannel(orgId, type, memberIds, name);
-
-    // Audit
-    db.recordAudit(orgId, null, 'channel.create', 'channel', channel.id, { type, name: name ?? null, members: memberIds });
-
-    // Broadcast channel creation
-    ws.broadcastToOrg(orgId, {
-      type: 'channel_created',
-      channel,
-      members: memberIds,
-    });
-
-    res.json({ ...channel, members: memberIds });
-  });
-
-  /**
-   * GET /api/channels — List channels
-   * For bots: channels they're in
-   * For org admins: all channels
-   */
-  auth.get('/api/channels', requireScope('read'), (req, res) => {
-    if (req.bot) {
-      res.json(db.listChannelsForBot(req.bot.id));
-    } else if (req.org) {
-      res.json(db.listChannelsForOrg(req.org.id));
-    } else {
-      res.status(403).json({ error: 'Authentication required', code: 'FORBIDDEN' });
-    }
-  });
-
-  /**
    * GET /api/channels/:id — Get channel details
    */
   auth.get('/api/channels/:id', requireScope('read'), (req, res) => {
@@ -1160,48 +1099,33 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
-   * POST /api/channels/:id/join — Join a group channel (bot)
+   * GET /api/bots/:id/channels — List channels a bot participates in
+   * Auth: Bot token (same org) or org ticket/admin bot
+   * Returns: [{ id, type, name, created_at, last_activity_at, members }]
    */
-  auth.post('/api/channels/:id/join', requireBot, requireScope('message'), (req, res) => {
-    const channel = db.getChannel(req.params.id as string);
-    if (!channel || channel.type !== 'group') {
-      res.status(404).json({ error: 'Group channel not found', code: 'NOT_FOUND' });
-      return;
-    }
-    if (channel.org_id !== req.bot!.org_id) {
-      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
-      return;
-    }
-    db.addChannelMember(channel.id, req.bot!.id);
-    res.json({ ok: true });
-  });
+  auth.get('/api/bots/:id/channels', requireScope('read'), (req, res) => {
+    const orgId = requireOrgOrBot(req, res);
+    if (!orgId) return;
 
-  /**
-   * DELETE /api/channels/:id — Delete a channel (org admin only)
-   * Auth: Org ticket or admin bot token
-   */
-  auth.delete('/api/channels/:id', (req, res) => {
-    if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
-
-    const channel = db.getChannel(req.params.id as string);
-    if (!channel || channel.org_id !== orgId) {
-      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
+    const targetBot = resolveBot(orgId, req.params.id);
+    if (!targetBot) {
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
-    db.deleteChannel(channel.id);
+    // Cross-org isolation
+    if (targetBot.org_id !== orgId) {
+      res.status(403).json({ error: 'Bot not in your org', code: 'FORBIDDEN' });
+      return;
+    }
 
-    // Audit
-    db.recordAudit(orgId, null, 'channel.delete', 'channel', channel.id, { name: channel.name });
+    // Bots can only query their own channels; org ticket can query any bot
+    if (req.bot && req.bot.id !== targetBot.id) {
+      res.status(403).json({ error: 'Bots can only query their own channels', code: 'FORBIDDEN' });
+      return;
+    }
 
-    // Broadcast channel deletion
-    ws.broadcastToOrg(orgId, {
-      type: 'channel_deleted',
-      channel_id: channel.id,
-    });
-
-    res.json({ ok: true, message: `Channel deleted` });
+    res.json(db.getChannelsForBot(targetBot.id));
   });
 
   // ─── Org Admin Thread Endpoints ──────────────────────────
@@ -2330,84 +2254,6 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   // ─── Messages ─────────────────────────────────────────────
-
-  /**
-   * POST /api/channels/:id/messages — Send a message to a channel
-   * Body: { content, content_type? }
-   */
-  auth.post('/api/channels/:id/messages', requireBot, requireScope('message'), (req, res) => {
-    if (!checkMessageRateLimit(req, res)) return;
-
-    const channel = db.getChannel(req.params.id as string);
-    if (!channel) {
-      res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
-      return;
-    }
-
-    // Cross-org isolation
-    if (channel.org_id !== req.bot!.org_id) {
-      res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
-      return;
-    }
-
-    if (!db.isChannelMember(channel.id, req.bot!.id)) {
-      res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
-      return;
-    }
-
-    const { content, content_type, parts } = req.body;
-
-    // S6: content_type size limit
-    if (content_type !== undefined && typeof content_type === 'string' && Buffer.byteLength(content_type, 'utf8') > FIELD_LIMITS.content_type) {
-      res.status(400).json({ error: `content_type exceeds size limit (${FIELD_LIMITS.content_type} bytes)` });
-      return;
-    }
-
-    // Validate parts if provided
-    let partsJson: string | null = null;
-    if (parts !== undefined) {
-      const partsError = validateParts(parts);
-      if (partsError) {
-        res.status(400).json({ error: partsError });
-        return;
-      }
-      partsJson = JSON.stringify(parts);
-    }
-
-    // Resolve content: explicit content, or auto-generate from parts
-    const resolvedContent: string | undefined = content ?? (parts ? contentFromParts(parts as MessagePart[]) : undefined);
-    if (!resolvedContent) {
-      res.status(400).json({ error: 'content or parts is required', code: 'VALIDATION_ERROR' });
-      return;
-    }
-
-    if (resolvedContent.length > config.max_message_length) {
-      res.status(400).json({ error: `Message too long (max ${config.max_message_length} chars)` });
-      return;
-    }
-
-    const msg = db.createMessage(channel.id, req.bot!.id, resolvedContent, content_type || 'text', partsJson);
-
-    // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
-    db.recordAudit(channel.org_id, req.bot!.id, 'message.send', 'channel_message', msg.id, { channel_id: channel.id });
-
-    // Record catchup events for all channel members except the sender
-    const members = db.getChannelMembers(channel.id);
-    for (const m of members) {
-      if (m.bot_id === req.bot!.id) continue;
-      db.recordCatchupEvent(channel.org_id, m.bot_id, 'channel_message_summary', {
-        channel_id: channel.id,
-        channel_name: channel.name ?? undefined,
-        count: 1,
-        last_at: msg.created_at,
-      }, channel.id);
-    }
-
-    // Broadcast via WebSocket
-    ws.broadcastMessage(channel.id, msg, req.bot!.name);
-
-    res.json(enrichMessage(msg));
-  });
 
   /**
    * GET /api/channels/:id/messages — Get messages from a channel
