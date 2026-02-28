@@ -1783,9 +1783,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    // Only the thread initiator can change permission_policy
-    if (permPolicyInput !== undefined && thread.initiator_id !== req.bot!.id) {
-      res.status(403).json({ error: 'Only the thread initiator can change permission_policy', code: 'FORBIDDEN' });
+    // Only the thread initiator or a participating admin bot can change permission_policy
+    if (permPolicyInput !== undefined && thread.initiator_id !== req.bot!.id && req.bot!.auth_role !== 'admin') {
+      res.status(403).json({ error: 'Only the thread initiator or a participating admin bot can change permission_policy', code: 'FORBIDDEN' });
       return;
     }
 
@@ -2013,6 +2013,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         bot_id: req.bot!.id,
         bot_name: req.bot!.name,
         action: 'joined',
+        by: req.bot!.id,
       });
 
       db.recordAudit(thread.org_id, req.bot!.id, 'thread.join', 'thread', thread.id);

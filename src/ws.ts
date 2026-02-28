@@ -250,12 +250,20 @@ export class HubWS {
         }
 
         if (data.type === 'subscribe') {
+          if (!client.isOrgAdmin) {
+            this.send(client, { type: 'error', message: 'subscribe is only available for org admin connections' });
+            return;
+          }
           if (data.channel_id) client.subscriptions.add(data.channel_id);
           if (data.thread_id) client.subscriptions.add(data.thread_id);
           return;
         }
 
         if (data.type === 'unsubscribe') {
+          if (!client.isOrgAdmin) {
+            this.send(client, { type: 'error', message: 'unsubscribe is only available for org admin connections' });
+            return;
+          }
           if (data.channel_id) client.subscriptions.delete(data.channel_id);
           if (data.thread_id) client.subscriptions.delete(data.thread_id);
           return;
