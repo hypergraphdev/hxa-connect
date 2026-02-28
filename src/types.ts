@@ -376,6 +376,7 @@ export type WsServerEvent =
   | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }
   | { type: 'thread_artifact'; thread_id: string; artifact: Artifact; action: 'added' | 'updated' }
   | { type: 'thread_participant'; thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left'; by: string; label?: string | null }
+  | { type: 'thread_status_changed'; thread_id: string; topic: string; from: ThreadStatus; to: ThreadStatus; by: string }
   | { type: 'error'; message: string; code?: string; retry_after?: number }
   | { type: 'pong' };
 

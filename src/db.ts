@@ -1456,13 +1456,13 @@ export class HubDB {
     // Explicit allowed-transitions map (5-state machine):
     //   active ↔ blocked/reviewing → resolved
     //   Any non-terminal state can → closed
-    //   resolved and closed are terminal states
+    //   resolved/closed → active (reopen)
     const ALLOWED_TRANSITIONS: Record<string, string[]> = {
       active:    ['blocked', 'reviewing', 'resolved', 'closed'],
       blocked:   ['active'],
       reviewing: ['active', 'resolved', 'closed'],
-      resolved:  [],
-      closed:    [],
+      resolved:  ['active'],
+      closed:    ['active'],
     };
 
     const allowed = ALLOWED_TRANSITIONS[current.status];
@@ -1479,7 +1479,10 @@ export class HubDB {
     }
 
     const now = Date.now();
-    const resolvedAt = status === 'resolved' && current.resolved_at === null ? now : current.resolved_at;
+    // Set resolved_at on first resolve; clear on reopen so re-resolve gets a fresh timestamp
+    const resolvedAt = status === 'resolved' ? (current.resolved_at ?? now)
+      : status === 'active' ? null
+      : current.resolved_at;
     const reason = status === 'closed' ? (closeReason ?? null) : null;
 
     if (expectedRevision !== undefined) {

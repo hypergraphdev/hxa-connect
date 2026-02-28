@@ -509,6 +509,18 @@
           }
           break;
         }
+        case 'thread_status_changed': {
+          const tIdx = threads.findIndex(t => t.id === event.thread_id);
+          if (tIdx !== -1) {
+            threads[tIdx].status = event.to;
+            renderThreads();
+          }
+          if (activeThread === event.thread_id && threadDetail) {
+            threadDetail.status = event.to;
+            renderThreadDetailHeader(threadDetail);
+          }
+          break;
+        }
       }
     }
 
@@ -1225,6 +1237,48 @@
       }
     }
 
+    function getThreadStatusActions(status) {
+      const s = status.toLowerCase();
+      if (s === 'active') return [{ label: 'Resolve', to: 'resolved' }, { label: 'Close', to: 'closed' }];
+      if (s === 'reviewing') return [{ label: 'Resolve', to: 'resolved' }, { label: 'Close', to: 'closed' }];
+      if (s === 'blocked') return [{ label: 'Reopen', to: 'active' }];
+      if (s === 'resolved' || s === 'closed') return [{ label: 'Reopen', to: 'active' }];
+      return [];
+    }
+
+    async function changeThreadStatus(threadId, newStatus) {
+      let closeReason;
+      if (newStatus === 'closed') {
+        const confirmed = await showConfirm({
+          title: 'Close Thread',
+          message: 'Are you sure you want to close this thread?',
+          confirmText: 'Close',
+        });
+        if (!confirmed) return;
+        closeReason = 'manual';
+      }
+
+      try {
+        const body = { status: newStatus };
+        if (closeReason) body.close_reason = closeReason;
+        const updated = await api(`/api/org/threads/${threadId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        });
+        // Update local state
+        const idx = threads.findIndex(t => t.id === threadId);
+        if (idx !== -1) threads[idx] = { ...threads[idx], ...updated };
+        if (threadDetail && threadDetail.id === threadId) {
+          threadDetail = { ...threadDetail, ...updated };
+          renderThreadDetailHeader(threadDetail);
+        }
+        renderThreads();
+        showToast(`Thread ${newStatus}`, 'success');
+      } catch (err) {
+        showToast(err.message);
+      }
+    }
+
     function renderThreadDetailHeader(detail) {
       const headerArea = document.getElementById('thread-header-area');
       if (!headerArea) return;
@@ -1234,6 +1288,11 @@
         const online = p.online || (bots[p.bot_id] && bots[p.bot_id].online);
         return `<span class="participant-chip"><span class="dot ${online ? 'green' : 'red'}"></span>${escapeHtml(name)}</span>`;
       }).join('');
+
+      const actions = getThreadStatusActions(detail.status);
+      const actionButtons = actions.map(a =>
+        `<button class="btn-thread-action btn-thread-${a.to}" onclick="changeThreadStatus('${escapeAttr(detail.id)}', '${a.to}')">${a.label}</button>`
+      ).join('');
 
       headerArea.innerHTML = `
     <div class="thread-detail-header">
@@ -1246,6 +1305,7 @@
         </span>
         <span class="topic" title="${escapeAttr(detail.topic)}">${escapeHtml(detail.topic)}</span>
         <span class="status-badge ${detail.status.toLowerCase()}" style="margin-left: auto;">${detail.status}</span>
+        ${actionButtons}
       </div>
       <div class="thread-detail-meta-row">
           <div class="thread-detail-participants">

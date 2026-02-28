@@ -558,6 +558,25 @@ body {
   border: 1px solid rgba(156, 163, 175, 0.3);
 }
 
+/* ─── Thread Status Action Buttons ─── */
+.btn-thread-action {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-left: 6px;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.btn-thread-action:hover { border-color: var(--accent); color: var(--text); }
+.btn-thread-resolved:hover { border-color: var(--green); color: var(--green); }
+.btn-thread-closed:hover { border-color: var(--red); color: var(--red); }
+.btn-thread-active:hover { border-color: var(--blue); color: var(--blue); }
+
 /* ─── Thread Sidebar Item ─── */
 .thread-sidebar-item {
   padding: 12px 14px;

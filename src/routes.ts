@@ -1374,6 +1374,97 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     res.json(response);
   });
 
+  /**
+   * PATCH /api/org/threads/:id — Update thread status (org admin)
+   * Body: { status, close_reason? }
+   */
+  auth.patch('/api/org/threads/:id', (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.org?.id || req.bot?.org_id)!;
+
+    const thread = db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== orgId) {
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    const { status: statusInput, close_reason } = req.body;
+    if (statusInput === undefined) {
+      res.status(400).json({ error: 'status is required', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (typeof statusInput !== 'string' || !THREAD_STATUSES.has(statusInput as ThreadStatus)) {
+      res.status(400).json({ error: 'Invalid status' });
+      return;
+    }
+    const status = statusInput as ThreadStatus;
+
+    let closeReason: CloseReason | undefined;
+    if (close_reason !== undefined) {
+      if (typeof close_reason !== 'string' || !CLOSE_REASONS.has(close_reason as CloseReason)) {
+        res.status(400).json({ error: 'Invalid close_reason' });
+        return;
+      }
+      closeReason = close_reason as CloseReason;
+    }
+
+    if (status === 'closed' && closeReason === undefined) {
+      res.status(400).json({ error: 'close_reason is required for closed status' });
+      return;
+    }
+    if (status !== 'closed' && closeReason !== undefined) {
+      res.status(400).json({ error: 'close_reason is only allowed with closed status' });
+      return;
+    }
+
+    try {
+      const updated = db.updateThreadStatus(thread.id, status, closeReason);
+      if (!updated) {
+        res.status(404).json({ error: 'Thread not found' });
+        return;
+      }
+
+      // Broadcast status change
+      const by = req.org ? `org:${orgId}` : req.bot!.name;
+      ws.broadcastThreadEvent(orgId, thread.id, {
+        type: 'thread_status_changed',
+        thread_id: thread.id,
+        topic: updated.topic,
+        from: thread.status,
+        to: updated.status,
+        by,
+      });
+
+      // Catchup events for offline bots
+      const participants = db.getParticipants(thread.id);
+      for (const p of participants) {
+        db.recordCatchupEvent(orgId, p.bot_id, 'thread_status_changed', {
+          thread_id: thread.id,
+          topic: updated.topic,
+          from: thread.status,
+          to: updated.status,
+          by,
+        });
+      }
+
+      // Audit
+      const actorId = req.bot?.id || `org:${orgId}`;
+      db.recordAudit(orgId, actorId, 'thread.status_changed', 'thread', thread.id, {
+        from: thread.status,
+        to: updated.status,
+        close_reason: closeReason || null,
+      });
+
+      res.json(updated);
+    } catch (err: any) {
+      if (err.message?.startsWith('Cannot transition')) {
+        res.status(409).json({ error: err.message, code: 'INVALID_TRANSITION' });
+      } else {
+        throw err;
+      }
+    }
+  });
+
   // ─── Threads ─────────────────────────────────────────────
 
   /**
@@ -1641,6 +1732,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         return;
       }
       status = statusInput as ThreadStatus;
+    }
+
+    // Only org admins can reopen terminal threads
+    if (status === 'active' && (thread.status === 'resolved' || thread.status === 'closed')) {
+      res.status(403).json({ error: 'Only org admin can reopen resolved/closed threads', code: 'FORBIDDEN' });
+      return;
     }
 
     let closeReason: CloseReason | undefined;
