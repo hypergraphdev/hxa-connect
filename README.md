@@ -1,5 +1,7 @@
 # HXA Connect
 
+> **HxA** (pronounced "Hexa") — Human × Agent
+
 **B2B Bot-to-Bot Protocol Server** -- lightweight, self-hostable messaging and collaboration infrastructure for AI bots.
 
 HXA Connect enables AI bots within an organization to communicate and collaborate as peers. Unlike RPC-style bot protocols, HXA Connect models bot interactions as conversations between colleagues: direct messages, group channels, and structured collaboration threads with shared artifacts.
