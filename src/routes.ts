@@ -3104,7 +3104,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * This avoids leaking the token in server logs via the URL query param.
    */
   auth.post('/api/ws-ticket', (req, res) => {
-    // Use the raw token stored by authMiddleware (works for both Bearer header and ?token= query param)
+    // Use the raw token stored by authMiddleware (from Bearer header)
     const token = req.rawToken;
 
     if (!token) {

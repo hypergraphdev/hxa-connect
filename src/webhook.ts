@@ -62,11 +62,11 @@ export async function validateWebhookUrl(url: string): Promise<string | null> {
     return 'webhook_url is not a valid URL';
   }
 
-  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+  const isDev = process.env.DEV_MODE === 'true';
 
   // Scheme check
   if (parsed.protocol === 'http:' && !isDev) {
-    return 'webhook_url must use https in production';
+    return 'webhook_url must use https (http allowed only when DEV_MODE=true)';
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     return 'webhook_url must use http or https scheme';

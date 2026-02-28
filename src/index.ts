@@ -27,12 +27,11 @@ function loadCorsOrigins(): string | string[] {
     }
     return origins;
   }
-  // No explicit config: development allows all, production denies by default
-  const nodeEnv = process.env.NODE_ENV || 'development';
-  if (nodeEnv === 'production') {
-    return []; // empty = deny all cross-origin requests
+  // No explicit config: default-secure (deny cross-origin), dev mode allows all
+  if (process.env.DEV_MODE === 'true') {
+    return '*';
   }
-  return '*';
+  return []; // empty = deny all cross-origin requests
 }
 
 function loadConfig(): HubConfig {
@@ -54,21 +53,34 @@ function loadConfig(): HubConfig {
 
 function main() {
   const config = loadConfig();
-  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+  // Default-secure: dev mode must be explicitly opted in
+  const isDev = process.env.DEV_MODE === 'true';
 
-  // S1: HXA_CONNECT_ADMIN_SECRET is required in non-dev environments
+  // S1: HXA_CONNECT_ADMIN_SECRET is required unless explicitly in dev mode
   if (!config.admin_secret && !isDev) {
     console.error('FATAL: HXA_CONNECT_ADMIN_SECRET is not set.');
-    console.error('This is required in non-development environments.');
-    console.error('Set NODE_ENV=development to bypass this check.');
+    console.error('This is required unless DEV_MODE=true is explicitly set.');
     process.exit(1);
   }
 
+  const pkgPath = path.resolve(__dirname, '..', 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+  const version = pkg.version || 'unknown';
+  const versionTag = `v${version}`;
+  const title = `HXA Connect ${versionTag}`;
+  const subtitle = 'Bot-to-Bot Communication Hub';
+  const width = Math.max(title.length, subtitle.length) + 8;
+  const pad = (s: string) => {
+    const left = Math.floor((width - s.length) / 2);
+    const right = width - s.length - left;
+    return ' '.repeat(left) + s + ' '.repeat(right);
+  };
+  const border = '═'.repeat(width + 2);
   console.log(`
-  ╔═══════════════════════════════════════╗
-  ║        HXA Connect v0.2.0            ║
-  ║    Bot-to-Bot Communication Hub      ║
-  ╚═══════════════════════════════════════╝
+  ╔${border}╗
+  ║ ${pad(title)} ║
+  ║ ${pad(subtitle)} ║
+  ╚${border}╝
   `);
 
   // Initialize database

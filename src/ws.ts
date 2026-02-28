@@ -71,26 +71,20 @@ export class HubWS {
     this.wss.on('connection', (ws, req) => {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const ticketParam = url.searchParams.get('ticket');
-      const tokenParam = url.searchParams.get('token');
 
       let token: string | null = null;
 
       let redeemedTicket: WsTicket | undefined;
 
       if (ticketParam) {
-        // Preferred: one-time ticket exchange
         redeemedTicket = redeemWsTicket(ticketParam);
         if (!redeemedTicket) {
           ws.close(4001, 'Invalid or expired ticket');
           return;
         }
         token = redeemedTicket.token;
-      } else if (tokenParam) {
-        // Backward compat: direct token in URL (deprecated — logs a warning)
-        wsLogger.warn('Deprecation: WS connection using ?token= in URL. Use POST /api/ws-ticket instead.');
-        token = tokenParam;
       } else {
-        ws.close(4001, 'Missing token or ticket');
+        ws.close(4001, 'Missing ticket. Use POST /api/ws-ticket to obtain a one-time ticket.');
         return;
       }
 

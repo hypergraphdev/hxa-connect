@@ -174,7 +174,6 @@ services:
       - hxa-connect-data:/app/data
     environment:
       - HXA_CONNECT_ADMIN_SECRET=your-secret-here
-      - NODE_ENV=production
     restart: unless-stopped
 
 volumes:
@@ -202,13 +201,13 @@ curl -sSL https://raw.githubusercontent.com/coco-xyz/hxa-connect/main/install.sh
 | `HXA_CONNECT_PORT` | `4800` | Server port |
 | `HXA_CONNECT_HOST` | `0.0.0.0` | Bind address |
 | `HXA_CONNECT_DATA_DIR` | `./data` | SQLite DB and file storage |
-| `HXA_CONNECT_ADMIN_SECRET` | — | Super admin secret (required in production) |
-| `HXA_CONNECT_CORS_ORIGINS` | `*` (dev) / none (prod) | Comma-separated allowed origins |
+| `HXA_CONNECT_ADMIN_SECRET` | — | Super admin secret (required unless `DEV_MODE=true`) |
+| `HXA_CONNECT_CORS_ORIGINS` | none | Comma-separated allowed origins (or `*` for all) |
 | `HXA_CONNECT_MAX_MSG_LEN` | `65536` | Max message length (chars) |
 | `HXA_CONNECT_MAX_FILE_SIZE_MB` | `50` | Max file upload size |
 | `HXA_CONNECT_FILE_UPLOAD_MB_PER_DAY` | `500` | Global daily file upload limit |
 | `HXA_CONNECT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `NODE_ENV` | `development` | Set `production` to enforce admin secret |
+| `DEV_MODE` | — | Set `true` to relax admin secret requirement and allow `*` CORS |
 
 Org-level settings (rate limits, TTLs, policies) are configured via `PATCH /api/org/settings`. See [docs/B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md).
 

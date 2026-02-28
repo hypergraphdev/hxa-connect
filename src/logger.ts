@@ -1,7 +1,7 @@
 import pino from 'pino';
 import crypto from 'node:crypto';
 
-const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+const isDev = process.env.DEV_MODE === 'true';
 const level = process.env.HXA_CONNECT_LOG_LEVEL || (isDev ? 'debug' : 'info');
 
 const transport = isDev

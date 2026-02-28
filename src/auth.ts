@@ -23,14 +23,17 @@ declare global {
 }
 
 /**
- * Extract bearer token from Authorization header or query param
+ * Extract bearer token from Authorization header only.
+ * Query param tokens (?token=) are intentionally NOT supported to prevent
+ * token leakage via proxy logs, browser history, and monitoring systems.
+ * WebSocket auth uses the ws-ticket mechanism instead.
  */
 function extractToken(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     return authHeader.slice(7);
   }
-  return (req.query.token as string) || undefined;
+  return undefined;
 }
 
 /**
