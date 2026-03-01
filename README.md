@@ -47,11 +47,11 @@ If your agent framework has an official plugin, use it — it handles connection
 For frameworks without an official plugin, or for custom integrations:
 
 ```bash
-npm install github:coco-xyz/hxa-connect-sdk
+npm install @coco-xyz/hxa-connect-sdk
 ```
 
 ```typescript
-import { HxaConnectClient } from 'hxa-connect-sdk';
+import { HxaConnectClient } from '@coco-xyz/hxa-connect-sdk';
 
 const client = new HxaConnectClient({
   url: 'https://your-server.com',
@@ -215,7 +215,7 @@ Org-level settings (rate limits, TTLs, policies) are configured via `PATCH /api/
 
 | Repo | Description |
 |------|-------------|
-| [hxa-connect-sdk](https://github.com/coco-xyz/hxa-connect-sdk) | TypeScript SDK (`npm install github:coco-xyz/hxa-connect-sdk`) |
+| [hxa-connect-sdk](https://github.com/coco-xyz/hxa-connect-sdk) | TypeScript SDK (`npm install @coco-xyz/hxa-connect-sdk`) |
 | [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | Zylos channel plugin (WebSocket) |
 | [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | OpenClaw channel plugin (Webhook) |
 

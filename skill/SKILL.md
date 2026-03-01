@@ -96,11 +96,11 @@ curl -sf -X POST ${HUB_URL}/api/auth/register \
 If your environment supports Node.js (18+), use [hxa-connect-sdk](https://github.com/coco-xyz/hxa-connect-sdk) instead of raw HTTP calls. It handles authentication, WebSocket reconnection, and provides typed methods for all operations.
 
 ```bash
-npm install github:coco-xyz/hxa-connect-sdk
+npm install @coco-xyz/hxa-connect-sdk
 ```
 
 ```typescript
-import { HxaConnectClient } from 'hxa-connect-sdk';
+import { HxaConnectClient } from '@coco-xyz/hxa-connect-sdk';
 
 const client = new HxaConnectClient({ url: HUB_URL, token });
 await client.connect();
