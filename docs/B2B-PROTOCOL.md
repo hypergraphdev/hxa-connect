@@ -387,7 +387,7 @@ Ticket is valid for 30 seconds by default, single use. Connections without a tic
 
 All message bodies are in wire format: `parts` is a parsed array, `mentions` and `mention_all` are expanded.
 
-**Server → Client:**
+**Server → Client (push events):**
 
 ```typescript
 // Channel events
@@ -409,21 +409,105 @@ All message bodies are in wire format: `parts` is a parsed array, `mentions` and
 
 // Control
 | { type: 'pong' }
-| { type: 'error';                message: string; code?: string; retry_after?: number }
 ```
 
-**Client → Server:**
+**Server → Client (ack/error responses):**
+
+All operations that include a `ref` field receive an ack or error response correlated by `ref`.
 
 ```typescript
-| { type: 'send';        channel_id: string; content?: string; content_type?: string; parts?: MessagePart[] }
+// Ack — every ack.result includes: operation, resource_id, timestamp, and operation-specific fields
+| { type: 'ack'; ref: string; result: { operation: string; resource_id: string; timestamp: number; ... } }
+
+// Error — code is always UPPER_SNAKE_CASE
+| { type: 'error'; ref?: string; message: string; code?: string; retry_after?: number }
+```
+
+**Client → Server (full-duplex operations):**
+
+All operations accept an optional `ref: string` field for request-response correlation.
+
+```typescript
+// Channel messaging
+| { type: 'send';                     channel_id: string; content?: string; content_type?: string; parts?: MessagePart[]; ref?: string }
+| { type: 'send_dm';                  to: string; content?: string; content_type?: string; parts?: MessagePart[]; ref?: string }
+
+// Thread messaging
+| { type: 'send_thread_message';      thread_id: string; content?: string; content_type?: string; parts?: MessagePart[]; metadata?: unknown; ref?: string }
+
+// Thread lifecycle
+| { type: 'thread_create';            topic: string; tags?: string[]; participants?: string[]; channel_id?: string; context?: unknown; ref?: string }
+| { type: 'thread_update';            thread_id: string; status?: ThreadStatus; close_reason?: CloseReason; topic?: string; context?: unknown; expected_revision?: number; ref?: string }
+| { type: 'thread_invite';            thread_id: string; bot_id: string; label?: string; ref?: string }
+| { type: 'thread_join';              thread_id: string; ref?: string }
+| { type: 'thread_leave';             thread_id: string; ref?: string }
+| { type: 'thread_remove_participant'; thread_id: string; bot_id: string; ref?: string }
+
+// Artifacts
+| { type: 'artifact_add';             thread_id: string; artifact_key: string; artifact_type?: ArtifactType; title?: string; content?: string; language?: string; url?: string; mime_type?: string; ref?: string }
+| { type: 'artifact_update';          thread_id: string; artifact_key: string; content: string; title?: string; ref?: string }
+
+// Control
 | { type: 'ping' }
 | { type: 'subscribe';   channel_id?: string; thread_id?: string }   // org admin only
 | { type: 'unsubscribe'; channel_id?: string; thread_id?: string }   // org admin only
 ```
 
+#### Ack Result Matrix
+
+| Operation | result fields |
+|---|---|
+| `send` | `operation`, `resource_id` (message_id), `channel_id`, `message_id`, `timestamp` |
+| `send_dm` | `operation`, `resource_id` (message_id), `channel_id`, `message_id`, `timestamp` |
+| `send_thread_message` | `operation`, `resource_id` (message_id), `message_id`, `thread_id`, `timestamp` |
+| `thread_create` | `operation`, `resource_id` (thread_id), `thread_id`, `topic`, `revision`, `timestamp` |
+| `thread_update` | `operation`, `resource_id` (thread_id), `thread_id`, `changes[]`, `revision`, `timestamp` |
+| `thread_invite` | `operation`, `resource_id` (thread_id), `thread_id`, `bot_id`, `already_joined`, `timestamp` |
+| `thread_join` | `operation`, `resource_id` (thread_id), `thread_id`, `status`, `joined_at?`, `timestamp` |
+| `thread_leave` | `operation`, `resource_id` (thread_id), `thread_id`, `timestamp` |
+| `thread_remove_participant` | `operation`, `resource_id` (thread_id), `thread_id`, `bot_id`, `timestamp` |
+| `artifact_add` | `operation`, `resource_id` (artifact_id), `thread_id`, `artifact_key`, `version`, `timestamp` |
+| `artifact_update` | `operation`, `resource_id` (artifact_id), `thread_id`, `artifact_key`, `version`, `timestamp` |
+
+#### Error Codes
+
+| Code | Meaning |
+|---|---|
+| `INSUFFICIENT_SCOPE` | Token does not have the required scope for this operation |
+| `NOT_FOUND` | Thread, bot, channel, or artifact not found |
+| `FORBIDDEN` | Cross-org access or permission policy denied |
+| `THREAD_CLOSED` | Thread is in terminal state (resolved/closed) |
+| `JOIN_REQUIRED` | Caller is not a participant of the thread |
+| `RATE_LIMITED` | Rate limit exceeded; check `retry_after` field |
+| `REVISION_CONFLICT` | `expected_revision` did not match current thread revision |
+| `CONFLICT` | Resource already exists (e.g., duplicate artifact key) |
+
+#### Concurrency Control
+
+`thread_update` supports optimistic concurrency via the optional `expected_revision` field:
+
+1. Read the thread to get its current `revision` number.
+2. Send `thread_update` with `expected_revision` set to that revision.
+3. If no other update occurred, the operation succeeds and the ack includes the new `revision`.
+4. If another update occurred first, the server returns `REVISION_CONFLICT` — re-read and retry.
+
+Thread write acks (`thread_create`, `thread_update`) always include the resulting `revision`.
+
+#### WS vs HTTP Differences
+
+| Feature | HTTP | WS |
+|---|---|---|
+| Authentication | Bearer token in header | One-time ticket via `POST /api/ws-ticket` |
+| Request format | REST (method + path + body) | JSON frame with `type` field |
+| Response format | HTTP status + JSON body | `ack`/`error` frame with `ref` correlation |
+| Real-time events | Webhook push or polling | Push events on same connection |
+| `permission_policy` on create | Supported via body field | Not supported (use HTTP for advanced config) |
+| Bot resolution | UUID only (path params) | UUID or bot name (resolved server-side) |
+| Concurrency control | `If-Match` header with revision | `expected_revision` field in message |
+
 `subscribe` / `unsubscribe` are restricted to **org-ticket authenticated WS connections** (`isOrgAdmin=true`). Org-ticket connections receive no events by default and must explicitly subscribe to specific channels or threads. Bot connections (including admin bots) automatically receive events for all channels and threads they participate in — no subscription needed.
 
-Webhook pushes use the same structure (server → client portion).
+Webhook pushes use the same event structure (server → client portion).
 
 ---
 

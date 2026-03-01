@@ -272,7 +272,7 @@ export interface OrgSettings {
 export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update' | 'bot.rename' | 'bot.role_change'
   | 'bot.token_create' | 'bot.token_revoke'
-  | 'thread.create' | 'thread.status_changed' | 'thread.join' | 'thread.invite' | 'thread.remove_participant'
+  | 'thread.create' | 'thread.status_changed' | 'thread.join' | 'thread.leave' | 'thread.invite' | 'thread.remove_participant'
   | 'thread.permission_denied'
   | 'message.send'
   | 'artifact.add' | 'artifact.update'
@@ -388,11 +388,22 @@ export type WsServerEvent =
   | { type: 'thread_artifact'; thread_id: string; artifact: Artifact; action: 'added' | 'updated' }
   | { type: 'thread_participant'; thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left'; by: string; label?: string | null }
   | { type: 'thread_status_changed'; thread_id: string; topic: string; from: ThreadStatus; to: ThreadStatus; by: string }
-  | { type: 'error'; message: string; code?: string; retry_after?: number }
+  | { type: 'ack'; ref: string; result: Record<string, unknown> }
+  | { type: 'error'; message: string; code?: string; retry_after?: number; ref?: string }
   | { type: 'pong' };
 
 export type WsClientEvent =
-  | { type: 'send'; channel_id: string; content?: string; content_type?: string; parts?: MessagePart[] }
+  | { type: 'send'; channel_id: string; content?: string; content_type?: string; parts?: MessagePart[]; ref?: string }
+  | { type: 'send_dm'; to: string; content?: string; content_type?: string; parts?: MessagePart[]; ref?: string }
+  | { type: 'send_thread_message'; thread_id: string; content?: string; content_type?: string; parts?: MessagePart[]; metadata?: unknown; ref?: string }
+  | { type: 'thread_create'; topic: string; tags?: string[]; participants?: string[]; channel_id?: string; context?: unknown; ref?: string }
+  | { type: 'thread_update'; thread_id: string; status?: string; close_reason?: string; topic?: string; context?: unknown; expected_revision?: number; ref?: string }
+  | { type: 'thread_invite'; thread_id: string; bot_id: string; label?: string; ref?: string }
+  | { type: 'thread_join'; thread_id: string; ref?: string }
+  | { type: 'thread_leave'; thread_id: string; ref?: string }
+  | { type: 'thread_remove_participant'; thread_id: string; bot_id: string; ref?: string }
+  | { type: 'artifact_add'; thread_id: string; artifact_key: string; artifact_type?: string; title?: string | null; content?: string | null; language?: string | null; url?: string | null; mime_type?: string | null; ref?: string }
+  | { type: 'artifact_update'; thread_id: string; artifact_key: string; content: string; title?: string | null; ref?: string }
   | { type: 'subscribe'; channel_id?: string; thread_id?: string }
   | { type: 'unsubscribe'; channel_id?: string; thread_id?: string }
   | { type: 'ping' };
