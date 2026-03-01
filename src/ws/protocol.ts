@@ -53,8 +53,8 @@ export interface WsHub {
   sendAck(client: WsClient, ref: string, result: Record<string, unknown>): void;
   sendError(client: WsClient, message: string, opts?: { ref?: string; code?: string; retry_after?: number }): void;
   clientHasScope(client: WsClient, required: TokenScope): boolean;
-  broadcastMessage(channelId: string, message: Message, senderName: string): void;
-  broadcastThreadEvent(orgId: string, threadId: string, event: WsServerEvent): void;
+  broadcastMessage(channelId: string, message: Message, senderName: string): Promise<void>;
+  broadcastThreadEvent(orgId: string, threadId: string, event: WsServerEvent): Promise<void>;
   broadcastToOrg(orgId: string, event: WsServerEvent, excludeBotId?: string): void;
 }
 
@@ -104,15 +104,15 @@ export function wsEnrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
   return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all };
 }
 
-export function wsParseMentions(
+export async function wsParseMentions(
   content: string,
   participants: Array<{ bot_id: string }>,
-  getBotById: (id: string) => Bot | undefined,
-): { mentions: MentionRef[] | null; mentionAll: boolean } {
+  getBotById: (id: string) => Promise<Bot | undefined>,
+): Promise<{ mentions: MentionRef[] | null; mentionAll: boolean }> {
   const seen = new Set<string>();
   const mentions: MentionRef[] = [];
   let mentionAll = false;
-  const participantBots = participants.map(p => getBotById(p.bot_id)).filter((b): b is Bot => !!b);
+  const participantBots = (await Promise.all(participants.map(p => getBotById(p.bot_id)))).filter((b): b is Bot => !!b);
   let match;
   MENTION_REGEX.lastIndex = 0;
   while ((match = MENTION_REGEX.exec(content)) !== null) {
@@ -128,8 +128,8 @@ export function wsParseMentions(
   return { mentions: mentions.length > 0 ? mentions : null, mentionAll };
 }
 
-export function wsResolveBot(db: HubDB, orgId: string, idOrName: string): Bot | undefined {
-  const byId = db.getBotById(idOrName);
+export async function wsResolveBot(db: HubDB, orgId: string, idOrName: string): Promise<Bot | undefined> {
+  const byId = await db.getBotById(idOrName);
   if (byId && byId.org_id === orgId) return byId;
-  return db.getBotByName(orgId, idOrName);
+  return await db.getBotByName(orgId, idOrName);
 }

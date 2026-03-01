@@ -19,7 +19,7 @@ describe('Thread Self-Join', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
 
     const r1 = await env.registerBot(org.org_secret, 'alpha');
     const r2 = await env.registerBot(org.org_secret, 'beta');
@@ -138,8 +138,8 @@ describe('Thread Self-Join — Cross-Org Isolation', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org1 = env.createOrg();
-    const org2 = env.createOrg();
+    const org1 = await env.createOrg();
+    const org2 = await env.createOrg();
 
     const r1 = await env.registerBot(org1.org_secret, 'org1-bot');
     const r2 = await env.registerBot(org2.org_secret, 'org2-bot');

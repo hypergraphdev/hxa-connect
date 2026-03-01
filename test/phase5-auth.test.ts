@@ -18,7 +18,7 @@ describe('Login-to-Register Auth Flow', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('auth-flow-org');
+    const org = await env.createOrg('auth-flow-org');
     orgId = org.id;
     orgSecret = org.org_secret;
   });
@@ -161,7 +161,7 @@ describe('Login-to-Register Auth Flow', () => {
 
   it('rejects register when ticket belongs to different org', async () => {
     // Create a second org
-    const org2 = env.createOrg('other-org');
+    const org2 = await env.createOrg('other-org');
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: org2.id, org_secret: org2.org_secret },
     });
@@ -222,7 +222,7 @@ describe('X-Org-Id Header Validation', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('orgid-test');
+    const org = await env.createOrg('orgid-test');
     orgId = org.id;
     orgSecret = org.org_secret;
 
@@ -275,7 +275,7 @@ describe('Secret Rotation and Ticket Invalidation', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('rotation-org');
+    const org = await env.createOrg('rotation-org');
     orgId = org.id;
     orgSecret = org.org_secret;
 
@@ -391,7 +391,7 @@ describe('Role Management', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('role-org');
+    const org = await env.createOrg('role-org');
     orgId = org.id;
     orgSecret = org.org_secret;
 
@@ -478,7 +478,7 @@ describe('Role Management', () => {
 
   it('rejects role change for bot in different org', async () => {
     // Create another org + bot
-    const org2 = env.createOrg('role-org-2');
+    const org2 = await env.createOrg('role-org-2');
     const { body: login2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: org2.id, org_secret: org2.org_secret },
     });
@@ -504,7 +504,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('pag-bots-org');
+    const org = await env.createOrg('pag-bots-org');
 
     // Register 5 bots
     for (let i = 1; i <= 5; i++) {
@@ -590,7 +590,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('pag-threads-org');
+    const org = await env.createOrg('pag-threads-org');
 
     // Register a bot
     const { token } = await env.registerBot(org.org_secret, 'thread-maker');
@@ -700,7 +700,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('pag-artifacts-org');
+    const org = await env.createOrg('pag-artifacts-org');
 
     // Register bot
     const { token } = await env.registerBot(org.org_secret, 'artifact-maker');
@@ -780,7 +780,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('pag-msgs-org');
+    const org = await env.createOrg('pag-msgs-org');
 
     const { token } = await env.registerBot(org.org_secret, 'msg-maker');
     botToken = token;
@@ -1098,7 +1098,7 @@ describe('Ticket Expiration', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('expiry-org');
+    const org = await env.createOrg('expiry-org');
     orgId = org.id;
     orgSecret = org.org_secret;
   });
@@ -1171,7 +1171,7 @@ describe('Mixed Auth Types', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('mixed-auth-org');
+    const org = await env.createOrg('mixed-auth-org');
     orgId = org.id;
 
     const { token } = await env.registerBot(org.org_secret, 'mixed-bot');
@@ -1231,7 +1231,7 @@ describe('WS Ticket Exchange (POST /api/ws-ticket)', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('ws-ticket-org');
+    const org = await env.createOrg('ws-ticket-org');
 
     const { token } = await env.registerBot(org.org_secret, 'ws-bot');
     botToken = token;

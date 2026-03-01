@@ -61,7 +61,7 @@ export class HubWS implements WsHub {
       }
     }, 30_000);
 
-    this.wss.on('connection', (ws, req) => {
+    this.wss.on('connection', async (ws, req) => {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const ticketParam = url.searchParams.get('ticket');
 
@@ -82,7 +82,7 @@ export class HubWS implements WsHub {
       }
 
       // Authenticate as bot via primary token
-      const bot = db.getBotByToken(token);
+      const bot = await db.getBotByToken(token);
       if (bot) {
         // Phase 3: Validate org binding if ticket specifies an orgId
         if (redeemedTicket?.orgId && redeemedTicket.orgId !== bot.org_id) {
@@ -91,7 +91,7 @@ export class HubWS implements WsHub {
         }
 
         // Phase 4: Check org status before allowing connection
-        const botOrg = db.getOrgById(bot.org_id);
+        const botOrg = await db.getOrgById(bot.org_id);
         if (!botOrg || botOrg.status !== 'active') {
           ws.close(4100, 'Organization is not active');
           return;
@@ -108,10 +108,10 @@ export class HubWS implements WsHub {
         };
         this.clients.add(client);
         const connCount = incrementBotConnections(bot.id);
-        db.setBotOnline(bot.id, true);
+        await db.setBotOnline(bot.id, true);
 
         // Reset degraded webhook status on reconnect
-        db.resetWebhookDegraded(bot.id);
+        await db.resetWebhookDegraded(bot.id);
 
         // W2: Only broadcast bot_online on first connection (0→1)
         if (connCount === 1) {
@@ -126,14 +126,14 @@ export class HubWS implements WsHub {
       }
 
       // Authenticate via scoped token (bot_tokens table)
-      const scopedToken = db.getBotTokenByToken(token);
+      const scopedToken = await db.getBotTokenByToken(token);
       if (scopedToken) {
         // Check expiration
         if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
           ws.close(4001, 'Token expired');
           return;
         }
-        const scopedBot = db.getBotById(scopedToken.bot_id);
+        const scopedBot = await db.getBotById(scopedToken.bot_id);
         if (scopedBot) {
           // Phase 3: Validate org binding if ticket specifies an orgId
           if (redeemedTicket?.orgId && redeemedTicket.orgId !== scopedBot.org_id) {
@@ -142,7 +142,7 @@ export class HubWS implements WsHub {
           }
 
           // Phase 4: Check org status before allowing connection
-          const scopedOrg = db.getOrgById(scopedBot.org_id);
+          const scopedOrg = await db.getOrgById(scopedBot.org_id);
           if (!scopedOrg || scopedOrg.status !== 'active') {
             ws.close(4100, 'Organization is not active');
             return;
@@ -159,11 +159,11 @@ export class HubWS implements WsHub {
           };
           this.clients.add(client);
           const scopedConnCount = incrementBotConnections(scopedBot.id);
-          db.setBotOnline(scopedBot.id, true);
-          db.touchBotToken(scopedToken.id);
+          await db.setBotOnline(scopedBot.id, true);
+          await db.touchBotToken(scopedToken.id);
 
           // Reset degraded webhook status on reconnect
-          db.resetWebhookDegraded(scopedBot.id);
+          await db.resetWebhookDegraded(scopedBot.id);
 
           // W2: Only broadcast bot_online on first connection (0→1)
           if (scopedConnCount === 1) {
@@ -182,9 +182,9 @@ export class HubWS implements WsHub {
       }
 
       // Try org ticket (reusable session token from login) — for web UI / human admins
-      const orgTicket = db.getOrgTicket(token);
+      const orgTicket = await db.getOrgTicket(token);
       if (orgTicket && orgTicket.reusable && !orgTicket.consumed && orgTicket.expires_at > Date.now()) {
-        const ticketOrg = db.getOrgById(orgTicket.org_id);
+        const ticketOrg = await db.getOrgById(orgTicket.org_id);
         if (ticketOrg) {
           // Phase 3: Validate org binding if ws-ticket specifies an orgId
           if (redeemedTicket?.orgId && redeemedTicket.orgId !== ticketOrg.id) {
@@ -227,7 +227,7 @@ export class HubWS implements WsHub {
   }
 
   private setupHandlers(client: WsClient) {
-    client.ws.on('message', (raw) => {
+    client.ws.on('message', async (raw) => {
       try {
         const data = JSON.parse(raw.toString());
 
@@ -263,17 +263,17 @@ export class HubWS implements WsHub {
         incOp();
 
         switch (data.type) {
-          case 'send': handleSend(this, client, data); break;
-          case 'send_dm': handleSendDm(this, client, data); break;
-          case 'send_thread_message': handleSendThreadMessage(this, client, data); break;
-          case 'thread_create': handleThreadCreate(this, client, data); break;
-          case 'thread_update': handleThreadUpdate(this, client, data); break;
-          case 'thread_invite': handleThreadInvite(this, client, data); break;
-          case 'thread_join': handleThreadJoin(this, client, data); break;
-          case 'thread_leave': handleThreadLeave(this, client, data); break;
-          case 'thread_remove_participant': handleThreadRemoveParticipant(this, client, data); break;
-          case 'artifact_add': handleArtifactAdd(this, client, data); break;
-          case 'artifact_update': handleArtifactUpdate(this, client, data); break;
+          case 'send': await handleSend(this, client, data); break;
+          case 'send_dm': await handleSendDm(this, client, data); break;
+          case 'send_thread_message': await handleSendThreadMessage(this, client, data); break;
+          case 'thread_create': await handleThreadCreate(this, client, data); break;
+          case 'thread_update': await handleThreadUpdate(this, client, data); break;
+          case 'thread_invite': await handleThreadInvite(this, client, data); break;
+          case 'thread_join': await handleThreadJoin(this, client, data); break;
+          case 'thread_leave': await handleThreadLeave(this, client, data); break;
+          case 'thread_remove_participant': await handleThreadRemoveParticipant(this, client, data); break;
+          case 'artifact_add': await handleArtifactAdd(this, client, data); break;
+          case 'artifact_update': await handleArtifactUpdate(this, client, data); break;
         }
 
         const latency = Date.now() - opStart;
@@ -288,14 +288,14 @@ export class HubWS implements WsHub {
       client.alive = true;
     });
 
-    client.ws.on('close', () => {
+    client.ws.on('close', async () => {
       this.clients.delete(client);
       if (client.botId) {
         // W2: Only mark offline when last connection closes
         const remaining = decrementBotConnections(client.botId);
         if (remaining === 0) {
-          this.db.setBotOnline(client.botId, false);
-          const bot = this.db.getBotById(client.botId);
+          await this.db.setBotOnline(client.botId, false);
+          const bot = await this.db.getBotById(client.botId);
           if (bot) {
             this.broadcastToOrg(bot.org_id, {
               type: 'bot_offline',
@@ -333,12 +333,12 @@ export class HubWS implements WsHub {
 
   // ─── WsHub interface: broadcast ────────────────────────────
 
-  broadcastMessage(channelId: string, message: Message, senderName: string): void {
-    doBroadcastMessage(this.clients, this.db, this.webhookManager, channelId, message, senderName);
+  async broadcastMessage(channelId: string, message: Message, senderName: string): Promise<void> {
+    await doBroadcastMessage(this.clients, this.db, this.webhookManager, channelId, message, senderName);
   }
 
-  broadcastThreadEvent(orgId: string, threadId: string, event: WsServerEvent): void {
-    doBroadcastThreadEvent(this.clients, this.db, this.webhookManager, orgId, threadId, event);
+  async broadcastThreadEvent(orgId: string, threadId: string, event: WsServerEvent): Promise<void> {
+    await doBroadcastThreadEvent(this.clients, this.db, this.webhookManager, orgId, threadId, event);
   }
 
   broadcastToOrg(orgId: string, event: WsServerEvent, excludeBotId?: string): void {

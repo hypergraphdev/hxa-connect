@@ -14,7 +14,7 @@ describe('Channel Cleanup — Removed Endpoints', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token } = await env.registerBot(org.org_secret, 'cleanup-bot');
     botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);
@@ -68,7 +68,7 @@ describe('Channel Cleanup — Kept Endpoints', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token: t1 } = await env.registerBot(org.org_secret, 'keep-bot-1');
     const { token: t2 } = await env.registerBot(org.org_secret, 'keep-bot-2');
     botToken1 = t1;
@@ -111,7 +111,7 @@ describe('Channel Cleanup — Kept Endpoints', () => {
   });
 
   it('GET /api/channels/:id rejects non-member', async () => {
-    const org2 = env.createOrg('other-org');
+    const org2 = await env.createOrg('other-org');
     const { token: otherToken } = await env.registerBot(org2.org_secret, 'outsider');
     const { status } = await api(env.baseUrl, 'GET', `/api/channels/${channelId}`, {
       token: otherToken,
@@ -130,7 +130,7 @@ describe('GET /api/bots/:id/channels — New Endpoint', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token: t1, bot: b1 } = await env.registerBot(org.org_secret, 'ch-bot-1');
     const { token: t2, bot: b2 } = await env.registerBot(org.org_secret, 'ch-bot-2');
     await env.registerBot(org.org_secret, 'ch-bot-3');
@@ -224,7 +224,7 @@ describe('GET /api/bots/:id/channels — New Endpoint', () => {
   });
 
   it('rejects cross-org access (bot not visible)', async () => {
-    const org2 = env.createOrg('other-org');
+    const org2 = await env.createOrg('other-org');
     const { token: otherToken } = await env.registerBot(org2.org_secret, 'other-bot');
     const { status, body } = await api(env.baseUrl, 'GET', `/api/bots/${bot1Id}/channels`, {
       token: otherToken,

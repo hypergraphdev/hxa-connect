@@ -16,7 +16,7 @@ import {
 
 // ─── type: 'send' (channel message) ─────────────────────────
 
-export function handleSend(hub: WsHub, client: WsClient, data: any): void {
+export async function handleSend(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'message')) {
@@ -24,12 +24,12 @@ export function handleSend(hub: WsHub, client: WsClient, data: any): void {
     return;
   }
 
-  if (!hub.db.isChannelMember(data.channel_id, client.botId!)) {
+  if (!await hub.db.isChannelMember(data.channel_id, client.botId!)) {
     hub.sendError(client, 'Not a member of this channel', { ref });
     return;
   }
 
-  const rateCheck = hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
+  const rateCheck = await hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
   if (!rateCheck.allowed) {
     hub.sendError(client, `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, { ref, code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter });
     return;
@@ -61,17 +61,17 @@ export function handleSend(hub: WsHub, client: WsClient, data: any): void {
   }
 
   const contentType = data.content_type || 'text';
-  const msg = hub.db.createMessage(data.channel_id, client.botId!, content, contentType, partsJson);
-  const bot = hub.db.getBotById(client.botId!);
+  const msg = await hub.db.createMessage(data.channel_id, client.botId!, content, contentType, partsJson);
+  const bot = await hub.db.getBotById(client.botId!);
 
-  hub.db.recordAudit(client.orgId, client.botId!, 'message.send', 'channel_message', msg.id, { channel_id: data.channel_id, via: 'ws' });
+  await hub.db.recordAudit(client.orgId, client.botId!, 'message.send', 'channel_message', msg.id, { channel_id: data.channel_id, via: 'ws' });
 
-  const channel = hub.db.getChannel(data.channel_id);
+  const channel = await hub.db.getChannel(data.channel_id);
   if (channel) {
-    const members = hub.db.getChannelMembers(data.channel_id);
+    const members = await hub.db.getChannelMembers(data.channel_id);
     for (const m of members) {
       if (m.bot_id === client.botId) continue;
-      hub.db.recordCatchupEvent(channel.org_id, m.bot_id, 'channel_message_summary', {
+      await hub.db.recordCatchupEvent(channel.org_id, m.bot_id, 'channel_message_summary', {
         channel_id: channel.id,
         channel_name: channel.name ?? undefined,
         count: 1,
@@ -80,14 +80,14 @@ export function handleSend(hub: WsHub, client: WsClient, data: any): void {
     }
   }
 
-  hub.broadcastMessage(data.channel_id, msg, bot?.name || 'unknown');
+  await hub.broadcastMessage(data.channel_id, msg, bot?.name || 'unknown');
 
   if (ref) hub.sendAck(client, ref, { operation: 'send', resource_id: msg.id, channel_id: data.channel_id, message_id: msg.id, timestamp: msg.created_at });
 }
 
 // ─── type: 'send_dm' ────────────────────────────────────────
 
-export function handleSendDm(hub: WsHub, client: WsClient, data: any): void {
+export async function handleSendDm(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'message')) {
@@ -95,7 +95,7 @@ export function handleSendDm(hub: WsHub, client: WsClient, data: any): void {
     return;
   }
 
-  const rateCheck = hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
+  const rateCheck = await hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
   if (!rateCheck.allowed) {
     hub.sendError(client, `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, { ref, code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter });
     return;
@@ -129,7 +129,7 @@ export function handleSendDm(hub: WsHub, client: WsClient, data: any): void {
     return;
   }
 
-  const target = wsResolveBot(hub.db, client.orgId, to);
+  const target = await wsResolveBot(hub.db, client.orgId, to);
   if (!target) {
     hub.sendError(client, `Bot not found: ${to}`, { ref, code: 'NOT_FOUND' });
     return;
@@ -145,7 +145,7 @@ export function handleSendDm(hub: WsHub, client: WsClient, data: any): void {
     return;
   }
 
-  const channel = hub.db.createChannel(client.orgId, 'direct', [client.botId!, target.id]);
+  const channel = await hub.db.createChannel(client.orgId, 'direct', [client.botId!, target.id]);
 
   if (channel.isNew) {
     hub.broadcastToOrg(client.orgId, {
@@ -155,25 +155,26 @@ export function handleSendDm(hub: WsHub, client: WsClient, data: any): void {
     });
   }
 
-  const msg = hub.db.createMessage(channel.id, client.botId!, resolvedContent, content_type || 'text', partsJson);
+  const msg = await hub.db.createMessage(channel.id, client.botId!, resolvedContent, content_type || 'text', partsJson);
 
-  hub.db.recordAudit(client.orgId, client.botId!, 'message.send', 'channel_message', msg.id, { channel_id: channel.id, to: target.id, via: 'ws' });
+  await hub.db.recordAudit(client.orgId, client.botId!, 'message.send', 'channel_message', msg.id, { channel_id: channel.id, to: target.id, via: 'ws' });
 
-  hub.db.recordCatchupEvent(client.orgId, target.id, 'channel_message_summary', {
+  await hub.db.recordCatchupEvent(client.orgId, target.id, 'channel_message_summary', {
     channel_id: channel.id,
     channel_name: channel.name ?? undefined,
     count: 1,
     last_at: msg.created_at,
   }, channel.id);
 
-  hub.broadcastMessage(channel.id, msg, hub.db.getBotById(client.botId!)?.name || 'unknown');
+  const senderBot = await hub.db.getBotById(client.botId!);
+  await hub.broadcastMessage(channel.id, msg, senderBot?.name || 'unknown');
 
   if (ref) hub.sendAck(client, ref, { operation: 'send_dm', resource_id: msg.id, channel_id: channel.id, message_id: msg.id, timestamp: msg.created_at });
 }
 
 // ─── type: 'send_thread_message' ────────────────────────────
 
-export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any): void {
+export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -181,7 +182,7 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     return;
   }
 
-  const rateCheck = hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
+  const rateCheck = await hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'message');
   if (!rateCheck.allowed) {
     hub.sendError(client, `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, { ref, code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter });
     return;
@@ -194,7 +195,7 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -207,7 +208,7 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
@@ -258,14 +259,14 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     }
   }
 
-  const threadParticipants = hub.db.getParticipants(thread.id);
-  const { mentions: mentionRefs, mentionAll } = wsParseMentions(
+  const threadParticipants = await hub.db.getParticipants(thread.id);
+  const { mentions: mentionRefs, mentionAll } = await wsParseMentions(
     resolvedContent,
     threadParticipants,
     (id) => hub.db.getBotById(id),
   );
 
-  const message = hub.db.createThreadMessage(
+  const message = await hub.db.createThreadMessage(
     thread.id,
     client.botId!,
     resolvedContent,
@@ -276,14 +277,14 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     mentionAll ? 1 : 0,
   );
 
-  const bot = hub.db.getBotById(client.botId!);
+  const bot = await hub.db.getBotById(client.botId!);
   const enriched = { ...wsEnrichThreadMessage(message), sender_name: bot?.name || 'unknown' };
 
-  hub.db.recordAudit(thread.org_id, client.botId!, 'message.send', 'thread_message', message.id, { thread_id: thread.id, via: 'ws' });
+  await hub.db.recordAudit(thread.org_id, client.botId!, 'message.send', 'thread_message', message.id, { thread_id: thread.id, via: 'ws' });
 
   for (const p of threadParticipants) {
     if (p.bot_id === client.botId) continue;
-    hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
+    await hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
       thread_id: thread.id,
       topic: thread.topic,
       count: 1,
@@ -291,7 +292,7 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
     }, thread.id);
   }
 
-  hub.broadcastThreadEvent(thread.org_id, thread.id, {
+  await hub.broadcastThreadEvent(thread.org_id, thread.id, {
     type: 'thread_message',
     thread_id: thread.id,
     message: enriched,
@@ -302,7 +303,7 @@ export function handleSendThreadMessage(hub: WsHub, client: WsClient, data: any)
 
 // ─── type: 'thread_create' ──────────────────────────────────
 
-export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadCreate(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -310,7 +311,7 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
     return;
   }
 
-  const rateCheck = hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'thread');
+  const rateCheck = await hub.db.checkAndRecordRateLimit(client.orgId, client.botId!, 'thread');
   if (!rateCheck.allowed) {
     hub.sendError(client, `Rate limit exceeded. Retry after ${rateCheck.retryAfter}s`, { ref, code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter });
     return;
@@ -343,7 +344,7 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
 
   const resolvedParticipantIds: string[] = [];
   for (const p of (participants || [])) {
-    const bot = wsResolveBot(hub.db, client.orgId, p);
+    const bot = await wsResolveBot(hub.db, client.orgId, p);
     if (!bot) {
       hub.sendError(client, `Bot not found: ${p}`, { ref });
       return;
@@ -357,7 +358,7 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
       hub.sendError(client, 'channel_id must be a string', { ref });
       return;
     }
-    const channel = hub.db.getChannel(channel_id);
+    const channel = await hub.db.getChannel(channel_id);
     if (!channel || channel.org_id !== client.orgId) {
       hub.sendError(client, 'Invalid channel_id', { ref });
       return;
@@ -382,7 +383,7 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
   }
 
   try {
-    const thread = hub.db.createThread(
+    const thread = await hub.db.createThread(
       client.orgId,
       client.botId!,
       topic,
@@ -393,27 +394,27 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
       null, // permission_policy — use HTTP API for advanced policy config
     );
 
-    hub.db.recordAudit(client.orgId, client.botId!, 'thread.create', 'thread', thread.id, { topic, tags: resolvedTags, via: 'ws' });
+    await hub.db.recordAudit(client.orgId, client.botId!, 'thread.create', 'thread', thread.id, { topic, tags: resolvedTags, via: 'ws' });
 
     const allParticipantIds = Array.from(new Set([client.botId!, ...resolvedParticipantIds]));
     for (const pid of allParticipantIds) {
       if (pid === client.botId) continue;
-      hub.db.recordCatchupEvent(client.orgId, pid, 'thread_invited', {
+      await hub.db.recordCatchupEvent(client.orgId, pid, 'thread_invited', {
         thread_id: thread.id,
         topic: thread.topic,
         inviter: client.botId!,
       });
     }
 
-    hub.broadcastThreadEvent(client.orgId, thread.id, {
+    await hub.broadcastThreadEvent(client.orgId, thread.id, {
       type: 'thread_created',
       thread,
     });
 
     for (const pid of allParticipantIds) {
-      const bot = hub.db.getBotById(pid);
+      const bot = await hub.db.getBotById(pid);
       if (!bot) continue;
-      hub.broadcastThreadEvent(client.orgId, thread.id, {
+      await hub.broadcastThreadEvent(client.orgId, thread.id, {
         type: 'thread_participant',
         thread_id: thread.id,
         bot_id: pid,
@@ -431,7 +432,7 @@ export function handleThreadCreate(hub: WsHub, client: WsClient, data: any): voi
 
 // ─── type: 'thread_update' ──────────────────────────────────
 
-export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -452,7 +453,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -461,7 +462,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
@@ -530,8 +531,8 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     const policyAction = status === 'resolved' ? 'resolve' as const
       : status === 'closed' ? 'close' as const
       : null;
-    if (policyAction && !hub.db.checkThreadPermission(thread, client.botId!, policyAction)) {
-      hub.db.recordAudit(thread.org_id, client.botId!, 'thread.permission_denied', 'thread', thread.id, {
+    if (policyAction && !await hub.db.checkThreadPermission(thread, client.botId!, policyAction)) {
+      await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.permission_denied', 'thread', thread.id, {
         action: policyAction,
         status,
         via: 'ws',
@@ -550,7 +551,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
   try {
     if (status !== undefined) {
       const previousStatus = thread.status;
-      const result = hub.db.updateThreadStatus(thread.id, status, closeReason, revCheck);
+      const result = await hub.db.updateThreadStatus(thread.id, status, closeReason, revCheck);
       revCheck = undefined; // consumed
       if (!result) {
         hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
@@ -561,16 +562,16 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
       if (status === 'closed') changes.push('close_reason');
       if (status === 'resolved') changes.push('resolved_at');
 
-      hub.db.recordAudit(thread.org_id, client.botId!, 'thread.status_changed', 'thread', thread.id, {
+      await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.status_changed', 'thread', thread.id, {
         from: previousStatus,
         to: status,
         close_reason: closeReason ?? null,
         via: 'ws',
       });
 
-      const participants = hub.db.getParticipants(thread.id);
+      const participants = await hub.db.getParticipants(thread.id);
       for (const p of participants) {
-        hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_status_changed', {
+        await hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_status_changed', {
           thread_id: thread.id,
           topic: thread.topic,
           from: previousStatus,
@@ -581,7 +582,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     }
 
     if (context !== undefined) {
-      const result = hub.db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
+      const result = await hub.db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
       revCheck = undefined; // consumed
       if (!result) {
         hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
@@ -592,7 +593,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     }
 
     if (topic !== undefined) {
-      const result = hub.db.updateThreadTopic(thread.id, topic.trim(), revCheck);
+      const result = await hub.db.updateThreadTopic(thread.id, topic.trim(), revCheck);
       revCheck = undefined; // consumed
       if (!result) {
         hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
@@ -610,7 +611,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
     return;
   }
 
-  hub.broadcastThreadEvent(thread.org_id, thread.id, {
+  await hub.broadcastThreadEvent(thread.org_id, thread.id, {
     type: 'thread_updated',
     thread: updated,
     changes,
@@ -621,7 +622,7 @@ export function handleThreadUpdate(hub: WsHub, client: WsClient, data: any): voi
 
 // ─── type: 'thread_invite' ──────────────────────────────────
 
-export function handleThreadInvite(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadInvite(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -644,7 +645,7 @@ export function handleThreadInvite(hub: WsHub, client: WsClient, data: any): voi
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -657,46 +658,46 @@ export function handleThreadInvite(hub: WsHub, client: WsClient, data: any): voi
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
 
   // Permission policy check for invite
-  if (!hub.db.checkThreadPermission(thread, client.botId!, 'invite')) {
+  if (!await hub.db.checkThreadPermission(thread, client.botId!, 'invite')) {
     hub.sendError(client, 'Permission denied: your label does not allow inviting participants', { ref, code: 'FORBIDDEN' });
     return;
   }
 
-  const bot = wsResolveBot(hub.db, thread.org_id, bot_id);
+  const bot = await wsResolveBot(hub.db, thread.org_id, bot_id);
   if (!bot) {
     hub.sendError(client, `Bot not found: ${bot_id}`, { ref, code: 'NOT_FOUND' });
     return;
   }
 
-  const alreadyParticipant = hub.db.isParticipant(thread.id, bot.id);
+  const alreadyParticipant = await hub.db.isParticipant(thread.id, bot.id);
   if (alreadyParticipant && label !== undefined) {
     hub.sendError(client, 'Participant already exists; cannot change label via invite', { ref });
     return;
   }
 
   try {
-    const participant = hub.db.addParticipant(thread.id, bot.id, label);
+    const participant = await hub.db.addParticipant(thread.id, bot.id, label);
 
     if (!alreadyParticipant) {
-      hub.db.recordAudit(thread.org_id, client.botId!, 'thread.invite', 'thread', thread.id, {
+      await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.invite', 'thread', thread.id, {
         invited_bot_id: bot.id,
         invited_bot_name: bot.name,
         via: 'ws',
       });
 
-      hub.db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
+      await hub.db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
         thread_id: thread.id,
         topic: thread.topic,
         inviter: client.botId!,
       });
 
-      hub.broadcastThreadEvent(thread.org_id, thread.id, {
+      await hub.broadcastThreadEvent(thread.org_id, thread.id, {
         type: 'thread_participant',
         thread_id: thread.id,
         bot_id: bot.id,
@@ -715,7 +716,7 @@ export function handleThreadInvite(hub: WsHub, client: WsClient, data: any): voi
 
 // ─── type: 'thread_join' ────────────────────────────────────
 
-export function handleThreadJoin(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadJoin(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -730,7 +731,7 @@ export function handleThreadJoin(hub: WsHub, client: WsClient, data: any): void 
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -745,16 +746,16 @@ export function handleThreadJoin(hub: WsHub, client: WsClient, data: any): void 
   }
 
   // Already a participant — idempotent success
-  if (hub.db.isParticipant(thread.id, client.botId!)) {
+  if (await hub.db.isParticipant(thread.id, client.botId!)) {
     if (ref) hub.sendAck(client, ref, { operation: 'thread_join', resource_id: thread.id, thread_id: thread.id, status: 'already_joined', timestamp: Date.now() });
     return;
   }
 
   try {
-    const participant = hub.db.addParticipant(thread.id, client.botId!);
+    const participant = await hub.db.addParticipant(thread.id, client.botId!);
 
-    const bot = hub.db.getBotById(client.botId!);
-    hub.broadcastThreadEvent(thread.org_id, thread.id, {
+    const bot = await hub.db.getBotById(client.botId!);
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_participant',
       thread_id: thread.id,
       bot_id: client.botId!,
@@ -763,7 +764,7 @@ export function handleThreadJoin(hub: WsHub, client: WsClient, data: any): void 
       by: client.botId!,
     });
 
-    hub.db.recordAudit(thread.org_id, client.botId!, 'thread.join', 'thread', thread.id, { via: 'ws' });
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.join', 'thread', thread.id, { via: 'ws' });
 
     if (ref) hub.sendAck(client, ref, { operation: 'thread_join', resource_id: thread.id, thread_id: thread.id, status: 'joined', joined_at: participant.joined_at, timestamp: participant.joined_at });
   } catch (error: any) {
@@ -773,7 +774,7 @@ export function handleThreadJoin(hub: WsHub, client: WsClient, data: any): void 
 
 // ─── type: 'thread_leave' ───────────────────────────────────
 
-export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadLeave(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -788,7 +789,7 @@ export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -801,13 +802,13 @@ export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
 
   // Cannot leave if you're the last participant
-  const participants = hub.db.getParticipants(thread.id);
+  const participants = await hub.db.getParticipants(thread.id);
   if (participants.length <= 1) {
     hub.sendError(client, 'Cannot leave: you are the last participant', { ref });
     return;
@@ -815,8 +816,8 @@ export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void
 
   try {
     // Broadcast BEFORE removing so the leaving bot is still in the recipient list
-    const bot = hub.db.getBotById(client.botId!);
-    hub.broadcastThreadEvent(thread.org_id, thread.id, {
+    const bot = await hub.db.getBotById(client.botId!);
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_participant',
       thread_id: thread.id,
       bot_id: client.botId!,
@@ -826,15 +827,15 @@ export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void
     });
 
     // Record catchup so the bot sees it even if offline
-    hub.db.recordCatchupEvent(thread.org_id, client.botId!, 'thread_participant_removed', {
+    await hub.db.recordCatchupEvent(thread.org_id, client.botId!, 'thread_participant_removed', {
       thread_id: thread.id,
       topic: thread.topic,
       removed_by: client.botId!,
     });
 
-    hub.db.removeParticipant(thread.id, client.botId!);
+    await hub.db.removeParticipant(thread.id, client.botId!);
 
-    hub.db.recordAudit(thread.org_id, client.botId!, 'thread.leave', 'thread', thread.id, { via: 'ws' });
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.leave', 'thread', thread.id, { via: 'ws' });
 
     if (ref) hub.sendAck(client, ref, { operation: 'thread_leave', resource_id: thread.id, thread_id: thread.id, timestamp: Date.now() });
   } catch (error: any) {
@@ -844,7 +845,7 @@ export function handleThreadLeave(hub: WsHub, client: WsClient, data: any): void
 
 // ─── type: 'thread_remove_participant' ──────────────────────
 
-export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data: any): void {
+export async function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -863,7 +864,7 @@ export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -876,32 +877,32 @@ export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
 
-  const target = wsResolveBot(hub.db, thread.org_id, bot_id);
+  const target = await wsResolveBot(hub.db, thread.org_id, bot_id);
   if (!target) {
     hub.sendError(client, `Bot not found: ${bot_id}`, { ref, code: 'NOT_FOUND' });
     return;
   }
 
-  if (!hub.db.isParticipant(thread.id, target.id)) {
+  if (!await hub.db.isParticipant(thread.id, target.id)) {
     hub.sendError(client, 'Target bot is not a participant', { ref, code: 'NOT_FOUND' });
     return;
   }
 
   // Self-removal is always allowed; removing others requires 'remove' permission
   if (target.id !== client.botId) {
-    if (!hub.db.checkThreadPermission(thread, client.botId!, 'remove')) {
+    if (!await hub.db.checkThreadPermission(thread, client.botId!, 'remove')) {
       hub.sendError(client, 'Permission denied: your label does not allow removing participants', { ref, code: 'FORBIDDEN' });
       return;
     }
   }
 
   // Cannot remove the last participant
-  const participants = hub.db.getParticipants(thread.id);
+  const participants = await hub.db.getParticipants(thread.id);
   if (participants.length <= 1) {
     hub.sendError(client, 'Cannot remove the last participant', { ref });
     return;
@@ -909,7 +910,7 @@ export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data
 
   try {
     // Broadcast BEFORE removing so the target bot is still in the recipient list
-    hub.broadcastThreadEvent(thread.org_id, thread.id, {
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_participant',
       thread_id: thread.id,
       bot_id: target.id,
@@ -919,15 +920,15 @@ export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data
     });
 
     // Record catchup so the removed bot sees it even if offline
-    hub.db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
+    await hub.db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
       thread_id: thread.id,
       topic: thread.topic,
       removed_by: client.botId!,
     });
 
-    hub.db.removeParticipant(thread.id, target.id);
+    await hub.db.removeParticipant(thread.id, target.id);
 
-    hub.db.recordAudit(thread.org_id, client.botId!, 'thread.remove_participant', 'thread', thread.id, {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.remove_participant', 'thread', thread.id, {
       removed_bot_id: target.id,
       removed_bot_name: target.name,
       via: 'ws',
@@ -941,7 +942,7 @@ export function handleThreadRemoveParticipant(hub: WsHub, client: WsClient, data
 
 // ─── type: 'artifact_add' ───────────────────────────────────
 
-export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void {
+export async function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -967,7 +968,7 @@ export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -980,20 +981,20 @@ export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
 
   // Check uniqueness
-  const existing = hub.db.getArtifact(thread.id, artifact_key);
+  const existing = await hub.db.getArtifact(thread.id, artifact_key);
   if (existing) {
     hub.sendError(client, `Artifact key already exists: ${artifact_key}`, { ref, code: 'CONFLICT' });
     return;
   }
 
   try {
-    const artifact = hub.db.addArtifact(
+    const artifact = await hub.db.addArtifact(
       thread.id,
       client.botId!,
       artifact_key,
@@ -1005,7 +1006,7 @@ export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void
       mime_type ?? null,
     );
 
-    hub.broadcastThreadEvent(thread.org_id, thread.id, {
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_artifact',
       thread_id: thread.id,
       artifact,
@@ -1013,17 +1014,17 @@ export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void
     });
 
     // Record catchup events for all participants except the contributor
-    const participants = hub.db.getParticipants(thread.id);
+    const participants = await hub.db.getParticipants(thread.id);
     for (const p of participants) {
       if (p.bot_id === client.botId!) continue;
-      hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+      await hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
         thread_id: thread.id,
         artifact_key: artifact.artifact_key,
         version: artifact.version,
       }, thread.id);
     }
 
-    hub.db.recordAudit(thread.org_id, client.botId!, 'artifact.add', 'artifact', artifact.id, {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'artifact.add', 'artifact', artifact.id, {
       thread_id: thread.id,
       artifact_key,
       via: 'ws',
@@ -1037,7 +1038,7 @@ export function handleArtifactAdd(hub: WsHub, client: WsClient, data: any): void
 
 // ─── type: 'artifact_update' ────────────────────────────────
 
-export function handleArtifactUpdate(hub: WsHub, client: WsClient, data: any): void {
+export async function handleArtifactUpdate(hub: WsHub, client: WsClient, data: any): Promise<void> {
   const ref = data.ref;
 
   if (!hub.clientHasScope(client, 'thread')) {
@@ -1062,7 +1063,7 @@ export function handleArtifactUpdate(hub: WsHub, client: WsClient, data: any): v
     return;
   }
 
-  const thread = hub.db.getThread(thread_id);
+  const thread = await hub.db.getThread(thread_id);
   if (!thread) {
     hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
@@ -1075,19 +1076,19 @@ export function handleArtifactUpdate(hub: WsHub, client: WsClient, data: any): v
     hub.sendError(client, `Thread is ${thread.status}; operation not allowed`, { ref, code: 'THREAD_CLOSED' });
     return;
   }
-  if (!hub.db.isParticipant(thread.id, client.botId!)) {
+  if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
     return;
   }
 
   try {
-    const artifact = hub.db.updateArtifact(thread.id, artifact_key, client.botId!, content, title ?? undefined);
+    const artifact = await hub.db.updateArtifact(thread.id, artifact_key, client.botId!, content, title ?? undefined);
     if (!artifact) {
       hub.sendError(client, `Artifact not found: ${artifact_key}`, { ref, code: 'NOT_FOUND' });
       return;
     }
 
-    hub.broadcastThreadEvent(thread.org_id, thread.id, {
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_artifact',
       thread_id: thread.id,
       artifact,
@@ -1095,17 +1096,17 @@ export function handleArtifactUpdate(hub: WsHub, client: WsClient, data: any): v
     });
 
     // Record catchup events for all participants except the contributor
-    const participants = hub.db.getParticipants(thread.id);
+    const participants = await hub.db.getParticipants(thread.id);
     for (const p of participants) {
       if (p.bot_id === client.botId!) continue;
-      hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+      await hub.db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
         thread_id: thread.id,
         artifact_key: artifact.artifact_key,
         version: artifact.version,
       }, thread.id);
     }
 
-    hub.db.recordAudit(thread.org_id, client.botId!, 'artifact.update', 'artifact', artifact.id, {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'artifact.update', 'artifact', artifact.id, {
       thread_id: thread.id,
       artifact_key,
       version: artifact.version,

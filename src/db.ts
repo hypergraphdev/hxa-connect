@@ -1,14 +1,11 @@
-import Database from 'better-sqlite3';
+import type { DatabaseDriver } from './db/driver.js';
 import crypto from 'node:crypto';
-import path from 'node:path';
-import fs from 'node:fs';
 import type {
   Org,
   Bot,
   Channel,
   ChannelMember,
   Message,
-  HubConfig,
   BotProfileInput,
   ListBotsFilters,
   Thread,
@@ -34,20 +31,10 @@ import type {
 // ─── Database Layer ──────────────────────────────────────────
 
 export class HubDB {
-  private db: Database.Database;
+  constructor(private driver: DatabaseDriver) {}
 
-  constructor(config: HubConfig) {
-    fs.mkdirSync(config.data_dir, { recursive: true });
-    const dbPath = path.join(config.data_dir, 'hxa-connect.db');
-
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.migrate();
-  }
-
-  private migrate() {
-    this.db.exec(`
+  async init(): Promise<void> {
+    await this.driver.exec(`
       CREATE TABLE IF NOT EXISTS orgs (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -285,15 +272,15 @@ export class HubDB {
     `);
 
     // ── Schema version tracking (for future migrations) ─────
-    this.db.exec(`
+    await this.driver.exec(`
       CREATE TABLE IF NOT EXISTS schema_versions (
         name TEXT PRIMARY KEY,
         applied_at INTEGER NOT NULL
       );
     `);
 
-    this.runMigration('thread_messages_mentions', () => {
-      this.db.exec(`
+    await this.runMigration('thread_messages_mentions', async () => {
+      await this.driver.exec(`
         ALTER TABLE thread_messages ADD COLUMN mentions TEXT DEFAULT NULL;
         ALTER TABLE thread_messages ADD COLUMN mention_all INTEGER DEFAULT 0;
       `);
@@ -304,17 +291,19 @@ export class HubDB {
    * Run a named migration only if it hasn't been applied yet.
    * Records the migration in schema_versions upon success.
    */
-  private runMigration(name: string, fn: () => void): void {
-    const applied = this.db.prepare(
-      'SELECT 1 FROM schema_versions WHERE name = ?'
-    ).get(name);
+  private async runMigration(name: string, fn: () => Promise<void>): Promise<void> {
+    const applied = await this.driver.get(
+      'SELECT 1 FROM schema_versions WHERE name = ?',
+      [name],
+    );
     if (applied) return;
 
-    fn();
+    await fn();
 
-    this.db.prepare(
-      'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)'
-    ).run(name, Date.now());
+    await this.driver.run(
+      'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)',
+      [name, Date.now()],
+    );
   }
 
   private rowToOrg(row: any): Org {
@@ -463,7 +452,8 @@ export class HubDB {
 
   // ─── Org Operations ──────────────────────────────────────
 
-  createOrg(name: string, persistMessages = true): Org {
+  async createOrg(name: string, persistMessages = true, driver?: DatabaseDriver): Promise<Org> {
+    const d = driver ?? this.driver;
     const plaintextOrgSecret = crypto.randomBytes(24).toString('hex');
     const org: Org = {
       id: crypto.randomUUID(),
@@ -474,15 +464,16 @@ export class HubDB {
       created_at: Date.now(),
     };
     const orgSecretHash = HubDB.hashToken(plaintextOrgSecret);
-    this.db.prepare(
-      'INSERT INTO orgs (id, name, org_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(org.id, org.name, orgSecretHash, org.persist_messages ? 1 : 0, org.created_at);
+    await d.run(
+      'INSERT INTO orgs (id, name, org_secret, persist_messages, created_at) VALUES (?, ?, ?, ?, ?)',
+      [org.id, org.name, orgSecretHash, org.persist_messages ? 1 : 0, org.created_at],
+    );
     // Return org with plaintext secret so the caller can display it once
     return org;
   }
 
-  verifyOrgSecret(orgId: string, secret: string): boolean {
-    const row = this.db.prepare('SELECT org_secret FROM orgs WHERE id = ?').get(orgId) as any;
+  async verifyOrgSecret(orgId: string, secret: string): Promise<boolean> {
+    const row = await this.driver.get<any>('SELECT org_secret FROM orgs WHERE id = ?', [orgId]);
     if (!row?.org_secret) return false;
     const secretHash = HubDB.hashToken(secret);
     const expected = Buffer.from(row.org_secret, 'utf8');
@@ -494,40 +485,41 @@ export class HubDB {
   /**
    * Set the auth_role for a bot ('admin' or 'member').
    */
-  setBotAuthRole(botId: string, role: 'admin' | 'member'): void {
-    this.db.prepare('UPDATE bots SET auth_role = ? WHERE id = ?').run(role, botId);
+  async setBotAuthRole(botId: string, role: 'admin' | 'member'): Promise<void> {
+    await this.driver.run('UPDATE bots SET auth_role = ? WHERE id = ?', [role, botId]);
   }
 
   /**
    * Rotate the org secret to a new hash.
    */
-  rotateOrgSecret(orgId: string, newSecretHash: string): void {
-    this.db.prepare('UPDATE orgs SET org_secret = ? WHERE id = ?').run(newSecretHash, orgId);
+  async rotateOrgSecret(orgId: string, newSecretHash: string): Promise<void> {
+    await this.driver.run('UPDATE orgs SET org_secret = ? WHERE id = ?', [newSecretHash, orgId]);
   }
 
-  getOrgById(id: string): Org | undefined {
-    const row = this.db.prepare('SELECT * FROM orgs WHERE id = ?').get(id) as any;
+  async getOrgById(id: string): Promise<Org | undefined> {
+    const row = await this.driver.get<any>('SELECT * FROM orgs WHERE id = ?', [id]);
     if (!row) return undefined;
     return this.rowToOrg(row);
   }
 
-  listOrgs(): Org[] {
-    return (this.db.prepare('SELECT * FROM orgs ORDER BY created_at').all() as any[]).map(r => this.rowToOrg(r));
+  async listOrgs(): Promise<Org[]> {
+    const rows = await this.driver.all<any>('SELECT * FROM orgs ORDER BY created_at');
+    return rows.map(r => this.rowToOrg(r));
   }
 
-  updateOrgStatus(orgId: string, status: 'active' | 'suspended'): void {
-    this.db.prepare('UPDATE orgs SET status = ? WHERE id = ?').run(status, orgId);
+  async updateOrgStatus(orgId: string, status: 'active' | 'suspended'): Promise<void> {
+    await this.driver.run('UPDATE orgs SET status = ? WHERE id = ?', [status, orgId]);
   }
 
-  updateOrgName(orgId: string, name: string): void {
-    this.db.prepare('UPDATE orgs SET name = ? WHERE id = ?').run(name, orgId);
+  async updateOrgName(orgId: string, name: string): Promise<void> {
+    await this.driver.run('UPDATE orgs SET name = ? WHERE id = ?', [name, orgId]);
   }
 
-  destroyOrg(orgId: string): void {
+  async destroyOrg(orgId: string): Promise<void> {
     // Set status first (for any in-flight requests to see)
-    this.db.prepare("UPDATE orgs SET status = 'destroyed' WHERE id = ?").run(orgId);
+    await this.driver.run("UPDATE orgs SET status = 'destroyed' WHERE id = ?", [orgId]);
     // CASCADE delete handles all related data (bots, channels, threads, etc.)
-    this.db.prepare('DELETE FROM orgs WHERE id = ?').run(orgId);
+    await this.driver.run('DELETE FROM orgs WHERE id = ?', [orgId]);
   }
 
   // ─── Org Ticket Operations ─────────────────────────────
@@ -541,11 +533,11 @@ export class HubDB {
     };
   }
 
-  createOrgTicket(orgId: string, secretHash: string, options: {
+  async createOrgTicket(orgId: string, secretHash: string, options: {
     reusable?: boolean;
     expiresAt: number;
     createdBy?: string;
-  }): OrgTicket {
+  }): Promise<OrgTicket> {
     const ticket: OrgTicket = {
       id: crypto.randomUUID(),
       org_id: orgId,
@@ -556,41 +548,46 @@ export class HubDB {
       created_by: options.createdBy ?? null,
       created_at: Date.now(),
     };
-    this.db.prepare(
-      'INSERT INTO org_tickets (id, org_id, secret_hash, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(ticket.id, ticket.org_id, ticket.secret_hash, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at);
+    await this.driver.run(
+      'INSERT INTO org_tickets (id, org_id, secret_hash, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [ticket.id, ticket.org_id, ticket.secret_hash, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at],
+    );
     return ticket;
   }
 
-  redeemOrgTicket(ticketId: string): OrgTicket | undefined {
-    const row = this.db.prepare(
-      'SELECT * FROM org_tickets WHERE id = ? AND consumed = 0 AND expires_at > ?'
-    ).get(ticketId, Date.now()) as any;
+  async redeemOrgTicket(ticketId: string): Promise<OrgTicket | undefined> {
+    const row = await this.driver.get<any>(
+      'SELECT * FROM org_tickets WHERE id = ? AND consumed = 0 AND expires_at > ?',
+      [ticketId, Date.now()],
+    );
     if (!row) return undefined;
-    const result = this.db.prepare(
-      'UPDATE org_tickets SET consumed = 1 WHERE id = ? AND consumed = 0'
-    ).run(ticketId);
+    const result = await this.driver.run(
+      'UPDATE org_tickets SET consumed = 1 WHERE id = ? AND consumed = 0',
+      [ticketId],
+    );
     if (result.changes === 0) return undefined; // race condition: another consumer got it
     return this.rowToOrgTicket({ ...row, consumed: 1 });
   }
 
-  getOrgTicket(ticketId: string): OrgTicket | undefined {
-    const row = this.db.prepare('SELECT * FROM org_tickets WHERE id = ?').get(ticketId) as any;
+  async getOrgTicket(ticketId: string): Promise<OrgTicket | undefined> {
+    const row = await this.driver.get<any>('SELECT * FROM org_tickets WHERE id = ?', [ticketId]);
     if (!row) return undefined;
     return this.rowToOrgTicket(row);
   }
 
-  invalidateOrgTickets(orgId: string): number {
-    const result = this.db.prepare(
-      'DELETE FROM org_tickets WHERE org_id = ? AND consumed = 0'
-    ).run(orgId);
+  async invalidateOrgTickets(orgId: string): Promise<number> {
+    const result = await this.driver.run(
+      'DELETE FROM org_tickets WHERE org_id = ? AND consumed = 0',
+      [orgId],
+    );
     return result.changes;
   }
 
-  cleanupExpiredOrgTickets(): number {
-    const result = this.db.prepare(
-      'DELETE FROM org_tickets WHERE expires_at <= ?'
-    ).run(Date.now());
+  async cleanupExpiredOrgTickets(): Promise<number> {
+    const result = await this.driver.run(
+      'DELETE FROM org_tickets WHERE expires_at <= ?',
+      [Date.now()],
+    );
     return result.changes;
   }
 
@@ -608,11 +605,11 @@ export class HubDB {
     };
   }
 
-  createInviteCode(codeHash: string, options: {
+  async createInviteCode(codeHash: string, options: {
     label?: string;
     maxUses?: number;
     expiresAt: number;
-  }): PlatformInviteCode {
+  }): Promise<PlatformInviteCode> {
     const code: PlatformInviteCode = {
       id: crypto.randomUUID(),
       code_hash: codeHash,
@@ -622,32 +619,36 @@ export class HubDB {
       expires_at: options.expiresAt,
       created_at: Date.now(),
     };
-    this.db.prepare(
-      'INSERT INTO platform_invite_codes (id, code_hash, label, max_uses, use_count, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(code.id, code.code_hash, code.label, code.max_uses, code.use_count, code.expires_at, code.created_at);
+    await this.driver.run(
+      'INSERT INTO platform_invite_codes (id, code_hash, label, max_uses, use_count, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [code.id, code.code_hash, code.label, code.max_uses, code.use_count, code.expires_at, code.created_at],
+    );
     return code;
   }
 
-  listInviteCodes(): PlatformInviteCode[] {
-    return (this.db.prepare('SELECT * FROM platform_invite_codes ORDER BY created_at DESC').all() as any[])
-      .map(r => this.rowToInviteCode(r));
+  async listInviteCodes(): Promise<PlatformInviteCode[]> {
+    const rows = await this.driver.all<any>('SELECT * FROM platform_invite_codes ORDER BY created_at DESC');
+    return rows.map(r => this.rowToInviteCode(r));
   }
 
   /**
    * Try to consume one use of an invite code. Returns the code if successful, undefined if
    * the code is expired, exhausted, or not found.
    */
-  useInviteCode(codeHash: string): PlatformInviteCode | undefined {
-    const row = this.db.prepare(
-      'SELECT * FROM platform_invite_codes WHERE code_hash = ? AND (expires_at = 0 OR expires_at > ?)'
-    ).get(codeHash, Date.now()) as any;
+  async useInviteCode(codeHash: string, driver?: DatabaseDriver): Promise<PlatformInviteCode | undefined> {
+    const d = driver ?? this.driver;
+    const row = await d.get<any>(
+      'SELECT * FROM platform_invite_codes WHERE code_hash = ? AND (expires_at = 0 OR expires_at > ?)',
+      [codeHash, Date.now()],
+    );
     if (!row) return undefined;
     const code = this.rowToInviteCode(row);
     // Check max_uses (0 = unlimited)
     if (code.max_uses > 0 && code.use_count >= code.max_uses) return undefined;
-    const result = this.db.prepare(
-      'UPDATE platform_invite_codes SET use_count = use_count + 1 WHERE id = ? AND (max_uses = 0 OR use_count < max_uses)'
-    ).run(code.id);
+    const result = await d.run(
+      'UPDATE platform_invite_codes SET use_count = use_count + 1 WHERE id = ? AND (max_uses = 0 OR use_count < max_uses)',
+      [code.id],
+    );
     if (result.changes === 0) return undefined; // race condition
     return { ...code, use_count: code.use_count + 1 };
   }
@@ -657,20 +658,19 @@ export class HubDB {
    * If org creation fails, the invite code use_count is rolled back.
    * Returns { code, org } on success, or { error } on failure.
    */
-  createOrgWithInviteCode(codeHash: string, orgName: string, persistMessages: boolean): { code: PlatformInviteCode; org: Org } | { error: string } {
-    const txn = this.db.transaction(() => {
-      const code = this.useInviteCode(codeHash);
+  async createOrgWithInviteCode(codeHash: string, orgName: string, persistMessages: boolean): Promise<{ code: PlatformInviteCode; org: Org } | { error: string }> {
+    return await this.driver.transaction(async (txn) => {
+      const code = await this.useInviteCode(codeHash, txn);
       if (!code) {
         return { error: 'Invalid, expired, or exhausted invite code' };
       }
-      const org = this.createOrg(orgName, persistMessages);
+      const org = await this.createOrg(orgName, persistMessages, txn);
       return { code, org };
     });
-    return txn();
   }
 
-  deleteInviteCode(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM platform_invite_codes WHERE id = ?').run(id);
+  async deleteInviteCode(id: string): Promise<boolean> {
+    const result = await this.driver.run('DELETE FROM platform_invite_codes WHERE id = ?', [id]);
     return result.changes > 0;
   }
 
@@ -686,18 +686,19 @@ export class HubDB {
 
   // ─── Bot Operations ────────────────────────────────────
 
-  registerBot(
+  async registerBot(
     orgId: string,
     name: string,
     metadata?: Record<string, unknown> | null,
     webhookUrl?: string | null,
     webhookSecret?: string | null,
     profile?: BotProfileInput,
-  ): { bot: Bot; created: boolean; plaintextToken: string | null } {
+  ): Promise<{ bot: Bot; created: boolean; plaintextToken: string | null }> {
     // Check if bot already exists → return existing token
-    const existing = this.db.prepare(
-      'SELECT * FROM bots WHERE org_id = ? AND name = ?'
-    ).get(orgId, name) as any;
+    const existing = await this.driver.get<any>(
+      'SELECT * FROM bots WHERE org_id = ? AND name = ?',
+      [orgId, name],
+    );
 
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
@@ -770,11 +771,12 @@ export class HubDB {
 
       params.push(existing.id);
 
-      this.db.prepare(
-        `UPDATE bots SET ${updates.join(', ')} WHERE id = ?`
-      ).run(...params);
+      await this.driver.run(
+        `UPDATE bots SET ${updates.join(', ')} WHERE id = ?`,
+        params,
+      );
 
-      const updated = this.getBotById(existing.id);
+      const updated = await this.getBotById(existing.id);
       if (!updated) {
         throw new Error('Bot update failed');
       }
@@ -810,42 +812,43 @@ export class HubDB {
 
     const tokenHash = HubDB.hashToken(bot.token);
 
-    this.db.prepare(
+    await this.driver.run(
       `INSERT INTO bots (
         id, org_id, name, token, metadata, webhook_url, webhook_secret,
         bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
         auth_role, online, last_seen_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      bot.id,
-      bot.org_id,
-      bot.name,
-      tokenHash, // Store hash, not plaintext
-      bot.metadata,
-      bot.webhook_url,
-      bot.webhook_secret,
-      bot.bio,
-      bot.role,
-      bot.function,
-      bot.team,
-      bot.tags,
-      bot.languages,
-      bot.protocols,
-      bot.status_text,
-      bot.timezone,
-      bot.active_hours,
-      bot.version,
-      bot.runtime,
-      bot.auth_role,
-      bot.online ? 1 : 0,
-      bot.last_seen_at,
-      bot.created_at,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        bot.id,
+        bot.org_id,
+        bot.name,
+        tokenHash, // Store hash, not plaintext
+        bot.metadata,
+        bot.webhook_url,
+        bot.webhook_secret,
+        bot.bio,
+        bot.role,
+        bot.function,
+        bot.team,
+        bot.tags,
+        bot.languages,
+        bot.protocols,
+        bot.status_text,
+        bot.timezone,
+        bot.active_hours,
+        bot.version,
+        bot.runtime,
+        bot.auth_role,
+        bot.online ? 1 : 0,
+        bot.last_seen_at,
+        bot.created_at,
+      ],
     );
 
     return { bot, created: true, plaintextToken };
   }
 
-  updateProfile(botId: string, fields: BotProfileInput): Bot | undefined {
+  async updateProfile(botId: string, fields: BotProfileInput): Promise<Bot | undefined> {
     const serialized = this.serializeProfileFields(fields);
     const updates: string[] = [];
     const params: any[] = [];
@@ -905,40 +908,41 @@ export class HubDB {
 
     params.push(botId);
 
-    this.db.prepare(`UPDATE bots SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    await this.driver.run(`UPDATE bots SET ${updates.join(', ')} WHERE id = ?`, params);
     return this.getBotById(botId);
   }
 
-  renameBot(botId: string, newName: string): { bot: Bot; conflict: false } | { bot: undefined; conflict: true } {
+  async renameBot(botId: string, newName: string): Promise<{ bot: Bot; conflict: false } | { bot: undefined; conflict: true }> {
     try {
-      this.db.prepare('UPDATE bots SET name = ? WHERE id = ?').run(newName, botId);
+      await this.driver.run('UPDATE bots SET name = ? WHERE id = ?', [newName, botId]);
     } catch (err: any) {
       if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return { bot: undefined, conflict: true };
       }
       throw err;
     }
-    const bot = this.getBotById(botId);
+    const bot = await this.getBotById(botId);
     return { bot: bot!, conflict: false };
   }
 
-  getBotByToken(token: string): Bot | undefined {
+  async getBotByToken(token: string): Promise<Bot | undefined> {
     const tokenHash = HubDB.hashToken(token);
-    const row = this.db.prepare('SELECT * FROM bots WHERE token = ?').get(tokenHash) as any;
+    const row = await this.driver.get<any>('SELECT * FROM bots WHERE token = ?', [tokenHash]);
     if (!row) return undefined;
     return this.rowToBot(row);
   }
 
-  getBotById(id: string): Bot | undefined {
-    const row = this.db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as any;
+  async getBotById(id: string): Promise<Bot | undefined> {
+    const row = await this.driver.get<any>('SELECT * FROM bots WHERE id = ?', [id]);
     if (!row) return undefined;
     return this.rowToBot(row);
   }
 
-  getBotByName(orgId: string, name: string): Bot | undefined {
-    const row = this.db.prepare(
-      'SELECT * FROM bots WHERE org_id = ? AND name = ?'
-    ).get(orgId, name) as any;
+  async getBotByName(orgId: string, name: string): Promise<Bot | undefined> {
+    const row = await this.driver.get<any>(
+      'SELECT * FROM bots WHERE org_id = ? AND name = ?',
+      [orgId, name],
+    );
     if (!row) return undefined;
     return this.rowToBot(row);
   }
@@ -947,26 +951,30 @@ export class HubDB {
    * Paginated bot list. Cursor is a bot id; results ordered by id ASC.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listBotsPaginated(orgId: string, cursor: string | undefined, limit: number, search?: string): Bot[] {
+  async listBotsPaginated(orgId: string, cursor: string | undefined, limit: number, search?: string): Promise<Bot[]> {
     const searchFilter = search ? ' AND name LIKE ?' : '';
     const searchParam = search ? `%${search}%` : undefined;
     if (cursor) {
       const params: any[] = [orgId, cursor];
       if (searchParam) params.push(searchParam);
       params.push(limit + 1);
-      return (this.db.prepare(
-        `SELECT * FROM bots WHERE org_id = ? AND id > ?${searchFilter} ORDER BY id ASC LIMIT ?`
-      ).all(...params) as any[]).map(r => this.rowToBot(r));
+      const rows = await this.driver.all<any>(
+        `SELECT * FROM bots WHERE org_id = ? AND id > ?${searchFilter} ORDER BY id ASC LIMIT ?`,
+        params,
+      );
+      return rows.map(r => this.rowToBot(r));
     }
     const params: any[] = [orgId];
     if (searchParam) params.push(searchParam);
     params.push(limit + 1);
-    return (this.db.prepare(
-      `SELECT * FROM bots WHERE org_id = ?${searchFilter} ORDER BY id ASC LIMIT ?`
-    ).all(...params) as any[]).map(r => this.rowToBot(r));
+    const rows = await this.driver.all<any>(
+      `SELECT * FROM bots WHERE org_id = ?${searchFilter} ORDER BY id ASC LIMIT ?`,
+      params,
+    );
+    return rows.map(r => this.rowToBot(r));
   }
 
-  listBots(orgId: string, filters?: ListBotsFilters): Bot[] {
+  async listBots(orgId: string, filters?: ListBotsFilters): Promise<Bot[]> {
     const where: string[] = ['org_id = ?'];
     const params: any[] = [orgId];
 
@@ -997,9 +1005,11 @@ export class HubDB {
       params.push(q, q, q);
     }
 
-    let bots = (this.db.prepare(
-      `SELECT * FROM bots WHERE ${where.join(' AND ')} ORDER BY name`
-    ).all(...params) as any[]).map(r => this.rowToBot(r));
+    const rows = await this.driver.all<any>(
+      `SELECT * FROM bots WHERE ${where.join(' AND ')} ORDER BY name`,
+      params,
+    );
+    let bots = rows.map(r => this.rowToBot(r));
 
     if (filters?.tag) {
       const wantedTag = filters.tag.toLowerCase();
@@ -1017,42 +1027,44 @@ export class HubDB {
     return bots;
   }
 
-  setBotOnline(botId: string, online: boolean) {
-    this.db.prepare(
-      'UPDATE bots SET online = ?, last_seen_at = ? WHERE id = ?'
-    ).run(online ? 1 : 0, Date.now(), botId);
+  async setBotOnline(botId: string, online: boolean): Promise<void> {
+    await this.driver.run(
+      'UPDATE bots SET online = ?, last_seen_at = ? WHERE id = ?',
+      [online ? 1 : 0, Date.now(), botId],
+    );
   }
 
   /** W3: Update last_seen without changing online status (for HTTP requests) */
-  touchBotLastSeen(botId: string) {
-    this.db.prepare(
-      'UPDATE bots SET last_seen_at = ? WHERE id = ?'
-    ).run(Date.now(), botId);
+  async touchBotLastSeen(botId: string): Promise<void> {
+    await this.driver.run(
+      'UPDATE bots SET last_seen_at = ? WHERE id = ?',
+      [Date.now(), botId],
+    );
   }
 
-  deleteBot(botId: string) {
+  async deleteBot(botId: string): Promise<void> {
     // Auto-close threads where this bot is the sole remaining participant
     // (ON DELETE CASCADE would orphan them, making them inaccessible via API)
-    const soloThreads = this.db.prepare(`
+    const soloThreads = await this.driver.all<{ thread_id: string }>(`
       SELECT tp.thread_id FROM thread_participants tp
       WHERE tp.bot_id = ?
         AND (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = tp.thread_id) = 1
-    `).all(botId) as { thread_id: string }[];
+    `, [botId]);
     const now = Date.now();
     for (const { thread_id } of soloThreads) {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE threads SET status = 'closed', close_reason = 'error', updated_at = ?, last_activity_at = ?, revision = revision + 1
         WHERE id = ? AND status NOT IN ('resolved', 'closed')
-      `).run(now, now, thread_id);
+      `, [now, now, thread_id]);
     }
 
-    this.db.prepare('DELETE FROM channel_members WHERE bot_id = ?').run(botId);
-    this.db.prepare('DELETE FROM bots WHERE id = ?').run(botId);
+    await this.driver.run('DELETE FROM channel_members WHERE bot_id = ?', [botId]);
+    await this.driver.run('DELETE FROM bots WHERE id = ?', [botId]);
   }
 
   // ─── Bot Token Operations (Scoped Tokens) ─────────────
 
-  createBotToken(botId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): BotToken {
+  async createBotToken(botId: string, scopes: TokenScope[], label?: string | null, expiresAt?: number | null): Promise<BotToken> {
     const plaintextToken = `scoped_${crypto.randomBytes(24).toString('hex')}`;
     const token: BotToken = {
       id: crypto.randomUUID(),
@@ -1067,10 +1079,10 @@ export class HubDB {
 
     const tokenHash = HubDB.hashToken(plaintextToken);
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO bot_tokens (id, bot_id, token, scopes, label, expires_at, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       token.id,
       token.bot_id,
       tokenHash, // Store hash, not plaintext
@@ -1079,43 +1091,47 @@ export class HubDB {
       token.expires_at,
       token.created_at,
       token.last_used_at,
-    );
+    ]);
 
     // Return with plaintext token so caller can return it once
     return token;
   }
 
-  getBotTokenByToken(token: string): BotToken | undefined {
+  async getBotTokenByToken(token: string): Promise<BotToken | undefined> {
     const tokenHash = HubDB.hashToken(token);
-    const row = this.db.prepare('SELECT * FROM bot_tokens WHERE token = ?').get(tokenHash) as any;
+    const row = await this.driver.get<any>('SELECT * FROM bot_tokens WHERE token = ?', [tokenHash]);
     if (!row) return undefined;
     return this.rowToBotToken(row);
   }
 
-  listBotTokens(botId: string): BotToken[] {
-    const rows = this.db.prepare(
-      'SELECT * FROM bot_tokens WHERE bot_id = ? ORDER BY created_at DESC'
-    ).all(botId) as any[];
+  async listBotTokens(botId: string): Promise<BotToken[]> {
+    const rows = await this.driver.all<any>(
+      'SELECT * FROM bot_tokens WHERE bot_id = ? ORDER BY created_at DESC',
+      [botId],
+    );
     return rows.map(row => this.rowToBotToken(row));
   }
 
-  revokeBotToken(tokenId: string, botId: string): boolean {
-    const result = this.db.prepare(
-      'DELETE FROM bot_tokens WHERE id = ? AND bot_id = ?'
-    ).run(tokenId, botId);
+  async revokeBotToken(tokenId: string, botId: string): Promise<boolean> {
+    const result = await this.driver.run(
+      'DELETE FROM bot_tokens WHERE id = ? AND bot_id = ?',
+      [tokenId, botId],
+    );
     return result.changes > 0;
   }
 
-  touchBotToken(tokenId: string): void {
-    this.db.prepare(
-      'UPDATE bot_tokens SET last_used_at = ? WHERE id = ?'
-    ).run(Date.now(), tokenId);
+  async touchBotToken(tokenId: string): Promise<void> {
+    await this.driver.run(
+      'UPDATE bot_tokens SET last_used_at = ? WHERE id = ?',
+      [Date.now(), tokenId],
+    );
   }
 
-  cleanupExpiredTokens(batchSize = 1000): number {
-    const result = this.db.prepare(
-      'DELETE FROM bot_tokens WHERE rowid IN (SELECT rowid FROM bot_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)'
-    ).run(Date.now(), batchSize);
+  async cleanupExpiredTokens(batchSize = 1000): Promise<number> {
+    const result = await this.driver.run(
+      'DELETE FROM bot_tokens WHERE rowid IN (SELECT rowid FROM bot_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)',
+      [Date.now(), batchSize],
+    );
     return result.changes;
   }
 
@@ -1140,20 +1156,20 @@ export class HubDB {
 
   // ─── Thread Permission Policy Operations ───────────────────
 
-  updateThreadPermissionPolicy(threadId: string, policy: string | null, expectedRevision?: number): Thread | undefined {
+  async updateThreadPermissionPolicy(threadId: string, policy: string | null, expectedRevision?: number): Promise<Thread | undefined> {
     if (expectedRevision !== undefined) {
-      const result = this.db.prepare(`
+      const result = await this.driver.run(`
         UPDATE threads
         SET permission_policy = ?, updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
-      `).run(policy, Date.now(), threadId, expectedRevision);
+      `, [policy, Date.now(), threadId, expectedRevision]);
       if (result.changes === 0) throw new Error('REVISION_CONFLICT');
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE threads
         SET permission_policy = ?, updated_at = ?, revision = revision + 1
         WHERE id = ?
-      `).run(policy, Date.now(), threadId);
+      `, [policy, Date.now(), threadId]);
     }
     return this.getThread(threadId);
   }
@@ -1162,7 +1178,7 @@ export class HubDB {
    * Check if a bot is allowed to perform an action on a thread based on permission policy.
    * Returns true if allowed, false if denied.
    */
-  checkThreadPermission(thread: Thread, botId: string, action: keyof ThreadPermissionPolicy): boolean {
+  async checkThreadPermission(thread: Thread, botId: string, action: keyof ThreadPermissionPolicy): Promise<boolean> {
     // Parse thread-level policy
     let policy: ThreadPermissionPolicy | null = null;
     if (thread.permission_policy) {
@@ -1179,7 +1195,7 @@ export class HubDB {
     // default when there is NO thread-level policy at all.
     if (!policy) {
       // No thread policy — check org default
-      const orgSettings = this.getOrgSettings(thread.org_id);
+      const orgSettings = await this.getOrgSettings(thread.org_id);
       if (orgSettings.default_thread_permission_policy) {
         try {
           const orgPolicy = typeof orgSettings.default_thread_permission_policy === 'string'
@@ -1209,9 +1225,10 @@ export class HubDB {
     if (allowedLabels.includes('initiator') && thread.initiator_id === botId) return true;
 
     // Check the bot's participant label
-    const participant = this.db.prepare(
-      'SELECT label FROM thread_participants WHERE thread_id = ? AND bot_id = ?'
-    ).get(thread.id, botId) as { label: string | null } | undefined;
+    const participant = await this.driver.get<{ label: string | null }>(
+      'SELECT label FROM thread_participants WHERE thread_id = ? AND bot_id = ?',
+      [thread.id, botId],
+    );
 
     if (!participant) return false;
     if (!participant.label) return false;
@@ -1221,10 +1238,10 @@ export class HubDB {
 
   // ─── Channel Operations ──────────────────────────────────
 
-  createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Channel & { isNew?: boolean } {
+  async createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Promise<Channel & { isNew?: boolean }> {
     // For direct channels, check if one already exists between these two bots
     if (type === 'direct' && memberIds.length === 2) {
-      const existing = this.findDirectChannel(memberIds[0], memberIds[1]);
+      const existing = await this.findDirectChannel(memberIds[0], memberIds[1]);
       if (existing) return { ...existing, isNew: false };
     }
 
@@ -1236,49 +1253,49 @@ export class HubDB {
       created_at: Date.now(),
     };
 
-    const insertChannel = this.db.prepare(
-      'INSERT INTO channels (id, org_id, type, name, created_at) VALUES (?, ?, ?, ?, ?)'
-    );
-    const insertMember = this.db.prepare(
-      'INSERT INTO channel_members (channel_id, bot_id, joined_at) VALUES (?, ?, ?)'
-    );
-
-    const tx = this.db.transaction(() => {
-      insertChannel.run(channel.id, channel.org_id, channel.type, channel.name, channel.created_at);
+    await this.driver.transaction(async (txn) => {
+      await txn.run(
+        'INSERT INTO channels (id, org_id, type, name, created_at) VALUES (?, ?, ?, ?, ?)',
+        [channel.id, channel.org_id, channel.type, channel.name, channel.created_at],
+      );
       for (const botId of memberIds) {
-        insertMember.run(channel.id, botId, Date.now());
+        await txn.run(
+          'INSERT INTO channel_members (channel_id, bot_id, joined_at) VALUES (?, ?, ?)',
+          [channel.id, botId, Date.now()],
+        );
       }
     });
-    tx();
 
     return { ...channel, isNew: true };
   }
 
-  private findDirectChannel(botId1: string, botId2: string): Channel | undefined {
-    const row = this.db.prepare(`
+  private async findDirectChannel(botId1: string, botId2: string): Promise<Channel | undefined> {
+    const row = await this.driver.get<any>(`
       SELECT c.* FROM channels c
       JOIN channel_members cm1 ON c.id = cm1.channel_id AND cm1.bot_id = ?
       JOIN channel_members cm2 ON c.id = cm2.channel_id AND cm2.bot_id = ?
       WHERE c.type = 'direct'
       LIMIT 1
-    `).get(botId1, botId2) as any;
+    `, [botId1, botId2]);
     return row || undefined;
   }
 
-  getChannel(channelId: string): Channel | undefined {
-    return this.db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId) as Channel | undefined;
+  async getChannel(channelId: string): Promise<Channel | undefined> {
+    return await this.driver.get<Channel>('SELECT * FROM channels WHERE id = ?', [channelId]);
   }
 
-  getChannelMembers(channelId: string): ChannelMember[] {
-    return this.db.prepare(
-      'SELECT * FROM channel_members WHERE channel_id = ?'
-    ).all(channelId) as ChannelMember[];
+  async getChannelMembers(channelId: string): Promise<ChannelMember[]> {
+    return await this.driver.all<ChannelMember>(
+      'SELECT * FROM channel_members WHERE channel_id = ?',
+      [channelId],
+    );
   }
 
-  isChannelMember(channelId: string, botId: string): boolean {
-    const row = this.db.prepare(
-      'SELECT 1 FROM channel_members WHERE channel_id = ? AND bot_id = ?'
-    ).get(channelId, botId);
+  async isChannelMember(channelId: string, botId: string): Promise<boolean> {
+    const row = await this.driver.get(
+      'SELECT 1 FROM channel_members WHERE channel_id = ? AND bot_id = ?',
+      [channelId, botId],
+    );
     return !!row;
   }
 
@@ -1286,8 +1303,8 @@ export class HubDB {
    * Get all channels a bot participates in, with member info and last activity time.
    * Returns channels sorted by most recent activity first.
    */
-  getChannelsForBot(botId: string): { id: string; type: string; name: string | null; created_at: number; last_activity_at: number; members: { id: string; name: string; online: boolean }[] }[] {
-    const channels = this.db.prepare(`
+  async getChannelsForBot(botId: string): Promise<{ id: string; type: string; name: string | null; created_at: number; last_activity_at: number; members: { id: string; name: string; online: boolean }[] }[]> {
+    const channels = await this.driver.all<any>(`
       SELECT c.*, COALESCE(
         (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
         c.created_at
@@ -1296,27 +1313,31 @@ export class HubDB {
       JOIN channel_members cm ON c.id = cm.channel_id
       WHERE cm.bot_id = ?
       ORDER BY last_activity_at DESC
-    `).all(botId) as any[];
+    `, [botId]);
 
-    return channels.map(ch => {
-      const members = this.getChannelMembers(ch.id).map(m => {
-        const bot = this.getBotById(m.bot_id);
-        return { id: m.bot_id, name: bot?.name ?? 'unknown', online: bot?.online ?? false };
-      });
-      return {
+    const result: { id: string; type: string; name: string | null; created_at: number; last_activity_at: number; members: { id: string; name: string; online: boolean }[] }[] = [];
+    for (const ch of channels) {
+      const memberRows = await this.getChannelMembers(ch.id);
+      const members: { id: string; name: string; online: boolean }[] = [];
+      for (const m of memberRows) {
+        const bot = await this.getBotById(m.bot_id);
+        members.push({ id: m.bot_id, name: bot?.name ?? 'unknown', online: bot?.online ?? false });
+      }
+      result.push({
         id: ch.id,
         type: ch.type,
         name: ch.name,
         created_at: ch.created_at,
         last_activity_at: ch.last_activity_at,
         members,
-      };
-    });
+      });
+    }
+    return result;
   }
 
   // ─── Message Operations ──────────────────────────────────
 
-  createMessage(channelId: string, senderId: string, content: string, contentType = 'text', parts?: string | null): Message {
+  async createMessage(channelId: string, senderId: string, content: string, contentType = 'text', parts?: string | null): Promise<Message> {
     const msg: Message = {
       id: crypto.randomUUID(),
       channel_id: channelId,
@@ -1327,15 +1348,16 @@ export class HubDB {
       created_at: Date.now(),
     };
 
-    this.db.prepare(
+    await this.driver.run(
       `INSERT INTO messages (id, channel_id, sender_id, content, content_type, parts, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(msg.id, msg.channel_id, msg.sender_id, msg.content, msg.content_type, msg.parts, msg.created_at);
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [msg.id, msg.channel_id, msg.sender_id, msg.content, msg.content_type, msg.parts, msg.created_at],
+    );
 
     return msg;
   }
 
-  getMessages(channelId: string, limit = 50, before?: number, since?: number): Message[] {
+  async getMessages(channelId: string, limit = 50, before?: number, since?: number): Promise<Message[]> {
     const conditions = ['channel_id = ?'];
     const params: any[] = [channelId];
 
@@ -1343,51 +1365,56 @@ export class HubDB {
     if (since !== undefined)  { conditions.push('created_at > ?'); params.push(since); }
 
     params.push(limit);
-    return this.db.prepare(
-      `SELECT * FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
-    ).all(...params) as Message[];
+    return await this.driver.all<Message>(
+      `SELECT * FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`,
+      params,
+    );
   }
 
   /**
    * Paginated channel messages (newest first). `before` is a message id.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  getMessagesPaginated(channelId: string, before: string | undefined, limit: number): Message[] {
+  async getMessagesPaginated(channelId: string, before: string | undefined, limit: number): Promise<Message[]> {
     if (before) {
       // Get the created_at of the cursor message so we can seek efficiently
-      const cursorRow = this.db.prepare(
-        'SELECT created_at FROM messages WHERE id = ?'
-      ).get(before) as { created_at: number } | undefined;
+      const cursorRow = await this.driver.get<{ created_at: number }>(
+        'SELECT created_at FROM messages WHERE id = ?',
+        [before],
+      );
       if (!cursorRow) {
         // Unknown cursor — return from newest
-        return this.db.prepare(
-          'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?'
-        ).all(channelId, limit + 1) as Message[];
+        return await this.driver.all<Message>(
+          'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?',
+          [channelId, limit + 1],
+        );
       }
       // Use (created_at, id) for stable ordering when timestamps collide
-      return this.db.prepare(
-        `SELECT * FROM messages WHERE channel_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
-      ).all(channelId, cursorRow.created_at, cursorRow.created_at, before, limit + 1) as Message[];
+      return await this.driver.all<Message>(
+        `SELECT * FROM messages WHERE channel_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`,
+        [channelId, cursorRow.created_at, cursorRow.created_at, before, limit + 1],
+      );
     }
-    return this.db.prepare(
-      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).all(channelId, limit + 1) as Message[];
+    return await this.driver.all<Message>(
+      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?',
+      [channelId, limit + 1],
+    );
   }
 
-  getNewMessages(botId: string, since: number): (Message & { channel_name?: string })[] {
-    return this.db.prepare(`
+  async getNewMessages(botId: string, since: number): Promise<(Message & { channel_name?: string })[]> {
+    return await this.driver.all<Message & { channel_name?: string }>(`
       SELECT m.*, ch.name as channel_name FROM messages m
       JOIN channel_members cm ON m.channel_id = cm.channel_id AND cm.bot_id = ?
       JOIN channels ch ON m.channel_id = ch.id
       WHERE m.created_at > ? AND m.sender_id != ?
       ORDER BY m.created_at ASC
       LIMIT 100
-    `).all(botId, since, botId) as any[];
+    `, [botId, since, botId]);
   }
 
   // ─── Thread Operations ───────────────────────────────────
 
-  createThread(
+  async createThread(
     orgId: string,
     initiatorId: string,
     topic: string,
@@ -1396,7 +1423,7 @@ export class HubDB {
     channelId?: string | null,
     context?: string | null,
     permissionPolicy?: string | null,
-  ): Thread {
+  ): Promise<Thread> {
     const uniqueParticipantIds = Array.from(new Set([initiatorId, ...participantIds]));
 
     const now = Date.now();
@@ -1418,40 +1445,32 @@ export class HubDB {
       resolved_at: null,
     };
 
-    const getBotOrgStmt = this.db.prepare('SELECT org_id FROM bots WHERE id = ?');
-    const getChannelOrgStmt = this.db.prepare('SELECT org_id FROM channels WHERE id = ?');
-    const insertThreadStmt = this.db.prepare(`
-      INSERT INTO threads (
-        id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason,
-        permission_policy, revision, created_at, updated_at, last_activity_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertParticipantStmt = this.db.prepare(`
-      INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
-      VALUES (?, ?, ?, ?)
-    `);
-
-    const tx = this.db.transaction(() => {
-      const initiatorRow = getBotOrgStmt.get(initiatorId) as { org_id: string } | undefined;
+    await this.driver.transaction(async (txn) => {
+      const initiatorRow = await txn.get<{ org_id: string }>('SELECT org_id FROM bots WHERE id = ?', [initiatorId]);
       if (!initiatorRow || initiatorRow.org_id !== orgId) {
         throw new Error('Invalid initiator');
       }
 
       for (const participantId of uniqueParticipantIds) {
-        const participantRow = getBotOrgStmt.get(participantId) as { org_id: string } | undefined;
+        const participantRow = await txn.get<{ org_id: string }>('SELECT org_id FROM bots WHERE id = ?', [participantId]);
         if (!participantRow || participantRow.org_id !== orgId) {
           throw new Error(`Participant not in org: ${participantId}`);
         }
       }
 
       if (channelId) {
-        const channelRow = getChannelOrgStmt.get(channelId) as { org_id: string } | undefined;
+        const channelRow = await txn.get<{ org_id: string }>('SELECT org_id FROM channels WHERE id = ?', [channelId]);
         if (!channelRow || channelRow.org_id !== orgId) {
           throw new Error('Invalid channel_id for thread org');
         }
       }
 
-      insertThreadStmt.run(
+      await txn.run(`
+        INSERT INTO threads (
+          id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason,
+          permission_policy, revision, created_at, updated_at, last_activity_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
         thread.id,
         thread.org_id,
         thread.topic,
@@ -1467,31 +1486,33 @@ export class HubDB {
         thread.updated_at,
         thread.last_activity_at,
         thread.resolved_at,
-      );
+      ]);
 
       for (const participantId of uniqueParticipantIds) {
-        insertParticipantStmt.run(thread.id, participantId, null, now);
+        await txn.run(`
+          INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
+          VALUES (?, ?, ?, ?)
+        `, [thread.id, participantId, null, now]);
       }
     });
 
-    tx();
     return thread;
   }
 
-  getThread(threadId: string): Thread | undefined {
-    const row = this.db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as any;
+  async getThread(threadId: string): Promise<Thread | undefined> {
+    const row = await this.driver.get<any>('SELECT * FROM threads WHERE id = ?', [threadId]);
     if (!row) return undefined;
     return this.rowToThread(row);
   }
 
-  listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200, offset = 0): Thread[] {
+  async listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200, offset = 0): Promise<Thread[]> {
     const base = 'SELECT * FROM threads WHERE org_id = ?';
     const query = status
       ? `${base} AND status = ? ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`
       : `${base} ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`;
     const rows = status
-      ? (this.db.prepare(query).all(orgId, status, limit, offset) as any[])
-      : (this.db.prepare(query).all(orgId, limit, offset) as any[]);
+      ? await this.driver.all<any>(query, [orgId, status, limit, offset])
+      : await this.driver.all<any>(query, [orgId, limit, offset]);
     return rows.map(row => this.rowToThread(row));
   }
 
@@ -1499,7 +1520,7 @@ export class HubDB {
    * Paginated thread list for org. Cursor is a thread id; ordered by id ASC.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number, search?: string): Thread[] {
+  async listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number, search?: string): Promise<Thread[]> {
     const conditions = ['org_id = ?'];
     const params: any[] = [orgId];
 
@@ -1508,13 +1529,14 @@ export class HubDB {
     if (search) { conditions.push('topic LIKE ?'); params.push(`%${search}%`); }
 
     params.push(limit + 1);
-    const rows = this.db.prepare(
-      `SELECT * FROM threads WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT ?`
-    ).all(...params) as any[];
+    const rows = await this.driver.all<any>(
+      `SELECT * FROM threads WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT ?`,
+      params,
+    );
     return rows.map(row => this.rowToThread(row));
   }
 
-  listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Thread[] {
+  async listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Promise<Thread[]> {
     const base = `
       SELECT t.* FROM threads t
       JOIN thread_participants tp ON t.id = tp.thread_id
@@ -1525,13 +1547,13 @@ export class HubDB {
       ? `${base} AND t.status = ? ORDER BY t.last_activity_at DESC LIMIT ?`
       : `${base} ORDER BY t.last_activity_at DESC LIMIT ?`;
     const rows = status
-      ? (this.db.prepare(query).all(botId, status, limit) as any[])
-      : (this.db.prepare(query).all(botId, limit) as any[]);
+      ? await this.driver.all<any>(query, [botId, status, limit])
+      : await this.driver.all<any>(query, [botId, limit]);
     return rows.map(row => this.rowToThread(row));
   }
 
-  updateThreadStatus(threadId: string, status: ThreadStatus, closeReason?: CloseReason | null, expectedRevision?: number): Thread | undefined {
-    const current = this.getThread(threadId);
+  async updateThreadStatus(threadId: string, status: ThreadStatus, closeReason?: CloseReason | null, expectedRevision?: number): Promise<Thread | undefined> {
+    const current = await this.getThread(threadId);
     if (!current) return undefined;
 
     // Explicit allowed-transitions map (5-state machine):
@@ -1567,128 +1589,128 @@ export class HubDB {
     const reason = status === 'closed' ? (closeReason ?? null) : null;
 
     if (expectedRevision !== undefined) {
-      const result = this.db.prepare(`
+      const result = await this.driver.run(`
         UPDATE threads
         SET status = ?, close_reason = ?, resolved_at = ?, updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
-      `).run(status, reason, resolvedAt, now, threadId, expectedRevision);
+      `, [status, reason, resolvedAt, now, threadId, expectedRevision]);
       if (result.changes === 0) throw new Error('REVISION_CONFLICT');
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE threads
         SET status = ?, close_reason = ?, resolved_at = ?, updated_at = ?, revision = revision + 1
         WHERE id = ?
-      `).run(status, reason, resolvedAt, now, threadId);
+      `, [status, reason, resolvedAt, now, threadId]);
     }
 
     return this.getThread(threadId);
   }
 
-  updateThreadContext(threadId: string, context: string | null, expectedRevision?: number): Thread | undefined {
-    const current = this.getThread(threadId);
+  async updateThreadContext(threadId: string, context: string | null, expectedRevision?: number): Promise<Thread | undefined> {
+    const current = await this.getThread(threadId);
     if (!current) return undefined;
 
     if (expectedRevision !== undefined) {
-      const result = this.db.prepare(`
+      const result = await this.driver.run(`
         UPDATE threads
         SET context = ?, updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
-      `).run(context, Date.now(), threadId, expectedRevision);
+      `, [context, Date.now(), threadId, expectedRevision]);
       if (result.changes === 0) throw new Error('REVISION_CONFLICT');
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE threads
         SET context = ?, updated_at = ?, revision = revision + 1
         WHERE id = ?
-      `).run(context, Date.now(), threadId);
+      `, [context, Date.now(), threadId]);
     }
 
     return this.getThread(threadId);
   }
 
-  updateThreadTopic(threadId: string, topic: string, expectedRevision?: number): Thread | undefined {
-    const current = this.getThread(threadId);
+  async updateThreadTopic(threadId: string, topic: string, expectedRevision?: number): Promise<Thread | undefined> {
+    const current = await this.getThread(threadId);
     if (!current) return undefined;
 
     if (expectedRevision !== undefined) {
-      const result = this.db.prepare(`
+      const result = await this.driver.run(`
         UPDATE threads
         SET topic = ?, updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
-      `).run(topic, Date.now(), threadId, expectedRevision);
+      `, [topic, Date.now(), threadId, expectedRevision]);
       if (result.changes === 0) throw new Error('REVISION_CONFLICT');
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE threads
         SET topic = ?, updated_at = ?, revision = revision + 1
         WHERE id = ?
-      `).run(topic, Date.now(), threadId);
+      `, [topic, Date.now(), threadId]);
     }
 
     return this.getThread(threadId);
   }
 
-  addParticipant(threadId: string, botId: string, label?: string | null): ThreadParticipant {
-    const thread = this.getThread(threadId);
+  async addParticipant(threadId: string, botId: string, label?: string | null): Promise<ThreadParticipant> {
+    const thread = await this.getThread(threadId);
     if (!thread) {
       throw new Error('Thread not found');
     }
 
-    const bot = this.getBotById(botId);
+    const bot = await this.getBotById(botId);
     if (!bot || bot.org_id !== thread.org_id) {
       throw new Error('Participant bot not found in thread org');
     }
 
-    const existing = this.db.prepare(`
+    const existing = await this.driver.get<any>(`
       SELECT * FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-    `).get(threadId, botId) as any;
+    `, [threadId, botId]);
 
     if (existing) {
       if (label !== undefined) {
-        this.db.prepare(`
+        await this.driver.run(`
           UPDATE thread_participants SET label = ? WHERE thread_id = ? AND bot_id = ?
-        `).run(label ?? null, threadId, botId);
-        const updated = this.db.prepare(`
+        `, [label ?? null, threadId, botId]);
+        const updated = await this.driver.get<any>(`
           SELECT * FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-        `).get(threadId, botId) as any;
+        `, [threadId, botId]);
         return this.rowToThreadParticipant(updated);
       }
       return this.rowToThreadParticipant(existing);
     }
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
       VALUES (?, ?, ?, ?)
-    `).run(threadId, botId, label ?? null, Date.now());
+    `, [threadId, botId, label ?? null, Date.now()]);
 
-    const row = this.db.prepare(`
+    const row = await this.driver.get<any>(`
       SELECT * FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-    `).get(threadId, botId) as any;
+    `, [threadId, botId]);
 
     return this.rowToThreadParticipant(row);
   }
 
-  removeParticipant(threadId: string, botId: string) {
-    this.db.prepare(`
+  async removeParticipant(threadId: string, botId: string): Promise<void> {
+    await this.driver.run(`
       DELETE FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-    `).run(threadId, botId);
+    `, [threadId, botId]);
   }
 
-  getParticipants(threadId: string): ThreadParticipant[] {
-    const rows = this.db.prepare(`
+  async getParticipants(threadId: string): Promise<ThreadParticipant[]> {
+    const rows = await this.driver.all<any>(`
       SELECT * FROM thread_participants WHERE thread_id = ? ORDER BY joined_at
-    `).all(threadId) as any[];
+    `, [threadId]);
     return rows.map(row => this.rowToThreadParticipant(row));
   }
 
-  isParticipant(threadId: string, botId: string): boolean {
-    const row = this.db.prepare(`
+  async isParticipant(threadId: string, botId: string): Promise<boolean> {
+    const row = await this.driver.get(`
       SELECT 1 FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-    `).get(threadId, botId);
+    `, [threadId, botId]);
     return !!row;
   }
 
-  createThreadMessage(
+  async createThreadMessage(
     threadId: string,
     senderId: string,
     content: string,
@@ -1697,7 +1719,7 @@ export class HubDB {
     parts?: string | null,
     mentions?: string | null,
     mentionAll?: number,
-  ): ThreadMessage {
+  ): Promise<ThreadMessage> {
     const msg: ThreadMessage = {
       id: crypto.randomUUID(),
       thread_id: threadId,
@@ -1711,16 +1733,11 @@ export class HubDB {
       created_at: Date.now(),
     };
 
-    const insertMessageStmt = this.db.prepare(`
-      INSERT INTO thread_messages (id, thread_id, sender_id, content, content_type, parts, metadata, mentions, mention_all, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const updateActivityStmt = this.db.prepare(`
-      UPDATE threads SET last_activity_at = ? WHERE id = ?
-    `);
-
-    const tx = this.db.transaction(() => {
-      insertMessageStmt.run(
+    await this.driver.transaction(async (txn) => {
+      await txn.run(`
+        INSERT INTO thread_messages (id, thread_id, sender_id, content, content_type, parts, metadata, mentions, mention_all, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
         msg.id,
         msg.thread_id,
         msg.sender_id,
@@ -1731,15 +1748,16 @@ export class HubDB {
         msg.mentions,
         msg.mention_all,
         msg.created_at,
-      );
-      updateActivityStmt.run(msg.created_at, threadId);
+      ]);
+      await txn.run(`
+        UPDATE threads SET last_activity_at = ? WHERE id = ?
+      `, [msg.created_at, threadId]);
     });
 
-    tx();
     return msg;
   }
 
-  getThreadMessages(threadId: string, limit = 50, before?: number, since?: number): ThreadMessage[] {
+  async getThreadMessages(threadId: string, limit = 50, before?: number, since?: number): Promise<ThreadMessage[]> {
     const conditions = ['thread_id = ?'];
     const params: any[] = [threadId];
 
@@ -1747,9 +1765,10 @@ export class HubDB {
     if (since !== undefined)  { conditions.push('created_at > ?'); params.push(since); }
 
     params.push(limit);
-    const rows = this.db.prepare(
-      `SELECT * FROM thread_messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ?`
-    ).all(...params) as any[];
+    const rows = await this.driver.all<any>(
+      `SELECT * FROM thread_messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      params,
+    );
 
     return rows.map(row => this.rowToThreadMessage(row));
   }
@@ -1758,26 +1777,33 @@ export class HubDB {
    * Paginated thread messages (newest first). `before` is a message id.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  getThreadMessagesPaginated(threadId: string, before: string | undefined, limit: number): ThreadMessage[] {
+  async getThreadMessagesPaginated(threadId: string, before: string | undefined, limit: number): Promise<ThreadMessage[]> {
     if (before) {
-      const cursorRow = this.db.prepare(
-        'SELECT created_at FROM thread_messages WHERE id = ?'
-      ).get(before) as { created_at: number } | undefined;
+      const cursorRow = await this.driver.get<{ created_at: number }>(
+        'SELECT created_at FROM thread_messages WHERE id = ?',
+        [before],
+      );
       if (!cursorRow) {
-        return (this.db.prepare(
-          'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?'
-        ).all(threadId, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+        const rows = await this.driver.all<any>(
+          'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?',
+          [threadId, limit + 1],
+        );
+        return rows.map(row => this.rowToThreadMessage(row));
       }
-      return (this.db.prepare(
-        `SELECT * FROM thread_messages WHERE thread_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
-      ).all(threadId, cursorRow.created_at, cursorRow.created_at, before, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+      const rows = await this.driver.all<any>(
+        `SELECT * FROM thread_messages WHERE thread_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`,
+        [threadId, cursorRow.created_at, cursorRow.created_at, before, limit + 1],
+      );
+      return rows.map(row => this.rowToThreadMessage(row));
     }
-    return (this.db.prepare(
-      'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).all(threadId, limit + 1) as any[]).map(row => this.rowToThreadMessage(row));
+    const rows = await this.driver.all<any>(
+      'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?',
+      [threadId, limit + 1],
+    );
+    return rows.map(row => this.rowToThreadMessage(row));
   }
 
-  addArtifact(
+  async addArtifact(
     threadId: string,
     contributorId: string,
     key: string,
@@ -1787,26 +1813,15 @@ export class HubDB {
     language?: string | null,
     url?: string | null,
     mimeType?: string | null,
-  ): Artifact {
+  ): Promise<Artifact> {
     const now = Date.now();
     const normalized = this.normalizeJsonArtifactContent(type, content ?? null);
 
-    const getMaxVersionStmt = this.db.prepare(`
-      SELECT MAX(version) as max_version FROM artifacts
-      WHERE thread_id = ? AND artifact_key = ?
-    `);
-    const insertArtifactStmt = this.db.prepare(`
-      INSERT INTO artifacts (
-        id, thread_id, artifact_key, type, title, content, language, url, mime_type,
-        contributor_id, version, format_warning, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const updateActivityStmt = this.db.prepare(`
-      UPDATE threads SET last_activity_at = ? WHERE id = ?
-    `);
-
-    const tx = this.db.transaction(() => {
-      const nextVersionRow = getMaxVersionStmt.get(threadId, key) as { max_version: number | null };
+    return await this.driver.transaction(async (txn) => {
+      const nextVersionRow = await txn.get<{ max_version: number | null }>(`
+        SELECT MAX(version) as max_version FROM artifacts
+        WHERE thread_id = ? AND artifact_key = ?
+      `, [threadId, key]);
       const nextVersion = (nextVersionRow?.max_version ?? 0) + 1;
 
       const artifact: Artifact = {
@@ -1826,7 +1841,12 @@ export class HubDB {
         updated_at: now,
       };
 
-      insertArtifactStmt.run(
+      await txn.run(`
+        INSERT INTO artifacts (
+          id, thread_id, artifact_key, type, title, content, language, url, mime_type,
+          contributor_id, version, format_warning, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
         artifact.id,
         artifact.thread_id,
         artifact.artifact_key,
@@ -1841,59 +1861,46 @@ export class HubDB {
         artifact.format_warning ? 1 : 0,
         artifact.created_at,
         artifact.updated_at,
-      );
-      updateActivityStmt.run(now, threadId);
+      ]);
+      await txn.run(`
+        UPDATE threads SET last_activity_at = ? WHERE id = ?
+      `, [now, threadId]);
 
       return artifact;
     });
-
-    return tx();
   }
 
-  updateArtifact(
+  async updateArtifact(
     threadId: string,
     key: string,
     contributorId: string,
     content: string,
     title?: string | null,
-  ): Artifact | undefined {
-    const getLatestStmt = this.db.prepare(`
-      SELECT * FROM artifacts
-      WHERE thread_id = ? AND artifact_key = ?
-      ORDER BY version DESC
-      LIMIT 1
-    `);
-    const getMaxVersionStmt = this.db.prepare(`
-      SELECT MAX(version) as max_version FROM artifacts
-      WHERE thread_id = ? AND artifact_key = ?
-    `);
-    const getOriginalStmt = this.db.prepare(`
-      SELECT type, format_warning FROM artifacts
-      WHERE thread_id = ? AND artifact_key = ? AND version = 1
-    `);
-    const insertArtifactStmt = this.db.prepare(`
-      INSERT INTO artifacts (
-        id, thread_id, artifact_key, type, title, content, language, url, mime_type,
-        contributor_id, version, format_warning, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const updateActivityStmt = this.db.prepare(`
-      UPDATE threads SET last_activity_at = ? WHERE id = ?
-    `);
-
-    const tx = this.db.transaction(() => {
-      const latestRow = getLatestStmt.get(threadId, key) as any;
+  ): Promise<Artifact | undefined> {
+    return await this.driver.transaction(async (txn) => {
+      const latestRow = await txn.get<any>(`
+        SELECT * FROM artifacts
+        WHERE thread_id = ? AND artifact_key = ?
+        ORDER BY version DESC
+        LIMIT 1
+      `, [threadId, key]);
       if (!latestRow) return undefined;
       const latest = this.rowToArtifact(latestRow);
 
-      const nextVersionRow = getMaxVersionStmt.get(threadId, key) as { max_version: number | null };
+      const nextVersionRow = await txn.get<{ max_version: number | null }>(`
+        SELECT MAX(version) as max_version FROM artifacts
+        WHERE thread_id = ? AND artifact_key = ?
+      `, [threadId, key]);
       const nextVersion = (nextVersionRow?.max_version ?? latest.version) + 1;
 
       // Use the original declared type for normalization so a downgraded JSON
       // artifact can recover when valid JSON is submitted again.
       // If v1 has format_warning, it was originally declared as 'json' but
       // downgraded to 'text' due to malformed content — treat as 'json'.
-      const originalRow = getOriginalStmt.get(threadId, key) as { type: string; format_warning: number } | undefined;
+      const originalRow = await txn.get<{ type: string; format_warning: number }>(`
+        SELECT type, format_warning FROM artifacts
+        WHERE thread_id = ? AND artifact_key = ? AND version = 1
+      `, [threadId, key]);
       const baseType = (originalRow?.format_warning ? 'json' : originalRow?.type ?? latest.type) as ArtifactType;
 
       const now = Date.now();
@@ -1915,7 +1922,12 @@ export class HubDB {
         updated_at: now,
       };
 
-      insertArtifactStmt.run(
+      await txn.run(`
+        INSERT INTO artifacts (
+          id, thread_id, artifact_key, type, title, content, language, url, mime_type,
+          contributor_id, version, format_warning, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
         artifact.id,
         artifact.thread_id,
         artifact.artifact_key,
@@ -1930,35 +1942,35 @@ export class HubDB {
         artifact.format_warning ? 1 : 0,
         artifact.created_at,
         artifact.updated_at,
-      );
-      updateActivityStmt.run(now, threadId);
+      ]);
+      await txn.run(`
+        UPDATE threads SET last_activity_at = ? WHERE id = ?
+      `, [now, threadId]);
 
       return artifact;
     });
-
-    return tx();
   }
 
-  getArtifact(threadId: string, key: string, version?: number): Artifact | undefined {
+  async getArtifact(threadId: string, key: string, version?: number): Promise<Artifact | undefined> {
     const row = version === undefined
-      ? this.db.prepare(`
+      ? await this.driver.get<any>(`
           SELECT * FROM artifacts
           WHERE thread_id = ? AND artifact_key = ?
           ORDER BY version DESC
           LIMIT 1
-        `).get(threadId, key)
-      : this.db.prepare(`
+        `, [threadId, key])
+      : await this.driver.get<any>(`
           SELECT * FROM artifacts
           WHERE thread_id = ? AND artifact_key = ? AND version = ?
           LIMIT 1
-        `).get(threadId, key, version);
+        `, [threadId, key, version]);
 
     if (!row) return undefined;
     return this.rowToArtifact(row);
   }
 
-  listArtifacts(threadId: string): Artifact[] {
-    const rows = this.db.prepare(`
+  async listArtifacts(threadId: string): Promise<Artifact[]> {
+    const rows = await this.driver.all<any>(`
       SELECT a.* FROM artifacts a
       JOIN (
         SELECT artifact_key, MAX(version) as max_version
@@ -1968,7 +1980,7 @@ export class HubDB {
       ) latest ON a.artifact_key = latest.artifact_key AND a.version = latest.max_version
       WHERE a.thread_id = ?
       ORDER BY a.created_at ASC
-    `).all(threadId, threadId) as any[];
+    `, [threadId, threadId]);
 
     return rows.map(row => this.rowToArtifact(row));
   }
@@ -1977,12 +1989,12 @@ export class HubDB {
    * Paginated artifact list (latest version per key). Cursor is an artifact_key.
    * Returns limit+1 rows so the caller can detect has_more.
    */
-  listArtifactsPaginated(threadId: string, cursor: string | undefined, limit: number): Artifact[] {
+  async listArtifactsPaginated(threadId: string, cursor: string | undefined, limit: number): Promise<Artifact[]> {
     const cursorClause = cursor ? 'AND a.artifact_key > ?' : '';
     const params: any[] = cursor
       ? [threadId, threadId, cursor, limit + 1]
       : [threadId, threadId, limit + 1];
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<any>(`
       SELECT a.* FROM artifacts a
       JOIN (
         SELECT artifact_key, MAX(version) as max_version
@@ -1993,24 +2005,24 @@ export class HubDB {
       WHERE a.thread_id = ? ${cursorClause}
       ORDER BY a.artifact_key ASC
       LIMIT ?
-    `).all(...params) as any[];
+    `, params);
 
     return rows.map(row => this.rowToArtifact(row));
   }
 
-  getArtifactVersions(threadId: string, key: string): Artifact[] {
-    const rows = this.db.prepare(`
+  async getArtifactVersions(threadId: string, key: string): Promise<Artifact[]> {
+    const rows = await this.driver.all<any>(`
       SELECT * FROM artifacts
       WHERE thread_id = ? AND artifact_key = ?
       ORDER BY version ASC
-    `).all(threadId, key) as any[];
+    `, [threadId, key]);
 
     return rows.map(row => this.rowToArtifact(row));
   }
 
   // ─── File Operations ────────────────────────────────────
 
-  createFile(orgId: string, uploaderId: string, name: string, mimeType: string | null, size: number, diskPath: string): FileRecord {
+  async createFile(orgId: string, uploaderId: string, name: string, mimeType: string | null, size: number, diskPath: string): Promise<FileRecord> {
     const file: FileRecord = {
       id: crypto.randomUUID(),
       org_id: orgId,
@@ -2022,30 +2034,31 @@ export class HubDB {
       created_at: Date.now(),
     };
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO files (id, org_id, uploader_id, name, mime_type, size, path, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(file.id, file.org_id, file.uploader_id, file.name, file.mime_type, file.size, file.path, file.created_at);
+    `, [file.id, file.org_id, file.uploader_id, file.name, file.mime_type, file.size, file.path, file.created_at]);
 
     return file;
   }
 
-  getFile(fileId: string): FileRecord | undefined {
-    const row = this.db.prepare('SELECT * FROM files WHERE id = ?').get(fileId) as FileRecord | undefined;
+  async getFile(fileId: string): Promise<FileRecord | undefined> {
+    const row = await this.driver.get<FileRecord>('SELECT * FROM files WHERE id = ?', [fileId]);
     return row || undefined;
   }
 
-  getFileInfo(fileId: string): FileRecord | undefined {
+  async getFileInfo(fileId: string): Promise<FileRecord | undefined> {
     return this.getFile(fileId);
   }
 
-  getDailyUploadBytes(orgId: string): number {
+  async getDailyUploadBytes(orgId: string): Promise<number> {
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
-    const row = this.db.prepare(
-      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?'
-    ).get(orgId, dayStart.getTime()) as { total: number };
-    return row.total;
+    const row = await this.driver.get<{ total: number }>(
+      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?',
+      [orgId, dayStart.getTime()],
+    );
+    return row!.total;
   }
 
 
@@ -2053,7 +2066,7 @@ export class HubDB {
    * Atomically check daily upload quota (org-level + per-bot) and create file record.
    * Prevents TOCTOU race where concurrent uploads both pass the quota check.
    */
-  createFileWithQuotaCheck(
+  async createFileWithQuotaCheck(
     orgId: string,
     uploaderId: string,
     name: string,
@@ -2062,34 +2075,29 @@ export class HubDB {
     diskPath: string,
     dailyLimitBytes: number,
     perBotDailyLimitBytes: number,
-  ): { ok: true; file: FileRecord } | { ok: false; reason: 'org' | 'bot'; dailyBytes: number; limitBytes: number } {
+  ): Promise<{ ok: true; file: FileRecord } | { ok: false; reason: 'org' | 'bot'; dailyBytes: number; limitBytes: number }> {
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
     const dayStartMs = dayStart.getTime();
 
-    const getOrgDailyStmt = this.db.prepare(
-      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?'
-    );
-    const getBotDailyStmt = this.db.prepare(
-      'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND uploader_id = ? AND created_at >= ?'
-    );
-    const insertStmt = this.db.prepare(`
-      INSERT INTO files (id, org_id, uploader_id, name, mime_type, size, path, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const txn = this.db.transaction(() => {
+    return await this.driver.transaction(async (txn) => {
       // Check org-level daily quota
-      const orgRow = getOrgDailyStmt.get(orgId, dayStartMs) as { total: number };
-      if (orgRow.total + size > dailyLimitBytes) {
-        return { ok: false as const, reason: 'org' as const, dailyBytes: orgRow.total, limitBytes: dailyLimitBytes };
+      const orgRow = await txn.get<{ total: number }>(
+        'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?',
+        [orgId, dayStartMs],
+      );
+      if (orgRow!.total + size > dailyLimitBytes) {
+        return { ok: false as const, reason: 'org' as const, dailyBytes: orgRow!.total, limitBytes: dailyLimitBytes };
       }
 
       // Check per-bot daily quota
       if (perBotDailyLimitBytes > 0) {
-        const botRow = getBotDailyStmt.get(orgId, uploaderId, dayStartMs) as { total: number };
-        if (botRow.total + size > perBotDailyLimitBytes) {
-          return { ok: false as const, reason: 'bot' as const, dailyBytes: botRow.total, limitBytes: perBotDailyLimitBytes };
+        const botRow = await txn.get<{ total: number }>(
+          'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND uploader_id = ? AND created_at >= ?',
+          [orgId, uploaderId, dayStartMs],
+        );
+        if (botRow!.total + size > perBotDailyLimitBytes) {
+          return { ok: false as const, reason: 'bot' as const, dailyBytes: botRow!.total, limitBytes: perBotDailyLimitBytes };
         }
       }
 
@@ -2104,74 +2112,79 @@ export class HubDB {
         created_at: Date.now(),
       };
 
-      insertStmt.run(file.id, file.org_id, file.uploader_id, file.name, file.mime_type, file.size, file.path, file.created_at);
+      await txn.run(
+        'INSERT INTO files (id, org_id, uploader_id, name, mime_type, size, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [file.id, file.org_id, file.uploader_id, file.name, file.mime_type, file.size, file.path, file.created_at],
+      );
       return { ok: true as const, file };
     });
-
-    return txn();
   }
+
   // ─── Catchup Event Operations ─────────────────────────────
 
-  recordCatchupEvent(orgId: string, targetBotId: string, type: string, payload: Record<string, unknown>, refId?: string) {
+  async recordCatchupEvent(orgId: string, targetBotId: string, type: string, payload: Record<string, unknown>, refId?: string): Promise<void> {
     const now = Date.now();
 
     // For aggregatable events (summaries): UPSERT by (target_bot_id, type, ref_id)
     // to avoid flooding catchup with one row per message
     if (refId) {
-      const existing = this.db.prepare(
-        'SELECT id, payload FROM catchup_events WHERE target_bot_id = ? AND type = ? AND ref_id = ?'
-      ).get(targetBotId, type, refId) as { id: string; payload: string } | undefined;
+      const existing = await this.driver.get<{ id: string; payload: string }>(
+        'SELECT id, payload FROM catchup_events WHERE target_bot_id = ? AND type = ? AND ref_id = ?',
+        [targetBotId, type, refId],
+      );
 
       if (existing) {
         const prev = JSON.parse(existing.payload);
         const merged = { ...prev, ...payload, count: (prev.count || 0) + (payload.count as number || 1) };
-        this.db.prepare(
-          'UPDATE catchup_events SET payload = ?, occurred_at = ? WHERE id = ?'
-        ).run(JSON.stringify(merged), now, existing.id);
+        await this.driver.run(
+          'UPDATE catchup_events SET payload = ?, occurred_at = ? WHERE id = ?',
+          [JSON.stringify(merged), now, existing.id],
+        );
         return;
       }
     }
 
     const id = crypto.randomUUID();
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO catchup_events (id, org_id, target_bot_id, type, ref_id, payload, occurred_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, orgId, targetBotId, type, refId ?? null, JSON.stringify(payload), now);
+    `, [id, orgId, targetBotId, type, refId ?? null, JSON.stringify(payload), now]);
   }
 
-  getCatchupEvents(botId: string, since: number, limit = 50, cursor?: string): { events: CatchupEvent[]; has_more: boolean } {
+  async getCatchupEvents(botId: string, since: number, limit = 50, cursor?: string): Promise<{ events: CatchupEvent[]; has_more: boolean }> {
     let rows: any[];
 
     if (cursor) {
       // Cursor is the last event_id from previous page — get its occurred_at for efficient seek
-      const cursorRow = this.db.prepare(
-        'SELECT occurred_at FROM catchup_events WHERE id = ?'
-      ).get(cursor) as { occurred_at: number } | undefined;
+      const cursorRow = await this.driver.get<{ occurred_at: number }>(
+        'SELECT occurred_at FROM catchup_events WHERE id = ?',
+        [cursor],
+      );
 
       if (cursorRow) {
         // Seek past the cursor using (occurred_at, id) tuple comparison
-        rows = this.db.prepare(`
+        rows = await this.driver.all<any>(`
           SELECT * FROM catchup_events
           WHERE target_bot_id = ? AND (occurred_at > ? OR (occurred_at = ? AND id > ?))
           ORDER BY occurred_at ASC, id ASC
           LIMIT ?
-        `).all(botId, cursorRow.occurred_at, cursorRow.occurred_at, cursor, limit + 1) as any[];
+        `, [botId, cursorRow.occurred_at, cursorRow.occurred_at, cursor, limit + 1]);
       } else {
         // Invalid cursor — fall back to since-only query
-        rows = this.db.prepare(`
+        rows = await this.driver.all<any>(`
           SELECT * FROM catchup_events
           WHERE target_bot_id = ? AND occurred_at > ?
           ORDER BY occurred_at ASC, id ASC
           LIMIT ?
-        `).all(botId, since, limit + 1) as any[];
+        `, [botId, since, limit + 1]);
       }
     } else {
-      rows = this.db.prepare(`
+      rows = await this.driver.all<any>(`
         SELECT * FROM catchup_events
         WHERE target_bot_id = ? AND occurred_at > ?
         ORDER BY occurred_at ASC, id ASC
         LIMIT ?
-      `).all(botId, since, limit + 1) as any[];
+      `, [botId, since, limit + 1]);
     }
 
     const has_more = rows.length > limit;
@@ -2190,18 +2203,18 @@ export class HubDB {
     return { events, has_more };
   }
 
-  getCatchupCount(botId: string, since: number): {
+  async getCatchupCount(botId: string, since: number): Promise<{
     thread_invites: number;
     thread_status_changes: number;
     thread_activities: number;
     channel_messages: number;
     total: number;
-  } {
-    const rows = this.db.prepare(`
+  }> {
+    const rows = await this.driver.all<{ type: string; count: number }>(`
       SELECT type, COUNT(*) as count FROM catchup_events
       WHERE target_bot_id = ? AND occurred_at > ?
       GROUP BY type
-    `).all(botId, since) as { type: string; count: number }[];
+    `, [botId, since]);
 
     const counts = {
       thread_invites: 0,
@@ -2236,41 +2249,45 @@ export class HubDB {
     return counts;
   }
 
-  cleanupOldCatchupEvents(maxAgeDays: number, batchSize = 5000): number {
+  async cleanupOldCatchupEvents(maxAgeDays: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-    const result = this.db.prepare('DELETE FROM catchup_events WHERE rowid IN (SELECT rowid FROM catchup_events WHERE occurred_at < ? LIMIT ?)').run(cutoff, batchSize);
+    const result = await this.driver.run(
+      'DELETE FROM catchup_events WHERE rowid IN (SELECT rowid FROM catchup_events WHERE occurred_at < ? LIMIT ?)',
+      [cutoff, batchSize],
+    );
     return result.changes;
   }
 
   // ─── Webhook Status Operations ──────────────────────────
 
-  recordWebhookSuccess(botId: string) {
-    this.db.prepare(`
+  async recordWebhookSuccess(botId: string): Promise<void> {
+    await this.driver.run(`
       INSERT INTO webhook_status (bot_id, last_success, last_failure, consecutive_failures, degraded)
       VALUES (?, ?, NULL, 0, 0)
       ON CONFLICT(bot_id) DO UPDATE SET
         last_success = ?,
         consecutive_failures = 0,
         degraded = 0
-    `).run(botId, Date.now(), Date.now());
+    `, [botId, Date.now(), Date.now()]);
   }
 
-  recordWebhookFailure(botId: string) {
+  async recordWebhookFailure(botId: string): Promise<void> {
     const now = Date.now();
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO webhook_status (bot_id, last_success, last_failure, consecutive_failures, degraded)
       VALUES (?, NULL, ?, 1, 0)
       ON CONFLICT(bot_id) DO UPDATE SET
         last_failure = ?,
         consecutive_failures = consecutive_failures + 1,
         degraded = CASE WHEN consecutive_failures + 1 >= 10 THEN 1 ELSE degraded END
-    `).run(botId, now, now);
+    `, [botId, now, now]);
   }
 
-  getWebhookHealth(botId: string): WebhookHealth | null {
-    const row = this.db.prepare(
-      'SELECT * FROM webhook_status WHERE bot_id = ?'
-    ).get(botId) as any;
+  async getWebhookHealth(botId: string): Promise<WebhookHealth | null> {
+    const row = await this.driver.get<any>(
+      'SELECT * FROM webhook_status WHERE bot_id = ?',
+      [botId],
+    );
     if (!row) return null;
     return {
       healthy: row.consecutive_failures === 0,
@@ -2281,23 +2298,24 @@ export class HubDB {
     };
   }
 
-  isWebhookDegraded(botId: string): boolean {
-    const row = this.db.prepare(
-      'SELECT degraded FROM webhook_status WHERE bot_id = ?'
-    ).get(botId) as any;
+  async isWebhookDegraded(botId: string): Promise<boolean> {
+    const row = await this.driver.get<any>(
+      'SELECT degraded FROM webhook_status WHERE bot_id = ?',
+      [botId],
+    );
     return !!row?.degraded;
   }
 
-  resetWebhookDegraded(botId: string) {
-    this.db.prepare(`
+  async resetWebhookDegraded(botId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE webhook_status SET degraded = 0, consecutive_failures = 0 WHERE bot_id = ?
-    `).run(botId);
+    `, [botId]);
   }
 
   // ─── Org Settings Operations ────────────────────────────
 
-  getOrgSettings(orgId: string): OrgSettings {
-    const row = this.db.prepare('SELECT * FROM org_settings WHERE org_id = ?').get(orgId) as any;
+  async getOrgSettings(orgId: string): Promise<OrgSettings> {
+    const row = await this.driver.get<any>('SELECT * FROM org_settings WHERE org_id = ?', [orgId]);
     if (row) {
       let defaultPolicy: ThreadPermissionPolicy | null = null;
       if (row.default_thread_permission_policy) {
@@ -2333,9 +2351,9 @@ export class HubDB {
     };
   }
 
-  updateOrgSettings(orgId: string, updates: Partial<OrgSettings>): OrgSettings {
+  async updateOrgSettings(orgId: string, updates: Partial<OrgSettings>): Promise<OrgSettings> {
     const now = Date.now();
-    const current = this.getOrgSettings(orgId);
+    const current = await this.getOrgSettings(orgId);
     const merged: OrgSettings = {
       org_id: orgId,
       messages_per_minute_per_bot: updates.messages_per_minute_per_bot ?? current.messages_per_minute_per_bot,
@@ -2354,7 +2372,7 @@ export class HubDB {
       ? JSON.stringify(merged.default_thread_permission_policy)
       : null;
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO org_settings (org_id, messages_per_minute_per_bot, threads_per_hour_per_bot, file_upload_mb_per_day_per_bot, message_ttl_days, thread_auto_close_days, artifact_retention_days, default_thread_permission_policy, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(org_id) DO UPDATE SET
@@ -2366,7 +2384,7 @@ export class HubDB {
         artifact_retention_days = excluded.artifact_retention_days,
         default_thread_permission_policy = excluded.default_thread_permission_policy,
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       merged.org_id,
       merged.messages_per_minute_per_bot,
       merged.threads_per_hour_per_bot,
@@ -2376,7 +2394,7 @@ export class HubDB {
       merged.artifact_retention_days,
       policyJson,
       merged.updated_at,
-    );
+    ]);
 
     return merged;
   }
@@ -2387,78 +2405,82 @@ export class HubDB {
    * Atomically check rate limit and record the event in a single transaction.
    * Prevents TOCTOU race where concurrent requests both pass the check.
    */
-  checkAndRecordRateLimit(orgId: string, botId: string, resource: 'message' | 'thread'): { allowed: boolean; retryAfter?: number } {
-    const settings = this.getOrgSettings(orgId);
+  async checkAndRecordRateLimit(orgId: string, botId: string, resource: 'message' | 'thread'): Promise<{ allowed: boolean; retryAfter?: number }> {
+    const settings = await this.getOrgSettings(orgId);
     const now = Date.now();
 
-    const txn = this.db.transaction(() => {
+    return await this.driver.transaction(async (txn) => {
       if (resource === 'message') {
         const windowStart = now - 60000; // 1 minute
-        const row = this.db.prepare(
+        const row = await txn.get<{ count: number; oldest: number | null }>(
           `SELECT COUNT(*) as count, MIN(created_at) as oldest FROM rate_limit_events
-           WHERE org_id = ? AND bot_id = ? AND resource_type = 'message' AND created_at > ?`
-        ).get(orgId, botId, windowStart) as { count: number; oldest: number | null };
+           WHERE org_id = ? AND bot_id = ? AND resource_type = 'message' AND created_at > ?`,
+          [orgId, botId, windowStart],
+        );
 
-        if (row.count >= settings.messages_per_minute_per_bot) {
-          const retryAfter = row.oldest ? Math.ceil((row.oldest + 60000 - now) / 1000) : 60;
+        if (row!.count >= settings.messages_per_minute_per_bot) {
+          const retryAfter = row!.oldest ? Math.ceil((row!.oldest + 60000 - now) / 1000) : 60;
           return { allowed: false as const, retryAfter: Math.max(retryAfter, 1) };
         }
       } else {
         const windowStart = now - 3600000; // 1 hour
-        const row = this.db.prepare(
+        const row = await txn.get<{ count: number; oldest: number | null }>(
           `SELECT COUNT(*) as count, MIN(created_at) as oldest FROM rate_limit_events
-           WHERE org_id = ? AND bot_id = ? AND resource_type = 'thread' AND created_at > ?`
-        ).get(orgId, botId, windowStart) as { count: number; oldest: number | null };
+           WHERE org_id = ? AND bot_id = ? AND resource_type = 'thread' AND created_at > ?`,
+          [orgId, botId, windowStart],
+        );
 
-        if (row.count >= settings.threads_per_hour_per_bot) {
-          const retryAfter = row.oldest ? Math.ceil((row.oldest + 3600000 - now) / 1000) : 3600;
+        if (row!.count >= settings.threads_per_hour_per_bot) {
+          const retryAfter = row!.oldest ? Math.ceil((row!.oldest + 3600000 - now) / 1000) : 3600;
           return { allowed: false as const, retryAfter: Math.max(retryAfter, 1) };
         }
       }
 
       // Within limit — record the event atomically
-      this.db.prepare(
-        'INSERT INTO rate_limit_events (org_id, bot_id, resource_type, created_at) VALUES (?, ?, ?, ?)'
-      ).run(orgId, botId, resource, now);
+      await txn.run(
+        'INSERT INTO rate_limit_events (org_id, bot_id, resource_type, created_at) VALUES (?, ?, ?, ?)',
+        [orgId, botId, resource, now],
+      );
 
       return { allowed: true as const };
     });
-
-    return txn();
   }
 
-  cleanupOldRateLimitEvents(batchSize = 10000): number {
+  async cleanupOldRateLimitEvents(batchSize = 10000): Promise<number> {
     const cutoff = Date.now() - 3600000; // 1 hour
-    const result = this.db.prepare('DELETE FROM rate_limit_events WHERE rowid IN (SELECT rowid FROM rate_limit_events WHERE created_at < ? LIMIT ?)').run(cutoff, batchSize);
+    const result = await this.driver.run(
+      'DELETE FROM rate_limit_events WHERE rowid IN (SELECT rowid FROM rate_limit_events WHERE created_at < ? LIMIT ?)',
+      [cutoff, batchSize],
+    );
     return result.changes;
   }
 
   // ─── Audit Log Operations ─────────────────────────────────
 
-  recordAudit(
+  async recordAudit(
     orgId: string,
     botId: string | null,
     action: AuditAction,
     targetType: string,
     targetId: string,
     detail?: Record<string, unknown>,
-  ): void {
+  ): Promise<void> {
     const id = crypto.randomUUID();
     const now = Date.now();
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO audit_log (id, org_id, bot_id, action, target_type, target_id, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, orgId, botId, action, targetType, targetId, detail ? JSON.stringify(detail) : null, now);
+    `, [id, orgId, botId, action, targetType, targetId, detail ? JSON.stringify(detail) : null, now]);
   }
 
-  getAuditLog(orgId: string, filters?: {
+  async getAuditLog(orgId: string, filters?: {
     since?: number;
     action?: string;
     target_type?: string;
     target_id?: string;
     bot_id?: string;
     limit?: number;
-  }): AuditEntry[] {
+  }): Promise<AuditEntry[]> {
     const where: string[] = ['org_id = ?'];
     const params: any[] = [orgId];
 
@@ -2486,12 +2508,12 @@ export class HubDB {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 200);
     params.push(limit);
 
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<any>(`
       SELECT * FROM audit_log
       WHERE ${where.join(' AND ')}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(...params) as any[];
+    `, params);
 
     return rows.map(row => ({
       id: row.id,
@@ -2505,31 +2527,34 @@ export class HubDB {
     }));
   }
 
-  cleanupOldAuditLog(maxAgeDays: number, batchSize = 5000): number {
+  async cleanupOldAuditLog(maxAgeDays: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-    const result = this.db.prepare('DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE created_at < ? LIMIT ?)').run(cutoff, batchSize);
+    const result = await this.driver.run(
+      'DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE created_at < ? LIMIT ?)',
+      [cutoff, batchSize],
+    );
     return result.changes;
   }
 
   // ─── TTL / Lifecycle Cleanup Operations ────────────────────
 
-  cleanupExpiredMessages(orgId: string, ttlDays: number, batchSize = 5000): number {
+  async cleanupExpiredMessages(orgId: string, ttlDays: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
     let total = 0;
 
     // Delete channel messages older than TTL (batched)
-    const r1 = this.db.prepare(`
+    const r1 = await this.driver.run(`
       DELETE FROM messages WHERE rowid IN (
         SELECT messages.rowid FROM messages
         JOIN channels ON channels.id = messages.channel_id
         WHERE channels.org_id = ? AND messages.created_at < ?
         LIMIT ?
       )
-    `).run(orgId, cutoff, batchSize);
+    `, [orgId, cutoff, batchSize]);
     total += r1.changes;
 
     // Delete thread messages older than TTL (only in resolved/closed threads, batched)
-    const r2 = this.db.prepare(`
+    const r2 = await this.driver.run(`
       DELETE FROM thread_messages WHERE rowid IN (
         SELECT thread_messages.rowid FROM thread_messages
         JOIN threads ON threads.id = thread_messages.thread_id
@@ -2537,29 +2562,29 @@ export class HubDB {
         AND thread_messages.created_at < ?
         LIMIT ?
       )
-    `).run(orgId, cutoff, batchSize);
+    `, [orgId, cutoff, batchSize]);
     total += r2.changes;
 
     return total;
   }
 
-  autoCloseInactiveThreads(orgId: string, days: number, batchSize = 1000): number {
+  async autoCloseInactiveThreads(orgId: string, days: number, batchSize = 1000): Promise<number> {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const now = Date.now();
-    const r = this.db.prepare(`
+    const r = await this.driver.run(`
       UPDATE threads SET status = 'closed', close_reason = 'timeout', updated_at = ?, last_activity_at = ?, revision = revision + 1
       WHERE rowid IN (
         SELECT rowid FROM threads
         WHERE org_id = ? AND last_activity_at < ? AND status NOT IN ('resolved', 'closed')
         LIMIT ?
       )
-    `).run(now, now, orgId, cutoff, batchSize);
+    `, [now, now, orgId, cutoff, batchSize]);
     return r.changes;
   }
 
-  cleanupExpiredArtifacts(orgId: string, days: number, batchSize = 5000): number {
+  async cleanupExpiredArtifacts(orgId: string, days: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const r = this.db.prepare(`
+    const r = await this.driver.run(`
       DELETE FROM artifacts WHERE rowid IN (
         SELECT artifacts.rowid FROM artifacts
         JOIN threads ON threads.id = artifacts.thread_id
@@ -2567,66 +2592,61 @@ export class HubDB {
         AND artifacts.created_at < ?
         LIMIT ?
       )
-    `).run(orgId, cutoff, batchSize);
+    `, [orgId, cutoff, batchSize]);
     return r.changes;
   }
 
   /** Repeat a batched cleanup until it returns fewer than batchSize rows. */
-  private drainBatch(fn: (batchSize: number) => number, batchSize: number): number {
+  private async drainBatch(fn: (batchSize: number) => Promise<number>, batchSize: number): Promise<number> {
     let total = 0;
     let deleted: number;
     do {
-      deleted = fn(batchSize);
+      deleted = await fn(batchSize);
       total += deleted;
     } while (deleted >= batchSize);
     return total;
   }
 
-  runLifecycleCleanup(): void {
-    const orgs = this.listOrgs();
+  async runLifecycleCleanup(): Promise<void> {
+    const orgs = await this.listOrgs();
     for (const org of orgs) {
-      const settings = this.getOrgSettings(org.id);
+      const settings = await this.getOrgSettings(org.id);
       const detail: Record<string, number> = {};
 
       if (settings.message_ttl_days !== null && settings.message_ttl_days > 0) {
-        const n = this.drainBatch((bs) => this.cleanupExpiredMessages(org.id, settings.message_ttl_days!, bs), 5000);
+        const n = await this.drainBatch((bs) => this.cleanupExpiredMessages(org.id, settings.message_ttl_days!, bs), 5000);
         if (n > 0) detail.messages_deleted = n;
       }
 
       if (settings.thread_auto_close_days !== null && settings.thread_auto_close_days > 0) {
-        const n = this.drainBatch((bs) => this.autoCloseInactiveThreads(org.id, settings.thread_auto_close_days!, bs), 1000);
+        const n = await this.drainBatch((bs) => this.autoCloseInactiveThreads(org.id, settings.thread_auto_close_days!, bs), 1000);
         if (n > 0) detail.threads_closed = n;
       }
 
       if (settings.artifact_retention_days !== null && settings.artifact_retention_days > 0) {
-        const n = this.drainBatch((bs) => this.cleanupExpiredArtifacts(org.id, settings.artifact_retention_days!, bs), 5000);
+        const n = await this.drainBatch((bs) => this.cleanupExpiredArtifacts(org.id, settings.artifact_retention_days!, bs), 5000);
         if (n > 0) detail.artifacts_deleted = n;
       }
 
       if (Object.keys(detail).length > 0) {
-        this.recordAudit(org.id, null, 'lifecycle.cleanup', 'org', org.id, detail);
+        await this.recordAudit(org.id, null, 'lifecycle.cleanup', 'org', org.id, detail);
       }
     }
 
     // Global cleanups (all batched with drain loops)
-    this.drainBatch((bs) => this.cleanupOldCatchupEvents(30, bs), 5000);
-    this.drainBatch((bs) => this.cleanupOldAuditLog(90, bs), 5000);
-    this.drainBatch((bs) => this.cleanupOldRateLimitEvents(bs), 10000);
-    this.drainBatch((bs) => this.cleanupExpiredTokens(bs), 1000);
-    this.cleanupExpiredOrgTickets();
+    await this.drainBatch((bs) => this.cleanupOldCatchupEvents(30, bs), 5000);
+    await this.drainBatch((bs) => this.cleanupOldAuditLog(90, bs), 5000);
+    await this.drainBatch((bs) => this.cleanupOldRateLimitEvents(bs), 10000);
+    await this.drainBatch((bs) => this.cleanupExpiredTokens(bs), 1000);
+    await this.cleanupExpiredOrgTickets();
   }
 
   /** O1: Lightweight DB health check */
-  isHealthy(): boolean {
-    try {
-      this.db.prepare('SELECT 1').get();
-      return true;
-    } catch {
-      return false;
-    }
+  async isHealthy(): Promise<boolean> {
+    return await this.driver.isHealthy();
   }
 
-  close() {
-    this.db.close();
+  async close(): Promise<void> {
+    await this.driver.close();
   }
 }

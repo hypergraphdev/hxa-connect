@@ -111,7 +111,7 @@ export class WebhookManager {
     payload: unknown,
   ): Promise<boolean> {
     // Check if degraded — skip delivery
-    if (this.db.isWebhookDegraded(botId)) {
+    if (await this.db.isWebhookDegraded(botId)) {
       return false;
     }
 
@@ -166,7 +166,7 @@ export class WebhookManager {
         });
 
         if (res.ok || (res.status >= 200 && res.status < 300)) {
-          this.db.recordWebhookSuccess(botId);
+          await this.db.recordWebhookSuccess(botId);
           return true;
         }
 
@@ -177,7 +177,7 @@ export class WebhookManager {
     }
 
     // All retries failed
-    this.db.recordWebhookFailure(botId);
+    await this.db.recordWebhookFailure(botId);
     webhookLogger.error({ botId }, 'Webhook delivery failed after all retries');
     return false;
   }

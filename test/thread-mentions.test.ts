@@ -20,7 +20,7 @@ describe('Thread Mentions', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
 
     const r1 = await env.registerBot(org.org_secret, 'alice');
     const r2 = await env.registerBot(org.org_secret, 'bob');
@@ -167,7 +167,7 @@ describe('Thread Mentions', () => {
 
   it('old messages without mentions serialize as empty', async () => {
     // Insert a message directly via DB (simulating pre-migration message)
-    const msg = env.db.createThreadMessage(threadId, bot1Id, 'legacy message', 'text');
+    const msg = await env.db.createThreadMessage(threadId, bot1Id, 'legacy message', 'text');
     expect(msg.mentions).toBeNull();
     expect(msg.mention_all).toBe(0);
 

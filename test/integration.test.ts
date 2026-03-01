@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import path from 'node:path';
 import { createTestEnv, api, type TestEnv } from './helpers.js';
 import { HubDB } from '../src/db.js';
+import { SqliteDriver } from '../src/db/index.js';
 import { verifyWebhookSignature } from '../src/webhook.js';
 import crypto from 'node:crypto';
 
@@ -17,7 +19,7 @@ describe('Thread State Machine', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgKey = org.org_secret;
     const { token } = await env.registerBot(orgKey, 'sm-bot');
     botToken = token;
@@ -140,7 +142,7 @@ describe('Auth Types', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgSecret = org.org_secret;
     const { bot, token } = await env.registerBot(orgSecret, 'auth-bot');
     botToken = token;
@@ -265,11 +267,11 @@ describe('Rate Limiting', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgKey = org.org_secret;
 
     // Set very low rate limits for testing
-    env.db.updateOrgSettings(org.id, {
+    await env.db.updateOrgSettings(org.id, {
       messages_per_minute_per_bot: 3,
       threads_per_hour_per_bot: 2,
     });
@@ -414,7 +416,7 @@ describe('Catchup Events', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgKey = org.org_secret;
     const a1 = await env.registerBot(orgKey, 'catchup-bot-1');
     const a2 = await env.registerBot(orgKey, 'catchup-bot-2');
@@ -526,30 +528,32 @@ describe('Migration & Schema', () => {
 
   afterAll(() => env.cleanup());
 
-  it('creates schema_versions table on startup', () => {
-    const row = env.db['db'].prepare(
+  it('creates schema_versions table on startup', async () => {
+    const row = await env.db['driver'].get<any>(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='schema_versions'`
-    ).get() as any;
+    );
     expect(row).toBeTruthy();
     expect(row.name).toBe('schema_versions');
   });
 
-  it('schema_versions tracks applied migrations on fresh install', () => {
-    const rows = env.db['db'].prepare(`SELECT name FROM schema_versions ORDER BY name`).all() as any[];
+  it('schema_versions tracks applied migrations on fresh install', async () => {
+    const rows = await env.db['driver'].all<any>(`SELECT name FROM schema_versions ORDER BY name`);
     expect(rows.map((r: any) => r.name)).toContain('thread_messages_mentions');
   });
 
-  it('migration is idempotent (creating second HubDB on same dir succeeds)', () => {
+  it('migration is idempotent (creating second HubDB on same dir succeeds)', async () => {
     // Creating a new HubDB instance on the same data_dir should not throw
-    const db2 = new HubDB(env.config);
+    const driver2 = new SqliteDriver(path.join(env.dataDir, 'hxa-connect.db'));
+    const db2 = new HubDB(driver2);
+    await db2.init();
     expect(db2).toBeTruthy();
-    db2.close();
+    await db2.close();
   });
 
-  it('all expected tables exist', () => {
-    const tables = env.db['db'].prepare(
+  it('all expected tables exist', async () => {
+    const tables = await env.db['driver'].all<any>(
       `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`
-    ).all() as any[];
+    );
     const tableNames = tables.map((t: any) => t.name);
 
     // Core tables
@@ -577,7 +581,7 @@ describe('Optimistic Concurrency (If-Match)', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgKey = org.org_secret;
     const a1 = await env.registerBot(orgKey, 'occ-bot-1');
     const a2 = await env.registerBot(orgKey, 'occ-bot-2');
@@ -691,7 +695,7 @@ describe('Terminal State Protection', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgKey = org.org_secret;
     const a1 = await env.registerBot(orgKey, 'term-bot-1');
     const a2 = await env.registerBot(orgKey, 'term-bot-2');
@@ -867,7 +871,7 @@ describe('Phase 2: Auth Login', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('login-org');
+    const org = await env.createOrg('login-org');
     orgId = org.id;
     orgSecret = org.org_secret;
   });
@@ -931,7 +935,7 @@ describe('Phase 2: Ticket-Based Registration', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('ticket-reg-org');
+    const org = await env.createOrg('ticket-reg-org');
     orgId = org.id;
     orgSecret = org.org_secret;
   });
@@ -1011,7 +1015,7 @@ describe('Phase 2: Ticket-Based Registration', () => {
   });
 
   it('rejects ticket from wrong org', async () => {
-    const otherOrg = env.createOrg('other-org');
+    const otherOrg = await env.createOrg('other-org');
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
       body: { org_id: otherOrg.id, org_secret: otherOrg.org_secret },
     });
@@ -1049,7 +1053,7 @@ describe('Phase 2: toAgentResponse includes auth_role', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token } = await env.registerBot(org.org_secret, 'role-bot');
     botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);
@@ -1081,7 +1085,7 @@ describe('Phase 2: Role Enforcement & Management', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('role-org');
+    const org = await env.createOrg('role-org');
     orgId = org.id;
     orgSecret = org.org_secret;
 
@@ -1181,7 +1185,7 @@ describe('Phase 2: Org Secret Rotation', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('rotate-org');
+    const org = await env.createOrg('rotate-org');
     orgId = org.id;
     orgSecret = org.org_secret;
 
@@ -1270,7 +1274,7 @@ describe('Phase 3: X-Org-Id Header Validation', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgId = org.id;
     const { token } = await env.registerBot(org.org_secret, 'org-header-bot');
     botToken = token;
@@ -1342,7 +1346,7 @@ describe('Phase 3: WS Ticket Org Binding', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     orgId = org.id;
     const { token } = await env.registerBot(org.org_secret, 'ws-org-bot');
     botToken = token;
@@ -1410,7 +1414,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
   it('GET /api/orgs includes status and bot_count', async () => {
     // Create an org with a bot so we can verify bot_count
-    const org = env.createOrg('list-test-org');
+    const org = await env.createOrg('list-test-org');
     await env.registerBot(org.org_secret, 'list-bot');
 
     const { status, body } = await api(env.baseUrl, 'GET', '/api/orgs', {
@@ -1427,7 +1431,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('PATCH /api/orgs/:id can update name', async () => {
-    const org = env.createOrg('rename-me');
+    const org = await env.createOrg('rename-me');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
       token: ADMIN_SECRET,
@@ -1439,7 +1443,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('PATCH /api/orgs/:id can suspend org', async () => {
-    const org = env.createOrg('suspend-me');
+    const org = await env.createOrg('suspend-me');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
       token: ADMIN_SECRET,
@@ -1450,7 +1454,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('PATCH /api/orgs/:id can reactivate suspended org', async () => {
-    const org = env.createOrg('reactivate-me');
+    const org = await env.createOrg('reactivate-me');
 
     // Suspend
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
@@ -1468,7 +1472,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('PATCH /api/orgs/:id rejects setting status to destroyed', async () => {
-    const org = env.createOrg('no-destroy-patch');
+    const org = await env.createOrg('no-destroy-patch');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
       token: ADMIN_SECRET,
@@ -1479,7 +1483,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('PATCH /api/orgs/:id rejects modifying destroyed org', async () => {
-    const org = env.createOrg('destroy-then-patch');
+    const org = await env.createOrg('destroy-then-patch');
 
     // Destroy via DELETE
     await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
@@ -1503,7 +1507,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('DELETE /api/orgs/:id destroys org', async () => {
-    const org = env.createOrg('destroy-me');
+    const org = await env.createOrg('destroy-me');
 
     const { status } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
       token: ADMIN_SECRET,
@@ -1527,7 +1531,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('suspended org rejects authenticated API calls', async () => {
-    const org = env.createOrg('suspend-api-test');
+    const org = await env.createOrg('suspend-api-test');
     const { token: botToken } = await env.registerBot(org.org_secret, 'test-bot');
 
     // Verify bot can make API calls initially
@@ -1551,7 +1555,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('reactivated org allows API calls again', async () => {
-    const org = env.createOrg('reactivate-api-test');
+    const org = await env.createOrg('reactivate-api-test');
     const { token: botToken } = await env.registerBot(org.org_secret, 'test-bot');
 
     // Suspend
@@ -1580,7 +1584,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('suspended org invalidates org tickets', async () => {
-    const org = env.createOrg('suspend-ticket-test');
+    const org = await env.createOrg('suspend-ticket-test');
     const orgTicket = await env.loginAsOrg(org.org_secret);
 
     // Verify ticket works initially
@@ -1604,7 +1608,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('suspension invalidates outstanding org tickets', async () => {
-    const org = env.createOrg('suspend-tickets-test');
+    const org = await env.createOrg('suspend-tickets-test');
 
     // Login to get a ticket
     const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
@@ -1627,7 +1631,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
   });
 
   it('destroy cascades to bots and channels', async () => {
-    const org = env.createOrg('cascade-test');
+    const org = await env.createOrg('cascade-test');
     const { token: botToken } = await env.registerBot(org.org_secret, 'cascade-bot');
 
     // Verify bot exists
@@ -1662,7 +1666,7 @@ describe('Phase 5: GET /api/org', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg('org-info-test');
+    const org = await env.createOrg('org-info-test');
     orgId = org.id;
     const { token } = await env.registerBot(org.org_secret, 'info-bot');
     botToken = token;
@@ -1702,7 +1706,7 @@ describe('Phase 5: Agents Pagination', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     // Register 5 bots
     for (let i = 0; i < 5; i++) {
       await env.registerBot(org.org_secret, `page-bot-${i}`);
@@ -1756,7 +1760,7 @@ describe('Phase 5: Threads Pagination', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token } = await env.registerBot(org.org_secret, 'thread-page-bot');
     botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);
@@ -1806,7 +1810,7 @@ describe('Phase 5: Channel Messages Pagination', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token: t1 } = await env.registerBot(org.org_secret, 'msg-bot-1');
     await env.registerBot(org.org_secret, 'msg-bot-2');
     botToken1 = t1;
@@ -1858,7 +1862,7 @@ describe('Phase 5: Thread Messages Pagination', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    const org = env.createOrg();
+    const org = await env.createOrg();
     const { token } = await env.registerBot(org.org_secret, 'tmsg-bot');
     botToken = token;
     orgTicket = await env.loginAsOrg(org.org_secret);

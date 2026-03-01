@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request, type Response, type NextFunction } from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -10,7 +10,29 @@ import { authMiddleware, requireBot, requireOrg, requireScope, requireAuthRole }
 import { validateWebhookUrl } from './webhook.js';
 import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
-// routeLogger available for future use: import { routeLogger } from './logger.js';
+import { routeLogger } from './logger.js';
+
+/**
+ * Express 4 does not forward rejected promises from async route handlers to
+ * error middleware — unhandled rejections can crash the process or hang requests.
+ * This utility wraps a Router so that any async handler registered via
+ * .get/.post/.patch/.delete/.use/.all is automatically caught and forwarded to next(err).
+ */
+function wrapAsyncRouter(router: Router): Router {
+  const methods = ['get', 'post', 'put', 'patch', 'delete', 'use', 'all'] as const;
+  for (const method of methods) {
+    const original = (router as any)[method].bind(router);
+    (router as any)[method] = function (...args: any[]) {
+      const wrapped = args.map((arg: any) =>
+        typeof arg === 'function' && arg.constructor.name === 'AsyncFunction'
+          ? (req: Request, res: Response, next: NextFunction) => { arg(req, res, next).catch(next); }
+          : arg,
+      );
+      return original(...wrapped);
+    };
+  }
+  return router;
+}
 
 // S6: Per-field size limits (bytes)
 const FIELD_LIMITS = {
@@ -142,17 +164,16 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
 const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
 const MAX_MENTIONS = 20;
 
-function parseMentions(
+async function parseMentions(
   content: string,
   participants: Array<{ bot_id: string }>,
-  getBotById: (id: string) => Bot | undefined,
-): { mentions: MentionRef[] | null; mentionAll: boolean } {
+  getBotById: (id: string) => Promise<Bot | undefined>,
+): Promise<{ mentions: MentionRef[] | null; mentionAll: boolean }> {
   const seen = new Set<string>();
   const mentions: MentionRef[] = [];
   let mentionAll = false;
 
-  const participantBots = participants
-    .map(p => getBotById(p.bot_id))
+  const participantBots = (await Promise.all(participants.map(p => getBotById(p.bot_id))))
     .filter((b): b is Bot => !!b);
 
   let match;
@@ -195,7 +216,7 @@ const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code'
 const ARTIFACT_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
 
 export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
-  const router = Router();
+  const router = wrapAsyncRouter(Router());
 
   // ─── Public: Setup ────────────────────────────────────────
 
@@ -233,9 +254,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     return false;
   }
 
-  function checkMessageRateLimit(req: import('express').Request, res: import('express').Response): boolean {
+  async function checkMessageRateLimit(req: import('express').Request, res: import('express').Response): Promise<boolean> {
     if (!req.bot) return true; // org-level requests don't have per-bot rate limits
-    const result = db.checkAndRecordRateLimit(req.bot.org_id, req.bot.id, 'message');
+    const result = await db.checkAndRecordRateLimit(req.bot.org_id, req.bot.id, 'message');
     if (!result.allowed) {
       res.status(429).set('Retry-After', String(result.retryAfter)).json({
         error: 'Rate limit exceeded: messages per minute',
@@ -247,9 +268,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     return true;
   }
 
-  function checkThreadRateLimit(req: import('express').Request, res: import('express').Response): boolean {
+  async function checkThreadRateLimit(req: import('express').Request, res: import('express').Response): Promise<boolean> {
     if (!req.bot) return true;
-    const result = db.checkAndRecordRateLimit(req.bot.org_id, req.bot.id, 'thread');
+    const result = await db.checkAndRecordRateLimit(req.bot.org_id, req.bot.id, 'thread');
     if (!result.allowed) {
       res.status(429).set('Retry-After', String(result.retryAfter)).json({
         error: 'Rate limit exceeded: threads per hour',
@@ -261,24 +282,24 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     return true;
   }
 
-  function resolveBot(orgId: string, idOrName: unknown): Bot | undefined {
+  async function resolveBot(orgId: string, idOrName: unknown): Promise<Bot | undefined> {
     if (typeof idOrName !== 'string') return undefined;
     // Check ID first, but only accept if it belongs to this org
-    const byId = db.getBotById(idOrName);
+    const byId = await db.getBotById(idOrName);
     if (byId && byId.org_id === orgId) return byId;
     // Fall back to name lookup within the org
-    const byName = db.getBotByName(orgId, idOrName);
+    const byName = await db.getBotByName(orgId, idOrName);
     if (byName) return byName;
     return undefined;
   }
 
-  function requireThreadParticipant(
+  async function requireThreadParticipant(
     req: import('express').Request,
     res: import('express').Response,
     threadId: string,
     opts?: { rejectTerminal?: boolean },
-  ): Thread | undefined {
-    const thread = db.getThread(threadId);
+  ): Promise<Thread | undefined> {
+    const thread = await db.getThread(threadId);
     if (!thread) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return undefined;
@@ -298,7 +319,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return undefined;
     }
 
-    if (!req.bot || !db.isParticipant(thread.id, req.bot.id)) {
+    if (!req.bot || !await db.isParticipant(thread.id, req.bot.id)) {
       res.status(403).json({ error: 'Not a participant of this thread', code: 'JOIN_REQUIRED', hint: `Call POST /api/threads/${thread.id}/join to join this thread first` });
       return undefined;
     }
@@ -323,14 +344,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * mode is a post-GA feature. The field is accepted for forward compatibility
    * but toggling it to false has no effect on message storage yet.
    */
-  router.post('/api/orgs', (req, res) => {
+  router.post('/api/orgs', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const { name, persist_messages } = req.body;
     if (!name) {
       res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
       return;
     }
-    const org = db.createOrg(name, persist_messages ?? config.default_persist);
+    const org = await db.createOrg(name, persist_messages ?? config.default_persist);
     // Return full org including org_secret for super admin
     res.json(org);
   });
@@ -339,12 +360,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/orgs — List all orgs
    * Auth: Admin secret (if HXA_CONNECT_ADMIN_SECRET is set)
    */
-  router.get('/api/orgs', (req, res) => {
+  router.get('/api/orgs', async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const orgs = db.listOrgs().map(({ org_secret, ...safe }) => ({
-      ...safe,
-      bot_count: db.listBots(safe.id).length,
-    }));
+    const allOrgs = await db.listOrgs();
+    const orgs = [];
+    for (const { org_secret, ...safe } of allOrgs) {
+      const bots = await db.listBots(safe.id);
+      orgs.push({ ...safe, bot_count: bots.length });
+    }
     res.json(orgs);
   });
 
@@ -353,10 +376,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
    * Body: { name?: string, status?: 'active' | 'suspended' }
    */
-  router.patch('/api/orgs/:org_id', (req, res) => {
+  router.patch('/api/orgs/:org_id', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
-    const org = db.getOrgById(req.params.org_id);
+    const org = await db.getOrgById(req.params.org_id);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -381,22 +404,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Apply mutations after all validation passes
     if (status !== undefined && status !== org.status) {
-      db.updateOrgStatus(org.id, status);
+      await db.updateOrgStatus(org.id, status);
 
       if (status === 'suspended') {
         // Invalidate all outstanding org tickets
-        db.invalidateOrgTickets(org.id);
+        await db.invalidateOrgTickets(org.id);
         // Disconnect all WS clients
         ws.disconnectOrg(org.id, 4100, 'Organization suspended');
       }
     }
 
     if (name !== undefined) {
-      db.updateOrgName(org.id, name);
+      await db.updateOrgName(org.id, name);
     }
 
     // Re-fetch to return current state
-    const updated = db.getOrgById(org.id)!;
+    const updated = (await db.getOrgById(org.id))!;
     res.json({ id: updated.id, name: updated.name, status: updated.status });
   });
 
@@ -405,10 +428,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
    * Response: 204 No Content
    */
-  router.delete('/api/orgs/:org_id', (req, res) => {
+  router.delete('/api/orgs/:org_id', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
-    const org = db.getOrgById(req.params.org_id);
+    const org = await db.getOrgById(req.params.org_id);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -418,7 +441,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     ws.disconnectOrg(org.id, 4101, 'Organization destroyed');
 
     // Destroy org (sets status, then deletes — CASCADE handles related data)
-    db.destroyOrg(org.id);
+    await db.destroyOrg(org.id);
 
     res.status(204).end();
   });
@@ -428,10 +451,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
    * Returns: { org_secret }
    */
-  router.post('/api/orgs/:org_id/rotate-secret', (req, res) => {
+  router.post('/api/orgs/:org_id/rotate-secret', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
-    const org = db.getOrgById(req.params.org_id);
+    const org = await db.getOrgById(req.params.org_id);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -444,8 +467,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const newSecret = crypto.randomBytes(24).toString('hex');
     const newSecretHash = HubDB.hashToken(newSecret);
-    db.rotateOrgSecret(org.id, newSecretHash);
-    db.invalidateOrgTickets(org.id);
+    await db.rotateOrgSecret(org.id, newSecretHash);
+    await db.invalidateOrgTickets(org.id);
 
     res.json({ org_secret: newSecret });
   });
@@ -458,7 +481,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { label?, max_uses?, expires_in? }
    * Returns: { id, code, label, max_uses, use_count, expires_at, created_at }
    */
-  router.post('/api/platform/invite-codes', (req, res) => {
+  router.post('/api/platform/invite-codes', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { label, max_uses, expires_in } = req.body;
@@ -484,7 +507,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const plaintextCode = crypto.randomBytes(24).toString('hex');
     const codeHash = HubDB.hashToken(plaintextCode);
 
-    const inviteCode = db.createInviteCode(codeHash, {
+    const inviteCode = await db.createInviteCode(codeHash, {
       label: label ?? undefined,
       maxUses: max_uses ?? 0,
       expiresAt,
@@ -506,10 +529,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/platform/invite-codes — List all invite codes
    * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
    */
-  router.get('/api/platform/invite-codes', (req, res) => {
+  router.get('/api/platform/invite-codes', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
-    const codes = db.listInviteCodes().map(c => ({
+    const codes = (await db.listInviteCodes()).map(c => ({
       id: c.id,
       label: c.label,
       max_uses: c.max_uses,
@@ -527,10 +550,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * DELETE /api/platform/invite-codes/:id — Revoke an invite code
    * Auth: Super admin (HXA_CONNECT_ADMIN_SECRET)
    */
-  router.delete('/api/platform/invite-codes/:id', (req, res) => {
+  router.delete('/api/platform/invite-codes/:id', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
-    const deleted = db.deleteInviteCode(req.params.id);
+    const deleted = await db.deleteInviteCode(req.params.id);
     if (!deleted) {
       res.status(404).json({ error: 'Invite code not found', code: 'NOT_FOUND' });
       return;
@@ -545,7 +568,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { invite_code, name }
    * Returns: { org_id, name, org_secret }
    */
-  router.post('/api/platform/orgs', (req, res) => {
+  router.post('/api/platform/orgs', async (req, res) => {
     const { invite_code, name } = req.body;
 
     if (!invite_code || typeof invite_code !== 'string') {
@@ -562,7 +585,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const codeHash = HubDB.hashToken(invite_code);
-    const result = db.createOrgWithInviteCode(codeHash, name, config.default_persist);
+    const result = await db.createOrgWithInviteCode(codeHash, name, config.default_persist);
     if ('error' in result) {
       res.status(401).json({ error: result.error, code: 'INVALID_INVITE_CODE' });
       return;
@@ -680,7 +703,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { org_id, org_secret, reusable?, expires_in? }
    * Returns: { ticket, expires_at, reusable, org: { id, name } }
    */
-  router.post('/api/auth/login', (req, res) => {
+  router.post('/api/auth/login', async (req, res) => {
     const { org_id, org_secret, reusable, expires_in } = req.body;
 
     // Validate required fields
@@ -694,14 +717,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Look up org
-    const org = db.getOrgById(org_id);
+    const org = await db.getOrgById(org_id);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
     }
 
     // Verify org_secret
-    if (!db.verifyOrgSecret(org.id, org_secret)) {
+    if (!await db.verifyOrgSecret(org.id, org_secret)) {
       res.status(401).json({ error: 'Invalid org secret', code: 'INVALID_SECRET' });
       return;
     }
@@ -721,7 +744,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const secretHash = HubDB.hashToken(org_secret);
 
     const isReusable = reusable === true;
-    const ticket = db.createOrgTicket(org.id, secretHash, {
+    const ticket = await db.createOrgTicket(org.id, secretHash, {
       reusable: isReusable,
       expiresAt,
       createdBy: 'login',
@@ -758,7 +781,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!validated) return; // response already sent
 
     // Get and validate the ticket
-    const ticket = db.getOrgTicket(ticketId);
+    const ticket = await db.getOrgTicket(ticketId);
     if (!ticket) {
       res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
       return;
@@ -784,7 +807,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Redeem the ticket (atomic consume for one-time tickets)
     if (!ticket.reusable) {
-      const redeemed = db.redeemOrgTicket(ticketId);
+      const redeemed = await db.redeemOrgTicket(ticketId);
       if (!redeemed) {
         res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
         return;
@@ -792,7 +815,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Get org and check status
-    const org = db.getOrgById(org_id);
+    const org = await db.getOrgById(org_id);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -804,7 +827,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Register the bot (always as member — org admin promotes via Web UI)
-    const { bot, created, plaintextToken } = db.registerBot(
+    const { bot, created, plaintextToken } = await db.registerBot(
       org_id,
       validated.name,
       validated.metadata,
@@ -814,7 +837,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     );
 
     // Audit
-    db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, { name: bot.name, reregister: !created, via: 'ticket' });
+    await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, { name: bot.name, reregister: !created, via: 'ticket' });
 
     const response: Record<string, unknown> = {
       bot_id: bot.id,
@@ -829,17 +852,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   // ─── Authenticated Routes ─────────────────────────────────
 
-  const auth = Router();
+  const auth = wrapAsyncRouter(Router());
   auth.use(authMiddleware(db));
 
   /**
    * GET /api/org — Get current org info
    * Auth: Bot token or org ticket
    */
-  auth.get('/api/org', (req, res) => {
+  auth.get('/api/org', async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
-    const org = db.getOrgById(orgId);
+    const org = await db.getOrgById(orgId);
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -851,10 +874,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/bots/:id — Get a single bot by ID
    * Auth: Org ticket or bot token (same org)
    */
-  auth.get('/api/bots/:id', requireScope('read'), (req, res) => {
+  auth.get('/api/bots/:id', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
-    const bot = db.getBotById(req.params.id as string);
+    const bot = await db.getBotById(req.params.id as string);
     if (!bot || bot.org_id !== orgId) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
@@ -866,20 +889,20 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * DELETE /api/bots/:id — Remove a bot (org admin only)
    * Auth: Org ticket or admin bot token
    */
-  auth.delete('/api/bots/:id', (req, res) => {
+  auth.delete('/api/bots/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
     const orgId = req.org?.id || req.bot?.org_id;
-    const bot = db.getBotById(req.params.id as string);
+    const bot = await db.getBotById(req.params.id as string);
     if (!bot || bot.org_id !== orgId) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
-    db.deleteBot(bot.id);
+    await db.deleteBot(bot.id);
 
     // Audit
-    db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name });
+    await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name });
 
     // Broadcast bot offline
     ws.broadcastToOrg(bot.org_id, {
@@ -894,12 +917,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * DELETE /api/me — Deregister self (bot unregisters itself)
    * Auth: Bot token
    */
-  auth.delete('/api/me', requireBot, requireScope('full'), (req, res) => {
+  auth.delete('/api/me', requireBot, requireScope('full'), async (req, res) => {
     const bot = req.bot!;
-    db.deleteBot(bot.id);
+    await db.deleteBot(bot.id);
 
     // Audit
-    db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });
+    await db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });
 
     // Broadcast bot offline
     ws.broadcastToOrg(bot.org_id, {
@@ -913,7 +936,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/me — Get current bot info
    */
-  auth.get('/api/me', requireBot, requireScope('read'), (req, res) => {
+  auth.get('/api/me', requireBot, requireScope('read'), async (req, res) => {
     const a = req.bot!;
     res.json(toBotResponse(a));
   });
@@ -921,7 +944,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * PATCH /api/me/profile — Update current bot profile fields
    */
-  auth.patch('/api/me/profile', requireBot, requireScope('profile'), (req, res) => {
+  auth.patch('/api/me/profile', requireBot, requireScope('profile'), async (req, res) => {
     const {
       bio,
       role,
@@ -983,7 +1006,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const updated = db.updateProfile(req.bot!.id, fields);
+    const updated = await db.updateProfile(req.bot!.id, fields);
     if (!updated) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
@@ -991,7 +1014,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // Audit
     const changedFields = Object.keys(fields).filter(k => (fields as any)[k] !== undefined);
-    db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.profile_update', 'bot', req.bot!.id, { fields: changedFields });
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.profile_update', 'bot', req.bot!.id, { fields: changedFields });
 
     req.bot = updated;
     res.json(toBotResponse(updated));
@@ -1000,7 +1023,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * PATCH /api/me/name — Rename current bot
    */
-  auth.patch('/api/me/name', requireBot, requireScope('profile'), (req, res) => {
+  auth.patch('/api/me/name', requireBot, requireScope('profile'), async (req, res) => {
     const { name } = req.body;
 
     if (!name) {
@@ -1025,7 +1048,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const old_name = req.bot!.name;
-    const result = db.renameBot(req.bot!.id, name);
+    const result = await db.renameBot(req.bot!.id, name);
 
     if (result.conflict) {
       res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
@@ -1033,7 +1056,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Audit
-    db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.rename', 'bot', req.bot!.id, { old_name, new_name: name });
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.rename', 'bot', req.bot!.id, { old_name, new_name: name });
 
     // Broadcast to org
     ws.broadcastToOrg(req.bot!.org_id, {
@@ -1050,8 +1073,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/peers — List other bots in my org (from bot perspective)
    */
-  auth.get('/api/peers', requireBot, requireScope('read'), (req, res) => {
-    const bots = db.listBots(req.bot!.org_id);
+  auth.get('/api/peers', requireBot, requireScope('read'), async (req, res) => {
+    const bots = await db.listBots(req.bot!.org_id);
     res.json(bots
       .filter(a => a.id !== req.bot!.id)
       .map(a => toBotResponse(a))
@@ -1064,7 +1087,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/me/tokens — Create a scoped token
    * Body: { scopes: TokenScope[], label?, expires_in?: number (ms) }
    */
-  auth.post('/api/me/tokens', requireBot, requireScope('full'), (req, res) => {
+  auth.post('/api/me/tokens', requireBot, requireScope('full'), async (req, res) => {
     const { scopes, label, expires_in } = req.body;
     if (!Array.isArray(scopes) || scopes.length === 0) {
       res.status(400).json({ error: 'scopes must be a non-empty array' });
@@ -1085,9 +1108,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
     const expiresAt = expires_in ? Date.now() + expires_in : null;
-    const token = db.createBotToken(req.bot!.id, scopes as TokenScope[], label, expiresAt);
+    const token = await db.createBotToken(req.bot!.id, scopes as TokenScope[], label, expiresAt);
 
-    db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.token_create', 'token', token.id, {
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.token_create', 'token', token.id, {
       scopes,
       label: label ?? null,
       expires_at: expiresAt,
@@ -1107,8 +1130,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/me/tokens — List my scoped tokens
    */
-  auth.get('/api/me/tokens', requireBot, requireScope('full'), (req, res) => {
-    const tokens = db.listBotTokens(req.bot!.id);
+  auth.get('/api/me/tokens', requireBot, requireScope('full'), async (req, res) => {
+    const tokens = await db.listBotTokens(req.bot!.id);
     res.json(tokens.map(t => ({
       id: t.id,
       scopes: t.scopes,
@@ -1123,13 +1146,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * DELETE /api/me/tokens/:id — Revoke a scoped token
    */
-  auth.delete('/api/me/tokens/:id', requireBot, requireScope('full'), (req, res) => {
-    const deleted = db.revokeBotToken(req.params.id as string, req.bot!.id);
+  auth.delete('/api/me/tokens/:id', requireBot, requireScope('full'), async (req, res) => {
+    const deleted = await db.revokeBotToken(req.params.id as string, req.bot!.id);
     if (!deleted) {
       res.status(404).json({ error: 'Token not found', code: 'NOT_FOUND' });
       return;
     }
-    db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.token_revoke', 'token', req.params.id as string);
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.token_revoke', 'token', req.params.id as string);
     res.json({ ok: true });
   });
 
@@ -1145,7 +1168,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    *   Query: role?, tag?, status?, q?
    *   Returns: Bot[]
    */
-  auth.get('/api/bots', requireScope('read'), (req, res) => {
+  auth.get('/api/bots', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
@@ -1157,13 +1180,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
       // When no pagination params and no search, fall back to unpaginated behavior
       if (!cursor && !limitParam && !search) {
-        const bots = db.listBots(req.org!.id);
+        const bots = await db.listBots(req.org!.id);
         res.json(bots.map(a => toBotResponse(a)));
         return;
       }
 
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-      const rows = db.listBotsPaginated(req.org!.id, cursor, limit, search);
+      const rows = await db.listBotsPaginated(req.org!.id, cursor, limit, search);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
       const response: Record<string, unknown> = {
@@ -1183,7 +1206,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const status = getQueryString(req.query.status);
     const q = getQueryString(req.query.q);
 
-    const bots = db.listBots(orgId, { role, tag, status, q });
+    const bots = await db.listBots(orgId, { role, tag, status, q });
     res.json(bots.map(bot => toBotResponse(bot)));
   });
 
@@ -1192,17 +1215,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: bot token or org API key
    * Org-scoped: only check bots in the same org
    */
-  auth.get('/api/bots/:name/webhook/health', requireScope('read'), (req, res) => {
+  auth.get('/api/bots/:name/webhook/health', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    const bot = db.getBotByName(orgId, req.params.name as string);
+    const bot = await db.getBotByName(orgId, req.params.name as string);
     if (!bot) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
 
-    const health = db.getWebhookHealth(bot.id);
+    const health = await db.getWebhookHealth(bot.id);
     if (!health) {
       // No webhook activity recorded yet
       res.json({
@@ -1222,11 +1245,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/bots/:name/profile — Get full profile by bot name
    * Auth: org API key or bot token
    */
-  auth.get('/api/bots/:name/profile', requireScope('read'), (req, res) => {
+  auth.get('/api/bots/:name/profile', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    const bot = db.getBotByName(orgId, req.params.name as string);
+    const bot = await db.getBotByName(orgId, req.params.name as string);
     if (!bot) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
@@ -1240,8 +1263,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/channels/:id — Get channel details
    */
-  auth.get('/api/channels/:id', requireScope('read'), (req, res) => {
-    const channel = db.getChannel(req.params.id as string);
+  auth.get('/api/channels/:id', requireScope('read'), async (req, res) => {
+    const channel = await db.getChannel(req.params.id as string);
     if (!channel) {
       res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
@@ -1253,7 +1276,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
     // Check access
-    if (req.bot && !db.isChannelMember(channel.id, req.bot.id)) {
+    if (req.bot && !(await db.isChannelMember(channel.id, req.bot.id))) {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
@@ -1262,14 +1285,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const members = db.getChannelMembers(channel.id).map(m => {
-      const bot = db.getBotById(m.bot_id);
+    const members = await Promise.all((await db.getChannelMembers(channel.id)).map(async (m) => {
+      const bot = await db.getBotById(m.bot_id);
       return {
         id: m.bot_id,
         name: bot?.name,
         online: bot?.online,
       };
-    });
+    }));
 
     res.json({ ...channel, members });
   });
@@ -1279,11 +1302,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Bot token (same org) or org ticket/admin bot
    * Returns: [{ id, type, name, created_at, last_activity_at, members }]
    */
-  auth.get('/api/bots/:id/channels', requireScope('read'), (req, res) => {
+  auth.get('/api/bots/:id/channels', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    const targetBot = resolveBot(orgId, req.params.id);
+    const targetBot = await resolveBot(orgId, req.params.id);
     if (!targetBot) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
@@ -1301,7 +1324,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    res.json(db.getChannelsForBot(targetBot.id));
+    res.json(await db.getChannelsForBot(targetBot.id));
   });
 
   // ─── Org Admin Thread Endpoints ──────────────────────────
@@ -1311,7 +1334,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Query: status?, cursor? (thread id), limit? (default 50, max 200), offset? (legacy)
    * Auth: Org ticket or admin bot token
    */
-  auth.get('/api/org/threads', (req, res) => {
+  auth.get('/api/org/threads', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
@@ -1330,7 +1353,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // When cursor is present, or search/limit specified, use paginated behavior
     if (cursor || search || (limitParam && !offsetParam)) {
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-      const rows = db.listThreadsForOrgPaginated(orgId, status, cursor, limit, search);
+      const rows = await db.listThreadsForOrgPaginated(orgId, status, cursor, limit, search);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
       const response: Record<string, unknown> = {
@@ -1347,7 +1370,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Legacy offset-based behavior
     const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
     const offset = Math.max(parseInt(offsetParam || '') || 0, 0);
-    const threads = db.listThreadsForOrg(orgId, status, limit, offset);
+    const threads = await db.listThreadsForOrg(orgId, status, limit, offset);
     res.json(threads);
   });
 
@@ -1355,18 +1378,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/org/threads/:id — Thread detail with participants
    * Auth: Org ticket or admin bot token
    */
-  auth.get('/api/org/threads/:id', (req, res) => {
+  auth.get('/api/org/threads/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
-    const thread = db.getThread(req.params.id as string);
+    const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
-    const participants = db.getParticipants(thread.id).map(p => {
-      const bot = db.getBotById(p.bot_id);
+    const participants = await Promise.all((await db.getParticipants(thread.id)).map(async (p) => {
+      const bot = await db.getBotById(p.bot_id);
       return {
         bot_id: p.bot_id,
         name: bot?.name,
@@ -1374,7 +1397,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         label: p.label,
         joined_at: p.joined_at,
       };
-    });
+    }));
 
     res.setHeader('ETag', `"${thread.revision}"`);
     res.json({ ...thread, participants });
@@ -1387,11 +1410,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * { messages: [...], has_more: boolean } with messages sorted newest first.
    * Auth: Org ticket or admin bot token
    */
-  auth.get('/api/org/threads/:id/messages', (req, res) => {
+  auth.get('/api/org/threads/:id/messages', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
-    const thread = db.getThread(req.params.id as string);
+    const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
@@ -1406,14 +1429,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     if (isBeforeId) {
       // Cursor-based pagination path (newest first)
-      const rows = db.getThreadMessagesPaginated(thread.id, isBeforeId ? beforeStr : undefined, limit);
+      const rows = await db.getThreadMessagesPaginated(thread.id, isBeforeId ? beforeStr : undefined, limit);
       const hasMore = rows.length > limit;
       const messages = hasMore ? rows.slice(0, limit) : rows;
 
-      const enriched = messages.map(m => {
-        const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+      const enriched = await Promise.all(messages.map(async (m) => {
+        const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
         return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
-      });
+      }));
 
       res.json({ messages: enriched, has_more: hasMore });
       return;
@@ -1427,11 +1450,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const messages = db.getThreadMessages(thread.id, limit, before, since);
-    const enriched = messages.map(m => {
-      const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+    const messages = await db.getThreadMessages(thread.id, limit, before, since);
+    const enriched = await Promise.all(messages.map(async (m) => {
+      const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
       return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
-    });
+    }));
 
     res.json(enriched.reverse());
   });
@@ -1441,11 +1464,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Query: cursor? (artifact key), limit? (default 50, max 200)
    * Auth: Org ticket or admin bot token
    */
-  auth.get('/api/org/threads/:id/artifacts', (req, res) => {
+  auth.get('/api/org/threads/:id/artifacts', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
-    const thread = db.getThread(req.params.id as string);
+    const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
@@ -1456,12 +1479,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     // When no pagination params, fall back to existing unpaginated behavior
     if (!cursor && !limitParam) {
-      res.json(db.listArtifacts(thread.id));
+      res.json(await db.listArtifacts(thread.id));
       return;
     }
 
     const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-    const rows = db.listArtifactsPaginated(thread.id, cursor, limit);
+    const rows = await db.listArtifactsPaginated(thread.id, cursor, limit);
     const hasMore = rows.length > limit;
     const items = hasMore ? rows.slice(0, limit) : rows;
     const response: Record<string, unknown> = {
@@ -1478,11 +1501,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * PATCH /api/org/threads/:id — Update thread status (org admin)
    * Body: { status, close_reason? }
    */
-  auth.patch('/api/org/threads/:id', (req, res) => {
+  auth.patch('/api/org/threads/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
-    const thread = db.getThread(req.params.id as string);
+    const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
@@ -1518,27 +1541,27 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     try {
-      const updated = db.updateThreadStatus(thread.id, status, closeReason);
+      const updated = await db.updateThreadStatus(thread.id, status, closeReason);
       if (!updated) {
         res.status(404).json({ error: 'Thread not found' });
         return;
       }
 
-      // Broadcast status change
+      // Broadcast status change (fire-and-forget — don't block HTTP response)
       const by = req.org ? `org:${orgId}` : req.bot!.name;
-      ws.broadcastThreadEvent(orgId, thread.id, {
+      void ws.broadcastThreadEvent(orgId, thread.id, {
         type: 'thread_status_changed',
         thread_id: thread.id,
         topic: updated.topic,
         from: thread.status,
         to: updated.status,
         by,
-      });
+      }).catch(err => routeLogger.error({ err }, 'broadcast thread_status_changed failed'));
 
       // Catchup events for offline bots
-      const participants = db.getParticipants(thread.id);
+      const participants = await db.getParticipants(thread.id);
       for (const p of participants) {
-        db.recordCatchupEvent(orgId, p.bot_id, 'thread_status_changed', {
+        await db.recordCatchupEvent(orgId, p.bot_id, 'thread_status_changed', {
           thread_id: thread.id,
           topic: updated.topic,
           from: thread.status,
@@ -1549,7 +1572,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
       // Audit
       const actorId = req.bot?.id || `org:${orgId}`;
-      db.recordAudit(orgId, actorId, 'thread.status_changed', 'thread', thread.id, {
+      await db.recordAudit(orgId, actorId, 'thread.status_changed', 'thread', thread.id, {
         from: thread.status,
         to: updated.status,
         close_reason: closeReason || null,
@@ -1571,8 +1594,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads — Create a thread
    * Body: { topic, tags?, participants?, channel_id?, context? }
    */
-  auth.post('/api/threads', requireBot, requireScope('thread'), (req, res) => {
-    if (!checkThreadRateLimit(req, res)) return;
+  auth.post('/api/threads', requireBot, requireScope('thread'), async (req, res) => {
+    if (!(await checkThreadRateLimit(req, res))) return;
 
     const { topic, tags, participants, channel_id, context, permission_policy } = req.body;
     const orgId = req.bot!.org_id;
@@ -1603,7 +1626,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const resolvedParticipantIds: string[] = [];
     for (const p of (participants || [])) {
-      const bot = resolveBot(orgId, p);
+      const bot = await resolveBot(orgId, p);
       if (!bot) {
         res.status(400).json({ error: `Bot not found: ${p}` });
         return;
@@ -1618,7 +1641,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         return;
       }
 
-      const channel = db.getChannel(channel_id);
+      const channel = await db.getChannel(channel_id);
       if (!channel || channel.org_id !== orgId) {
         res.status(400).json({ error: 'Invalid channel_id' });
         return;
@@ -1666,7 +1689,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     try {
-      const thread = db.createThread(
+      const thread = await db.createThread(
         orgId,
         req.bot!.id,
         topic,
@@ -1678,36 +1701,36 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       );
 
       // Audit (rate limit event already recorded atomically in checkThreadRateLimit)
-      db.recordAudit(orgId, req.bot!.id, 'thread.create', 'thread', thread.id, { topic, tags: resolvedTags });
+      await db.recordAudit(orgId, req.bot!.id, 'thread.create', 'thread', thread.id, { topic, tags: resolvedTags });
 
       // Record catchup events: thread_invited for each participant (except initiator)
       const allParticipantIds = Array.from(new Set([req.bot!.id, ...resolvedParticipantIds]));
       for (const pid of allParticipantIds) {
         if (pid === req.bot!.id) continue;
-        db.recordCatchupEvent(orgId, pid, 'thread_invited', {
+        await db.recordCatchupEvent(orgId, pid, 'thread_invited', {
           thread_id: thread.id,
           topic: thread.topic,
           inviter: req.bot!.id,
         });
       }
 
-      ws.broadcastThreadEvent(orgId, thread.id, {
+      void ws.broadcastThreadEvent(orgId, thread.id, {
         type: 'thread_created',
         thread,
-      });
+      }).catch(err => routeLogger.error({ err }, 'broadcast thread_created failed'));
 
       // Emit individual join events for all participants (including initiator)
       for (const pid of allParticipantIds) {
-        const bot = db.getBotById(pid);
+        const bot = await db.getBotById(pid);
         if (!bot) continue;
-        ws.broadcastThreadEvent(orgId, thread.id, {
+        void ws.broadcastThreadEvent(orgId, thread.id, {
           type: 'thread_participant',
           thread_id: thread.id,
           bot_id: pid,
           bot_name: bot.name,
           action: 'joined',
           by: req.bot!.id,
-        });
+        }).catch(err => routeLogger.error({ err }, 'broadcast thread_participant failed'));
       }
 
       res.setHeader('ETag', `"${thread.revision}"`);
@@ -1721,7 +1744,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/threads — List my threads
    * Query: status?
    */
-  auth.get('/api/threads', requireBot, requireScope('read'), (req, res) => {
+  auth.get('/api/threads', requireBot, requireScope('read'), async (req, res) => {
     const statusRaw = getQueryString(req.query.status);
     if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
       res.status(400).json({ error: 'Invalid status filter' });
@@ -1729,19 +1752,19 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const status = statusRaw as ThreadStatus | undefined;
-    const threads = db.listThreadsForBot(req.bot!.id, status);
+    const threads = await db.listThreadsForBot(req.bot!.id, status);
     res.json(threads);
   });
 
   /**
    * GET /api/threads/:id — Thread details with participants
    */
-  auth.get('/api/threads/:id', requireBot, requireScope('read'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+  auth.get('/api/threads/:id', requireBot, requireScope('read'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
-    const participants = db.getParticipants(thread.id).map(p => {
-      const bot = db.getBotById(p.bot_id);
+    const participants = await Promise.all((await db.getParticipants(thread.id)).map(async (p) => {
+      const bot = await db.getBotById(p.bot_id);
       return {
         bot_id: p.bot_id,
         name: bot?.name,
@@ -1749,7 +1772,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         label: p.label,
         joined_at: p.joined_at,
       };
-    });
+    }));
 
     res.setHeader('ETag', `"${thread.revision}"`);
     res.json({ ...thread, participants });
@@ -1759,8 +1782,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * PATCH /api/threads/:id — Update thread status/context/topic
    * Body: { status?, close_reason?, context?, topic? }
    */
-  auth.patch('/api/threads/:id', requireBot, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+  auth.patch('/api/threads/:id', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
     // Optimistic concurrency: If-Match header carries expected revision
@@ -1873,8 +1896,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       const policyAction = status === 'resolved' ? 'resolve' as const
         : status === 'closed' ? 'close' as const
         : null;
-      if (policyAction && !db.checkThreadPermission(thread, req.bot!.id, policyAction)) {
-        db.recordAudit(thread.org_id, req.bot!.id, 'thread.permission_denied', 'thread', thread.id, {
+      if (policyAction && !(await db.checkThreadPermission(thread, req.bot!.id, policyAction))) {
+        await db.recordAudit(thread.org_id, req.bot!.id, 'thread.permission_denied', 'thread', thread.id, {
           action: policyAction,
           status,
         });
@@ -1895,7 +1918,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     try {
       if (status !== undefined) {
         const previousStatus = thread.status;
-        updated = db.updateThreadStatus(thread.id, status, closeReason, revCheck);
+        updated = await db.updateThreadStatus(thread.id, status, closeReason, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
@@ -1906,16 +1929,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
         if (status === 'resolved') changes.push('resolved_at');
 
         // Audit
-        db.recordAudit(thread.org_id, req.bot!.id, 'thread.status_changed', 'thread', thread.id, {
+        await db.recordAudit(thread.org_id, req.bot!.id, 'thread.status_changed', 'thread', thread.id, {
           from: previousStatus,
           to: status,
           close_reason: closeReason ?? null,
         });
 
         // Record catchup event for all participants
-        const participants = db.getParticipants(thread.id);
+        const participants = await db.getParticipants(thread.id);
         for (const p of participants) {
-          db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_status_changed', {
+          await db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_status_changed', {
             thread_id: thread.id,
             topic: thread.topic,
             from: previousStatus,
@@ -1926,7 +1949,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       if (context !== undefined) {
-        updated = db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
+        updated = await db.updateThreadContext(thread.id, contextJson ?? null, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
@@ -1936,7 +1959,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       if (topic !== undefined) {
-        updated = db.updateThreadTopic(thread.id, topic.trim(), revCheck);
+        updated = await db.updateThreadTopic(thread.id, topic.trim(), revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
@@ -1946,7 +1969,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       if (permPolicyJson !== undefined) {
-        updated = db.updateThreadPermissionPolicy(thread.id, permPolicyJson, revCheck);
+        updated = await db.updateThreadPermissionPolicy(thread.id, permPolicyJson, revCheck);
         revCheck = undefined; // consumed
         if (!updated) {
           res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
@@ -1963,11 +1986,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+    void ws.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_updated',
       thread: updated!,
       changes,
-    });
+    }).catch(err => routeLogger.error({ err }, 'broadcast thread_updated failed'));
 
     res.setHeader('ETag', `"${updated!.revision}"`);
     res.json(updated);
@@ -1977,9 +2000,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/join — Self-join a thread (same org)
    * No body required. Any bot in the same org can join.
    */
-  auth.post('/api/threads/:id/join', requireBot, requireScope('thread'), (req, res) => {
+  auth.post('/api/threads/:id/join', requireBot, requireScope('thread'), async (req, res) => {
     const threadId = req.params.id as string;
-    const thread = db.getThread(threadId);
+    const thread = await db.getThread(threadId);
     if (!thread) {
       res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
@@ -1998,25 +2021,25 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Already a participant — idempotent success
-    if (db.isParticipant(thread.id, req.bot!.id)) {
+    if (await db.isParticipant(thread.id, req.bot!.id)) {
       res.json({ status: 'already_joined' });
       return;
     }
 
     try {
-      const participant = db.addParticipant(thread.id, req.bot!.id);
+      const participant = await db.addParticipant(thread.id, req.bot!.id);
 
-      // Broadcast join event
-      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      // Broadcast join event (fire-and-forget)
+      void ws.broadcastThreadEvent(thread.org_id, thread.id, {
         type: 'thread_participant',
         thread_id: thread.id,
         bot_id: req.bot!.id,
         bot_name: req.bot!.name,
         action: 'joined',
         by: req.bot!.id,
-      });
+      }).catch(err => routeLogger.error({ err }, 'broadcast thread_participant failed'));
 
-      db.recordAudit(thread.org_id, req.bot!.id, 'thread.join', 'thread', thread.id);
+      await db.recordAudit(thread.org_id, req.bot!.id, 'thread.join', 'thread', thread.id);
 
       res.json({ status: 'joined', joined_at: participant.joined_at });
     } catch (error: any) {
@@ -2028,12 +2051,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/participants — Invite bot (id or name)
    * Body: { bot_id, label? }
    */
-  auth.post('/api/threads/:id/participants', requireBot, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+  auth.post('/api/threads/:id/participants', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
     // Permission policy check for invite
-    if (!db.checkThreadPermission(thread, req.bot!.id, 'invite')) {
+    if (!(await db.checkThreadPermission(thread, req.bot!.id, 'invite'))) {
       res.status(403).json({ error: 'Permission denied: your label does not allow inviting participants', code: 'FORBIDDEN' });
       return;
     }
@@ -2048,13 +2071,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const bot = resolveBot(thread.org_id, bot_id);
+    const bot = await resolveBot(thread.org_id, bot_id);
     if (!bot) {
       res.status(404).json({ error: `Bot not found: ${bot_id}` });
       return;
     }
 
-    const alreadyParticipant = db.isParticipant(thread.id, bot.id);
+    const alreadyParticipant = await db.isParticipant(thread.id, bot.id);
 
     // Prevent label relabeling via invite — only new participants can have labels set.
     // Relabeling existing participants would bypass label-based permission policies.
@@ -2064,23 +2087,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     try {
-      const participant = db.addParticipant(thread.id, bot.id, label);
+      const participant = await db.addParticipant(thread.id, bot.id, label);
 
       if (!alreadyParticipant) {
         // Audit
-        db.recordAudit(thread.org_id, req.bot!.id, 'thread.invite', 'thread', thread.id, {
+        await db.recordAudit(thread.org_id, req.bot!.id, 'thread.invite', 'thread', thread.id, {
           invited_bot_id: bot.id,
           invited_bot_name: bot.name,
         });
 
         // Record catchup event for the invited bot
-        db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
+        await db.recordCatchupEvent(thread.org_id, bot.id, 'thread_invited', {
           thread_id: thread.id,
           topic: thread.topic,
           inviter: req.bot!.id,
         });
 
-        ws.broadcastThreadEvent(thread.org_id, thread.id, {
+        void ws.broadcastThreadEvent(thread.org_id, thread.id, {
           type: 'thread_participant',
           thread_id: thread.id,
           bot_id: bot.id,
@@ -2088,7 +2111,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
           action: 'joined',
           by: req.bot!.id,
           label: participant.label,
-        });
+        }).catch(err => routeLogger.error({ err }, 'broadcast thread_participant failed'));
       }
 
       res.json(participant);
@@ -2100,36 +2123,38 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * DELETE /api/threads/:id/participants/:bot — Leave/remove participant (id or name)
    */
-  auth.delete('/api/threads/:id/participants/:bot', requireBot, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+  auth.delete('/api/threads/:id/participants/:bot', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
-    const target = resolveBot(thread.org_id, req.params.bot as string);
+    const target = await resolveBot(thread.org_id, req.params.bot as string);
     if (!target) {
       res.status(404).json({ error: `Bot not found: ${req.params.bot}` });
       return;
     }
 
     // Permission policy check for remove (skip if leaving self)
-    if (target.id !== req.bot!.id && !db.checkThreadPermission(thread, req.bot!.id, 'remove')) {
+    if (target.id !== req.bot!.id && !(await db.checkThreadPermission(thread, req.bot!.id, 'remove'))) {
       res.status(403).json({ error: 'Permission denied: your label does not allow removing participants', code: 'FORBIDDEN' });
       return;
     }
 
-    if (!db.isParticipant(thread.id, target.id)) {
+    if (!(await db.isParticipant(thread.id, target.id))) {
       res.status(404).json({ error: 'Bot is not a participant in this thread', code: 'NOT_FOUND' });
       return;
     }
 
-    const participants = db.getParticipants(thread.id);
+    const participants = await db.getParticipants(thread.id);
     if (participants.length <= 1) {
       res.status(400).json({ error: 'Cannot remove the last participant from a thread' });
       return;
     }
 
     // Broadcast leave event BEFORE removing participant, so the removed bot
-    // is still in the recipient list and receives the notification
-    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+    // is still in the recipient list and receives the notification.
+    // NOTE: This broadcast must complete before removeParticipant is called,
+    // so we intentionally await it here (unlike other fire-and-forget broadcasts).
+    await ws.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_participant',
       thread_id: thread.id,
       bot_id: target.id,
@@ -2139,16 +2164,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     });
 
     // Record catchup event so the removed bot sees it even if offline
-    db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
+    await db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
       thread_id: thread.id,
       topic: thread.topic,
       removed_by: req.bot!.id,
     });
 
-    db.removeParticipant(thread.id, target.id);
+    await db.removeParticipant(thread.id, target.id);
 
     // Audit
-    db.recordAudit(thread.org_id, req.bot!.id, 'thread.remove_participant', 'thread', thread.id, {
+    await db.recordAudit(thread.org_id, req.bot!.id, 'thread.remove_participant', 'thread', thread.id, {
       removed_bot_id: target.id,
       removed_bot_name: target.name,
     });
@@ -2160,10 +2185,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/messages — Send a thread message
    * Body: { content, content_type?, metadata? }
    */
-  auth.post('/api/threads/:id/messages', requireBot, requireScope('thread'), (req, res) => {
-    if (!checkMessageRateLimit(req, res)) return;
+  auth.post('/api/threads/:id/messages', requireBot, requireScope('thread'), async (req, res) => {
+    if (!(await checkMessageRateLimit(req, res))) return;
 
-    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
     const { content, content_type, metadata, parts } = req.body;
@@ -2218,14 +2243,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Parse @mentions from content against thread participants
-    const threadParticipants = db.getParticipants(thread.id);
-    const { mentions: mentionRefs, mentionAll } = parseMentions(
+    const threadParticipants = await db.getParticipants(thread.id);
+    const { mentions: mentionRefs, mentionAll } = await parseMentions(
       resolvedContent,
       threadParticipants,
-      (id) => db.getBotById(id),
+      async (id) => await db.getBotById(id),
     );
 
-    const message = db.createThreadMessage(
+    const message = await db.createThreadMessage(
       thread.id,
       req.bot!.id,
       resolvedContent,
@@ -2239,12 +2264,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const enriched = { ...enrichThreadMessage(message), sender_name: req.bot!.name };
 
     // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
-    db.recordAudit(thread.org_id, req.bot!.id, 'message.send', 'thread_message', message.id, { thread_id: thread.id });
+    await db.recordAudit(thread.org_id, req.bot!.id, 'message.send', 'thread_message', message.id, { thread_id: thread.id });
 
     // Record catchup events for all participants except the sender
     for (const p of threadParticipants) {
       if (p.bot_id === req.bot!.id) continue;
-      db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
+      await db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
         thread_id: thread.id,
         topic: thread.topic,
         count: 1,
@@ -2252,11 +2277,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }, thread.id);
     }
 
-    ws.broadcastThreadEvent(thread.org_id, thread.id, {
+    void ws.broadcastThreadEvent(thread.org_id, thread.id, {
       type: 'thread_message',
       thread_id: thread.id,
       message: enriched,
-    });
+    }).catch(err => routeLogger.error({ err }, 'broadcast thread_message failed'));
 
     res.json(enriched);
   });
@@ -2265,8 +2290,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/threads/:id/messages — Get thread messages
    * Query: limit?, before?, since?
    */
-  auth.get('/api/threads/:id/messages', requireBot, requireScope('read'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+  auth.get('/api/threads/:id/messages', requireBot, requireScope('read'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
@@ -2279,11 +2304,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const messages = db.getThreadMessages(thread.id, limit, before, since);
-    const enriched = messages.map(m => {
-      const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+    const messages = await db.getThreadMessages(thread.id, limit, before, since);
+    const enriched = await Promise.all(messages.map(async (m) => {
+      const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
       return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
-    });
+    }));
 
     res.json(enriched.reverse());
   });
@@ -2292,8 +2317,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/threads/:id/artifacts — Add new artifact (new key only)
    * Use PATCH to update existing artifacts with new versions.
    */
-  auth.post('/api/threads/:id/artifacts', requireBot, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+  auth.post('/api/threads/:id/artifacts', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
     const {
@@ -2339,14 +2364,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // POST only creates new artifact keys; use PATCH to update existing ones
-    const existing = db.getArtifact(thread.id, artifact_key);
+    const existing = await db.getArtifact(thread.id, artifact_key);
     if (existing) {
       res.status(409).json({ error: `Artifact key "${artifact_key}" already exists. Use PATCH to update it.` });
       return;
     }
 
     try {
-      const artifact = db.addArtifact(
+      const artifact = await db.addArtifact(
         thread.id,
         req.bot!.id,
         artifact_key,
@@ -2359,29 +2384,29 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       );
 
       // Audit
-      db.recordAudit(thread.org_id, req.bot!.id, 'artifact.add', 'artifact', artifact.id, {
+      await db.recordAudit(thread.org_id, req.bot!.id, 'artifact.add', 'artifact', artifact.id, {
         thread_id: thread.id,
         artifact_key: artifact.artifact_key,
         version: artifact.version,
       });
 
       // Record catchup events for all participants except the contributor
-      const participants = db.getParticipants(thread.id);
+      const participants = await db.getParticipants(thread.id);
       for (const p of participants) {
         if (p.bot_id === req.bot!.id) continue;
-        db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+        await db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
           thread_id: thread.id,
           artifact_key: artifact.artifact_key,
           version: artifact.version,
         }, thread.id);
       }
 
-      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      void ws.broadcastThreadEvent(thread.org_id, thread.id, {
         type: 'thread_artifact',
         thread_id: thread.id,
         artifact,
         action: 'added',
-      });
+      }).catch(err => routeLogger.error({ err }, 'broadcast thread_artifact failed'));
 
       res.json(artifact);
     } catch (error: any) {
@@ -2392,8 +2417,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * PATCH /api/threads/:id/artifacts/:key — Update artifact (new version)
    */
-  auth.patch('/api/threads/:id/artifacts/:key', requireBot, requireScope('thread'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+  auth.patch('/api/threads/:id/artifacts/:key', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
     const key = req.params.key as string;
@@ -2413,7 +2438,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     try {
-      const artifact = db.updateArtifact(
+      const artifact = await db.updateArtifact(
         thread.id,
         key,
         req.bot!.id,
@@ -2427,29 +2452,29 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
 
       // Audit
-      db.recordAudit(thread.org_id, req.bot!.id, 'artifact.update', 'artifact', artifact.id, {
+      await db.recordAudit(thread.org_id, req.bot!.id, 'artifact.update', 'artifact', artifact.id, {
         thread_id: thread.id,
         artifact_key: artifact.artifact_key,
         version: artifact.version,
       });
 
       // Record catchup events for all participants except the contributor
-      const participants = db.getParticipants(thread.id);
+      const participants = await db.getParticipants(thread.id);
       for (const p of participants) {
         if (p.bot_id === req.bot!.id) continue;
-        db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
+        await db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_artifact_added', {
           thread_id: thread.id,
           artifact_key: artifact.artifact_key,
           version: artifact.version,
         }, thread.id);
       }
 
-      ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      void ws.broadcastThreadEvent(thread.org_id, thread.id, {
         type: 'thread_artifact',
         thread_id: thread.id,
         artifact,
         action: 'updated',
-      });
+      }).catch(err => routeLogger.error({ err }, 'broadcast thread_artifact failed'));
 
       res.json(artifact);
     } catch (error: any) {
@@ -2460,18 +2485,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   /**
    * GET /api/threads/:id/artifacts — List latest artifact version for each key
    */
-  auth.get('/api/threads/:id/artifacts', requireBot, requireScope('read'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+  auth.get('/api/threads/:id/artifacts', requireBot, requireScope('read'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
-    res.json(db.listArtifacts(thread.id));
+    res.json(await db.listArtifacts(thread.id));
   });
 
   /**
    * GET /api/threads/:id/artifacts/:key/versions — List all versions for a key
    */
-  auth.get('/api/threads/:id/artifacts/:key/versions', requireBot, requireScope('read'), (req, res) => {
-    const thread = requireThreadParticipant(req, res, req.params.id as string);
+  auth.get('/api/threads/:id/artifacts/:key/versions', requireBot, requireScope('read'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
     if (!thread) return;
 
     const key = req.params.key as string;
@@ -2480,7 +2505,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    res.json(db.getArtifactVersions(thread.id, key));
+    res.json(await db.getArtifactVersions(thread.id, key));
   });
 
   // ─── Messages ─────────────────────────────────────────────
@@ -2491,8 +2516,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * When before is a message id (not numeric), uses cursor-based pagination and returns
    * { messages: [...], has_more: boolean } with messages sorted newest first.
    */
-  auth.get('/api/channels/:id/messages', requireScope('read'), (req, res) => {
-    const channel = db.getChannel(req.params.id as string);
+  auth.get('/api/channels/:id/messages', requireScope('read'), async (req, res) => {
+    const channel = await db.getChannel(req.params.id as string);
     if (!channel) {
       res.status(404).json({ error: 'Channel not found', code: 'NOT_FOUND' });
       return;
@@ -2504,7 +2529,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
     // Check access
-    if (req.bot && !db.isChannelMember(channel.id, req.bot.id)) {
+    if (req.bot && !(await db.isChannelMember(channel.id, req.bot.id))) {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
@@ -2522,14 +2547,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     if (isBeforeId) {
       // Cursor-based pagination path (newest first)
-      const rows = db.getMessagesPaginated(channel.id, isBeforeId ? beforeStr : undefined, limit);
+      const rows = await db.getMessagesPaginated(channel.id, isBeforeId ? beforeStr : undefined, limit);
       const hasMore = rows.length > limit;
       const messages = hasMore ? rows.slice(0, limit) : rows;
 
-      const enriched = messages.map(m => {
-        const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+      const enriched = await Promise.all(messages.map(async (m) => {
+        const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
         return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
-      });
+      }));
 
       res.json({ messages: enriched, has_more: hasMore });
       return;
@@ -2543,13 +2568,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const messages = db.getMessages(channel.id, limit, before, since);
+    const messages = await db.getMessages(channel.id, limit, before, since);
 
     // Enrich with sender names and parsed parts
-    const enriched = messages.map(m => {
-      const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+    const enriched = await Promise.all(messages.map(async (m) => {
+      const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
       return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
-    });
+    }));
 
     res.json(enriched.reverse()); // Return in chronological order
   });
@@ -2558,8 +2583,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * POST /api/send — Quick send: DM a bot by name/id (auto-creates channel)
    * Body: { to, content, content_type? }
    */
-  auth.post('/api/send', requireBot, requireScope('message'), (req, res) => {
-    if (!checkMessageRateLimit(req, res)) return;
+  auth.post('/api/send', requireBot, requireScope('message'), async (req, res) => {
+    if (!(await checkMessageRateLimit(req, res))) return;
 
     const { to, content, content_type, parts } = req.body;
 
@@ -2589,7 +2614,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const orgId = req.bot!.org_id;
-    const target = db.getBotById(to) || db.getBotByName(orgId, to);
+    const target = await db.getBotById(to) || await db.getBotByName(orgId, to);
 
     if (!target || target.org_id !== orgId) {
       res.status(404).json({ error: `Bot not found: ${to}` });
@@ -2607,7 +2632,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Find or create direct channel
-    const channel = db.createChannel(orgId, 'direct', [req.bot!.id, target.id]);
+    const channel = await db.createChannel(orgId, 'direct', [req.bot!.id, target.id]);
 
     // Broadcast channel creation if new
     if (channel.isNew) {
@@ -2618,21 +2643,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       });
     }
 
-    const msg = db.createMessage(channel.id, req.bot!.id, resolvedContent, content_type || 'text', partsJson);
+    const msg = await db.createMessage(channel.id, req.bot!.id, resolvedContent, content_type || 'text', partsJson);
 
     // Audit (rate limit event already recorded atomically in checkMessageRateLimit)
-    db.recordAudit(req.bot!.org_id, req.bot!.id, 'message.send', 'channel_message', msg.id, { channel_id: channel.id, to: target.id });
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'message.send', 'channel_message', msg.id, { channel_id: channel.id, to: target.id });
 
     // Record catchup event for the target
-    db.recordCatchupEvent(req.bot!.org_id, target.id, 'channel_message_summary', {
+    await db.recordCatchupEvent(req.bot!.org_id, target.id, 'channel_message_summary', {
       channel_id: channel.id,
       channel_name: channel.name ?? undefined,
       count: 1,
       last_at: msg.created_at,
     }, channel.id);
 
-    // Broadcast
-    ws.broadcastMessage(channel.id, msg, req.bot!.name);
+    // Broadcast (fire-and-forget)
+    void ws.broadcastMessage(channel.id, msg, req.bot!.name)
+      .catch(err => routeLogger.error({ err }, 'broadcast channel message failed'));
 
     res.json({ channel_id: channel.id, message: enrichMessage(msg) });
   });
@@ -2643,7 +2669,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/me/catchup — Get missed events since timestamp
    * Query: since (required, ms timestamp), cursor?, limit?
    */
-  auth.get('/api/me/catchup', requireBot, requireScope('read'), (req, res) => {
+  auth.get('/api/me/catchup', requireBot, requireScope('read'), async (req, res) => {
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : NaN;
     if (isNaN(since)) {
@@ -2655,7 +2681,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limit = Math.min(Math.max(limitRaw, 1), 200);
     const cursor = getQueryString(req.query.cursor);
 
-    const { events, has_more } = db.getCatchupEvents(req.bot!.id, since, limit, cursor);
+    const { events, has_more } = await db.getCatchupEvents(req.bot!.id, since, limit, cursor);
 
     const response: CatchupResponse = {
       events,
@@ -2673,7 +2699,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/me/catchup/count — Get count of missed events by type
    * Query: since (required, ms timestamp)
    */
-  auth.get('/api/me/catchup/count', requireBot, requireScope('read'), (req, res) => {
+  auth.get('/api/me/catchup/count', requireBot, requireScope('read'), async (req, res) => {
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : NaN;
     if (isNaN(since)) {
@@ -2681,7 +2707,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const counts: CatchupCountResponse = db.getCatchupCount(req.bot!.id, since);
+    const counts: CatchupCountResponse = await db.getCatchupCount(req.bot!.id, since);
     res.json(counts);
   });
 
@@ -2691,18 +2717,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/inbox — Get new messages since timestamp
    * Query: since (timestamp, required)
    */
-  auth.get('/api/inbox', requireBot, requireScope('read'), (req, res) => {
+  auth.get('/api/inbox', requireBot, requireScope('read'), async (req, res) => {
     const since = parseInt(getQueryString(req.query.since) || '');
     if (isNaN(since)) {
       res.status(400).json({ error: 'since (timestamp) is required' });
       return;
     }
 
-    const messages = db.getNewMessages(req.bot!.id, since);
-    const enriched = messages.map(m => {
-      const sender = m.sender_id ? db.getBotById(m.sender_id) : undefined;
+    const messages = await db.getNewMessages(req.bot!.id, since);
+    const enriched = await Promise.all(messages.map(async (m) => {
+      const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
       return { ...enrichMessage(m), sender_name: sender?.name || 'unknown' };
-    });
+    }));
 
     res.json(enriched);
   });
@@ -2730,7 +2756,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: bot token
    * Returns: { id, name, mime_type, size, url, created_at }
    */
-  auth.post('/api/files/upload', requireBot, requireScope('message'), (req, res, next) => {
+  auth.post('/api/files/upload', requireBot, requireScope('message'), async (req, res, next) => {
     // O5: Wrap multer middleware to catch MulterError and return JSON
     upload.single('file')(req, res, (err) => {
       if (err) {
@@ -2748,7 +2774,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       }
       next();
     });
-  }, (req, res) => {
+  }, async (req, res) => {
     const file = req.file;
     if (!file) {
       res.status(400).json({ error: 'No file provided (field name must be "file")' });
@@ -2758,11 +2784,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const orgId = req.bot!.org_id;
     const relativePath = `files/${file.filename}`;
     const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
-    const settings = db.getOrgSettings(orgId);
+    const settings = await db.getOrgSettings(orgId);
     const perBotDailyLimitBytes = settings.file_upload_mb_per_day_per_bot * 1024 * 1024;
 
     // Atomically check quota (org-level + per-bot) and create file record
-    const result = db.createFileWithQuotaCheck(
+    const result = await db.createFileWithQuotaCheck(
       orgId,
       req.bot!.id,
       file.originalname,
@@ -2789,7 +2815,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const record = result.file;
 
     // Audit
-    db.recordAudit(orgId, req.bot!.id, 'file.upload', 'file', record.id, {
+    await db.recordAudit(orgId, req.bot!.id, 'file.upload', 'file', record.id, {
       name: record.name,
       mime_type: record.mime_type,
       size: record.size,
@@ -2810,11 +2836,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: bot token or org API key
    * Org-scoped: only bots/admins in the same org can download
    */
-  auth.get('/api/files/:id', requireScope('read'), (req, res) => {
+  auth.get('/api/files/:id', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    const record = db.getFile(req.params.id as string);
+    const record = await db.getFile(req.params.id as string);
     if (!record) {
       res.status(404).json({ error: 'File not found', code: 'NOT_FOUND' });
       return;
@@ -2849,11 +2875,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: bot token or org API key
    * Org-scoped access check
    */
-  auth.get('/api/files/:id/info', requireScope('read'), (req, res) => {
+  auth.get('/api/files/:id/info', requireScope('read'), async (req, res) => {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    const record = db.getFileInfo(req.params.id as string);
+    const record = await db.getFileInfo(req.params.id as string);
     if (!record) {
       res.status(404).json({ error: 'File not found', code: 'NOT_FOUND' });
       return;
@@ -2881,10 +2907,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * GET /api/org/settings — Get org settings
    * Auth: Org ticket or admin bot token
    */
-  auth.get('/api/org/settings', (req, res) => {
+  auth.get('/api/org/settings', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
-    res.json(db.getOrgSettings(orgId));
+    res.json(await db.getOrgSettings(orgId));
   });
 
   /**
@@ -2892,7 +2918,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Org ticket or admin bot token
    * Body: partial OrgSettings fields
    */
-  auth.patch('/api/org/settings', (req, res) => {
+  auth.patch('/api/org/settings', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
@@ -2964,10 +2990,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const settings = db.updateOrgSettings(orgId, updates);
+    const settings = await db.updateOrgSettings(orgId, updates);
 
     // Audit
-    db.recordAudit(orgId, null, 'settings.update', 'org_settings', orgId, updates);
+    await db.recordAudit(orgId, null, 'settings.update', 'org_settings', orgId, updates);
 
     res.json(settings);
   });
@@ -2980,13 +3006,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { reusable?: boolean, expires_in?: number }
    * Returns: { ticket, expires_at, reusable }
    */
-  auth.post('/api/org/tickets', (req, res) => {
+  auth.post('/api/org/tickets', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
     const { reusable, expires_in } = req.body;
 
     const orgId = req.bot?.org_id || req.org?.id;
-    const org = orgId ? db.getOrgById(orgId) : undefined;
+    const org = orgId ? await db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -3002,7 +3028,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const secretHash = org.org_secret;
 
     const isReusable = reusable === true;
-    const ticket = db.createOrgTicket(orgId!, secretHash, {
+    const ticket = await db.createOrgTicket(orgId!, secretHash, {
       reusable: isReusable,
       expiresAt,
       createdBy: req.bot?.id,
@@ -3020,11 +3046,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Org ticket (org_secret login) or Bot token (admin role)
    * Returns: { org_secret }
    */
-  auth.post('/api/org/rotate-secret', (req, res) => {
+  auth.post('/api/org/rotate-secret', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
     const orgId = req.bot?.org_id || req.org?.id;
-    const org = orgId ? db.getOrgById(orgId) : undefined;
+    const org = orgId ? await db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
       return;
@@ -3040,10 +3066,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const newSecretHash = HubDB.hashToken(newSecret);
 
     // Update in DB
-    db.rotateOrgSecret(orgId!, newSecretHash);
+    await db.rotateOrgSecret(orgId!, newSecretHash);
 
     // Invalidate all unredeemed org_tickets for this org
-    db.invalidateOrgTickets(orgId!);
+    await db.invalidateOrgTickets(orgId!);
 
     res.json({ org_secret: newSecret });
   });
@@ -3054,7 +3080,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Body: { auth_role: 'admin' | 'member' }
    * Returns: { bot_id, auth_role }
    */
-  auth.patch('/api/org/bots/:bot_id/role', (req, res) => {
+  auth.patch('/api/org/bots/:bot_id/role', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
     const { auth_role } = req.body;
@@ -3067,7 +3093,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const orgId = req.bot?.org_id || req.org?.id;
     const targetBotId = req.params.bot_id as string;
-    const targetBot = db.getBotById(targetBotId);
+    const targetBot = await db.getBotById(targetBotId);
     if (!targetBot) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
@@ -3085,10 +3111,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    db.setBotAuthRole(targetBotId, auth_role);
+    await db.setBotAuthRole(targetBotId, auth_role);
 
     const actorId = req.bot?.id || 'org_admin';
-    db.recordAudit(orgId!, actorId, 'bot.role_change', 'bot', targetBotId, { auth_role });
+    await db.recordAudit(orgId!, actorId, 'bot.role_change', 'bot', targetBotId, { auth_role });
 
     res.json({ bot_id: targetBotId, auth_role });
   });
@@ -3103,7 +3129,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * The ticket should be passed as ?ticket=xxx when opening a WS connection.
    * This avoids leaking the token in server logs via the URL query param.
    */
-  auth.post('/api/ws-ticket', (req, res) => {
+  auth.post('/api/ws-ticket', async (req, res) => {
     // Use the raw token stored by authMiddleware (from Bearer header)
     const token = req.rawToken;
 
@@ -3129,7 +3155,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * Auth: Org ticket or admin bot token
    * Query: since?, action?, target_type?, target_id?, bot_id?, limit?
    */
-  auth.get('/api/audit', (req, res) => {
+  auth.get('/api/audit', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.org?.id || req.bot?.org_id)!;
 
@@ -3146,7 +3172,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 50;
     const limit = Math.min(Math.max(limitRaw, 1), 200);
 
-    const entries = db.getAuditLog(orgId, { since, action, target_type, target_id, bot_id, limit });
+    const entries = await db.getAuditLog(orgId, { since, action, target_type, target_id, bot_id, limit });
     res.json(entries);
   });
 

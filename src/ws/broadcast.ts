@@ -12,18 +12,18 @@ import { wsLogger } from '../logger.js';
 /**
  * Broadcast a new message to all relevant clients + fire webhooks.
  */
-export function broadcastMessage(
+export async function broadcastMessage(
   clients: Set<WsClient>,
   db: HubDB,
   webhookManager: WebhookManager,
   channelId: string,
   message: Message,
   senderName: string,
-): void {
-  const channel = db.getChannel(channelId);
+): Promise<void> {
+  const channel = await db.getChannel(channelId);
   if (!channel) return;
 
-  const members = db.getChannelMembers(channelId).map(m => m.bot_id);
+  const members = (await db.getChannelMembers(channelId)).map(m => m.bot_id);
 
   // Parse parts for wire format: send parsed array, not raw JSON string
   let parsedParts: MessagePart[];
@@ -48,7 +48,7 @@ export function broadcastMessage(
   const webhookPayload = { webhook_version: '1' as const, ...event };
   for (const botId of members) {
     if (botId === message.sender_id) continue;
-    const bot = db.getBotById(botId);
+    const bot = await db.getBotById(botId);
     if (bot?.webhook_url) {
       wsLogger.info({ botName: bot.name }, 'Webhook dispatch for channel message');
       void webhookManager.deliver(bot.id, bot.webhook_url, bot.webhook_secret, webhookPayload);
@@ -76,15 +76,15 @@ export function broadcastMessage(
 /**
  * Broadcast thread event to all thread participants + org admins + participant webhooks.
  */
-export function broadcastThreadEvent(
+export async function broadcastThreadEvent(
   clients: Set<WsClient>,
   db: HubDB,
   webhookManager: WebhookManager,
   orgId: string,
   threadId: string,
   event: WsServerEvent,
-): void {
-  const participantIds = db.getParticipants(threadId).map(p => p.bot_id);
+): Promise<void> {
+  const participantIds = (await db.getParticipants(threadId)).map(p => p.bot_id);
 
   let excludeWebhookBotId: string | undefined;
   if (event.type === 'thread_message' && event.message.sender_id) {
@@ -93,7 +93,7 @@ export function broadcastThreadEvent(
     excludeWebhookBotId = event.artifact.contributor_id;
   }
 
-  fireThreadWebhooks(db, webhookManager, participantIds, event, excludeWebhookBotId);
+  await fireThreadWebhooks(db, webhookManager, participantIds, event, excludeWebhookBotId);
 
   const participantSet = new Set(participantIds);
   for (const client of clients) {
@@ -141,18 +141,18 @@ export function sendToClient(client: WsClient, event: WsServerEvent): void {
 /**
  * Fire webhooks for thread participants.
  */
-function fireThreadWebhooks(
+async function fireThreadWebhooks(
   db: HubDB,
   webhookManager: WebhookManager,
   participantIds: string[],
   event: WsServerEvent,
   excludeBotId?: string,
-): void {
+): Promise<void> {
   const webhookPayload = { webhook_version: '1' as const, ...event };
   for (const botId of participantIds) {
     if (excludeBotId && botId === excludeBotId) continue;
 
-    const bot = db.getBotById(botId);
+    const bot = await db.getBotById(botId);
     if (!bot?.webhook_url) continue;
 
     wsLogger.info({ botName: bot.name }, 'Webhook dispatch for thread event');

@@ -72,8 +72,8 @@ describe('WS Full-Duplex Operations', () => {
 
   beforeAll(async () => {
     env = await createTestEnv();
-    org = env.createOrg();
-    org2 = env.createOrg('other-org');
+    org = await env.createOrg();
+    org2 = await env.createOrg('other-org');
 
     const r1 = await env.registerBot(org.org_secret, 'alice');
     const r2 = await env.registerBot(org.org_secret, 'bob');

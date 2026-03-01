@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { HubDB } from '../src/db.js';
+import { SqliteDriver } from '../src/db/index.js';
 import { HubWS } from '../src/ws.js';
 import { WebhookManager } from '../src/webhook.js';
 import { createRouter } from '../src/routes.js';
@@ -22,7 +23,7 @@ export interface TestEnv {
   baseUrl: string;
   dataDir: string;
   /** Create an org and return { id, org_secret } */
-  createOrg(name?: string): { id: string; org_secret: string };
+  createOrg(name?: string): Promise<{ id: string; org_secret: string }>;
   /** Register a bot in an org via ticket-based auth. Pass org_secret (login -> ticket -> register). */
   registerBot(orgSecret: string, name: string, opts?: Record<string, unknown>): Promise<{ bot: any; token: string }>;
   /** Login as org and get a reusable ticket that works as Bearer token for org-level endpoints. */
@@ -54,7 +55,11 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     ...configOverrides,
   };
 
-  const db = new HubDB(config);
+  const dbPath = path.join(dataDir, 'hxa-connect.db');
+  const driver = new SqliteDriver(dbPath);
+  const db = new HubDB(driver);
+  await db.init();
+
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
@@ -63,9 +68,9 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
   const hubWs = new HubWS(server, db, webhookManager, config);
 
   // Health endpoint (mirrors index.ts)
-  app.get('/health', (_req, res) => {
+  app.get('/health', async (_req, res) => {
     const wsStats = hubWs.getHealthStats();
-    const dbOk = db.isHealthy();
+    const dbOk = await db.isHealthy();
     res.status(dbOk ? 200 : 503).json({
       status: dbOk ? 'ok' : 'degraded',
       uptime_ms: wsStats.uptime_ms,
@@ -92,9 +97,9 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
   // Map plaintext org_secret -> org_id for registerBot helper
   const secretToOrgId = new Map<string, string>();
 
-  function createOrg(name?: string) {
+  async function createOrg(name?: string) {
     const orgName = name || `test-org-${++counter}`;
-    const org = db.createOrg(orgName, config.default_persist);
+    const org = await db.createOrg(orgName, config.default_persist);
     secretToOrgId.set(org.org_secret, org.id);
     return { id: org.id, org_secret: org.org_secret };
   }
@@ -153,7 +158,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
-    db.close();
+    await db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 

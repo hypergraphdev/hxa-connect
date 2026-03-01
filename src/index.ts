@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HubDB } from './db.js';
+import { SqliteDriver } from './db/index.js';
 import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
@@ -51,7 +52,7 @@ function loadConfig(): HubConfig {
 
 // ─── Main ────────────────────────────────────────────────────
 
-function main() {
+async function main() {
   const config = loadConfig();
   // Default-secure: dev mode must be explicitly opted in
   const isDev = process.env.DEV_MODE === 'true';
@@ -84,7 +85,10 @@ function main() {
   `);
 
   // Initialize database
-  const db = new HubDB(config);
+  const dbPath = path.join(config.data_dir, 'hxa-connect.db');
+  const driver = new SqliteDriver(dbPath);
+  const db = new HubDB(driver);
+  await db.init();
   console.log(`  Database: ${path.resolve(config.data_dir)}/hxa-connect.db`);
 
   // Ensure files directory exists
@@ -117,17 +121,21 @@ function main() {
   const hubWs = new HubWS(server, db, webhookManager, config);
 
   // O1: Health endpoint (no auth, before router so it's always accessible)
-  app.get('/health', (_req, res) => {
-    const wsStats = hubWs.getHealthStats();
-    const dbOk = db.isHealthy();
-    const status = dbOk ? 'ok' : 'degraded';
-    res.status(dbOk ? 200 : 503).json({
-      status,
-      uptime_ms: wsStats.uptime_ms,
-      connected_clients: wsStats.connected_clients,
-      connected_bots: wsStats.connected_bots,
-      db: dbOk ? 'ok' : 'error',
-    });
+  app.get('/health', async (_req, res, next) => {
+    try {
+      const wsStats = hubWs.getHealthStats();
+      const dbOk = await db.isHealthy();
+      const status = dbOk ? 'ok' : 'degraded';
+      res.status(dbOk ? 200 : 503).json({
+        status,
+        uptime_ms: wsStats.uptime_ms,
+        connected_clients: wsStats.connected_clients,
+        connected_bots: wsStats.connected_bots,
+        db: dbOk ? 'ok' : 'error',
+      });
+    } catch (err) {
+      next(err);
+    }
   });
 
   app.use(createRouter(db, hubWs, config));
@@ -170,25 +178,23 @@ function main() {
 
   // Lifecycle cleanup: runs every 6 hours
   setInterval(() => {
-    try {
-      db.runLifecycleCleanup();
-    } catch (err) {
+    db.runLifecycleCleanup().catch(err => {
       logger.error({ err }, 'Lifecycle cleanup error');
-    }
+    });
   }, 6 * 60 * 60 * 1000);
 
   // O7: Rate limit events cleanup: runs every 10 minutes (separate from lifecycle)
   setInterval(() => {
-    try { db.cleanupOldRateLimitEvents(); } catch (err) {
+    db.cleanupOldRateLimitEvents().catch(err => {
       console.error('Rate limit cleanup error:', err);
-    }
+    });
   }, 10 * 60 * 1000);
 
   // Run once on startup after a delay
   setTimeout(() => {
-    try { db.runLifecycleCleanup(); } catch (err) {
+    db.runLifecycleCleanup().catch(err => {
       logger.error({ err }, 'Startup lifecycle cleanup error');
-    }
+    });
   }, 30000);
 
   // O2: Graceful shutdown — drain WS, stop HTTP, close DB
@@ -211,7 +217,7 @@ function main() {
     }
 
     // 3. Close database
-    db.close();
+    await db.close();
     console.log('  Database closed');
 
     process.exit(0);

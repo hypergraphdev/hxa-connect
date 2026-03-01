@@ -41,7 +41,7 @@ function extractToken(req: Request): string | undefined {
  * Sets req.bot, req.org, and req.tokenScopes
  */
 export function authMiddleware(db: HubDB) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const token = extractToken(req);
 
     if (!token) {
@@ -53,7 +53,7 @@ export function authMiddleware(db: HubDB) {
     req.rawToken = token;
 
     // Try primary bot token first
-    const bot = db.getBotByToken(token);
+    const bot = await db.getBotByToken(token);
     if (bot) {
       // Phase 3: Validate X-Org-Id header if present
       const requestedOrgId = req.headers['x-org-id'] as string | undefined;
@@ -70,7 +70,7 @@ export function authMiddleware(db: HubDB) {
       // In Phase 7 this will become a deprecation warning
 
       req.bot = bot;
-      req.org = db.getOrgById(bot.org_id);
+      req.org = await db.getOrgById(bot.org_id);
       req.authType = 'bot';
       req.tokenScopes = ['full'];
       // Check org status
@@ -86,20 +86,20 @@ export function authMiddleware(db: HubDB) {
       }
       // W3: HTTP requests update last_seen but do NOT mark bot online.
       // Online status is managed exclusively by WS connections.
-      db.touchBotLastSeen(bot.id);
+      await db.touchBotLastSeen(bot.id);
       next();
       return;
     }
 
     // Try scoped bot token
-    const scopedToken = db.getBotTokenByToken(token);
+    const scopedToken = await db.getBotTokenByToken(token);
     if (scopedToken) {
       // Check expiration
       if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
         res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
         return;
       }
-      const scopedBot = db.getBotById(scopedToken.bot_id);
+      const scopedBot = await db.getBotById(scopedToken.bot_id);
       if (scopedBot) {
         // Phase 3: Validate X-Org-Id header if present
         const requestedOrgId = req.headers['x-org-id'] as string | undefined;
@@ -114,7 +114,7 @@ export function authMiddleware(db: HubDB) {
         }
 
         req.bot = scopedBot;
-        req.org = db.getOrgById(scopedBot.org_id);
+        req.org = await db.getOrgById(scopedBot.org_id);
         req.authType = 'bot';
         req.tokenScopes = scopedToken.scopes;
         req.scopedTokenId = scopedToken.id;
@@ -130,21 +130,21 @@ export function authMiddleware(db: HubDB) {
           }
         }
         // W3: HTTP requests update last_seen but do NOT mark bot online.
-        db.touchBotLastSeen(scopedBot.id);
-        db.touchBotToken(scopedToken.id);
+        await db.touchBotLastSeen(scopedBot.id);
+        await db.touchBotToken(scopedToken.id);
         next();
         return;
       }
     }
 
     // Try org ticket (reusable session token from login)
-    const ticket = db.getOrgTicket(token);
+    const ticket = await db.getOrgTicket(token);
     if (ticket && ticket.reusable && !ticket.consumed) {
       if (ticket.expires_at <= Date.now()) {
         res.status(401).json({ error: 'Session expired', code: 'TICKET_EXPIRED' });
         return;
       }
-      const ticketOrg = db.getOrgById(ticket.org_id);
+      const ticketOrg = await db.getOrgById(ticket.org_id);
       if (ticketOrg) {
         if (ticketOrg.status === 'suspended') {
           res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
