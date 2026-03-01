@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HubDB } from './db.js';
-import { SqliteDriver } from './db/index.js';
+import { SqliteDriver, PostgresDriver } from './db/index.js';
 import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
@@ -84,12 +84,15 @@ async function main() {
   ╚${border}╝
   `);
 
-  // Initialize database
-  const dbPath = path.join(config.data_dir, 'hxa-connect.db');
-  const driver = new SqliteDriver(dbPath);
+  // Initialize database — PostgreSQL if DATABASE_URL is set, otherwise SQLite
+  const databaseUrl = process.env.HXA_CONNECT_DATABASE_URL || process.env.DATABASE_URL;
+  const isPostgres = databaseUrl?.startsWith('postgres');
+  const driver = isPostgres
+    ? new PostgresDriver(databaseUrl!)
+    : new SqliteDriver(path.join(config.data_dir, 'hxa-connect.db'));
   const db = new HubDB(driver);
   await db.init();
-  console.log(`  Database: ${path.resolve(config.data_dir)}/hxa-connect.db`);
+  console.log(`  Database: ${isPostgres ? 'PostgreSQL' : path.resolve(config.data_dir) + '/hxa-connect.db'}`);
 
   // Ensure files directory exists
   const filesDir = path.join(config.data_dir, 'files');

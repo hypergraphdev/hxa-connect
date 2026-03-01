@@ -31,9 +31,19 @@ import type {
 // ─── Database Layer ──────────────────────────────────────────
 
 export class HubDB {
+  /** Row identifier column: SQLite uses implicit `rowid`, Postgres uses `id` (or `ctid`) */
+  private get rowid(): string {
+    return this.driver.dialect === 'postgres' ? 'id' : 'rowid';
+  }
+
   constructor(private driver: DatabaseDriver) {}
 
   async init(): Promise<void> {
+    // Dialect-specific DDL fragments
+    const autoIncrementPK = this.driver.dialect === 'postgres'
+      ? 'SERIAL PRIMARY KEY'
+      : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+
     await this.driver.exec(`
       CREATE TABLE IF NOT EXISTS orgs (
         id TEXT PRIMARY KEY,
@@ -212,7 +222,7 @@ export class HubDB {
       );
 
       CREATE TABLE IF NOT EXISTS rate_limit_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id ${autoIncrementPK},
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL,
         resource_type TEXT NOT NULL CHECK(resource_type IN ('message', 'thread')),
@@ -916,7 +926,8 @@ export class HubDB {
     try {
       await this.driver.run('UPDATE bots SET name = ? WHERE id = ?', [newName, botId]);
     } catch (err: any) {
-      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      // SQLite: SQLITE_CONSTRAINT_UNIQUE, PostgreSQL: 23505 (unique_violation)
+      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === '23505') {
         return { bot: undefined, conflict: true };
       }
       throw err;
@@ -1129,7 +1140,7 @@ export class HubDB {
 
   async cleanupExpiredTokens(batchSize = 1000): Promise<number> {
     const result = await this.driver.run(
-      'DELETE FROM bot_tokens WHERE rowid IN (SELECT rowid FROM bot_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)',
+      `DELETE FROM bot_tokens WHERE ${this.rowid} IN (SELECT ${this.rowid} FROM bot_tokens WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?)`,
       [Date.now(), batchSize],
     );
     return result.changes;
@@ -2054,11 +2065,11 @@ export class HubDB {
   async getDailyUploadBytes(orgId: string): Promise<number> {
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
-    const row = await this.driver.get<{ total: number }>(
+    const row = await this.driver.get<{ total: number | string }>(
       'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?',
       [orgId, dayStart.getTime()],
     );
-    return row!.total;
+    return Number(row!.total);
   }
 
 
@@ -2082,22 +2093,25 @@ export class HubDB {
 
     return await this.driver.transaction(async (txn) => {
       // Check org-level daily quota
-      const orgRow = await txn.get<{ total: number }>(
+      // Note: pg returns SUM/COUNT as string (int8) — always coerce with Number()
+      const orgRow = await txn.get<{ total: number | string }>(
         'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND created_at >= ?',
         [orgId, dayStartMs],
       );
-      if (orgRow!.total + size > dailyLimitBytes) {
-        return { ok: false as const, reason: 'org' as const, dailyBytes: orgRow!.total, limitBytes: dailyLimitBytes };
+      const orgTotal = Number(orgRow!.total);
+      if (orgTotal + size > dailyLimitBytes) {
+        return { ok: false as const, reason: 'org' as const, dailyBytes: orgTotal, limitBytes: dailyLimitBytes };
       }
 
       // Check per-bot daily quota
       if (perBotDailyLimitBytes > 0) {
-        const botRow = await txn.get<{ total: number }>(
+        const botRow = await txn.get<{ total: number | string }>(
           'SELECT COALESCE(SUM(size), 0) as total FROM files WHERE org_id = ? AND uploader_id = ? AND created_at >= ?',
           [orgId, uploaderId, dayStartMs],
         );
-        if (botRow!.total + size > perBotDailyLimitBytes) {
-          return { ok: false as const, reason: 'bot' as const, dailyBytes: botRow!.total, limitBytes: perBotDailyLimitBytes };
+        const botTotal = Number(botRow!.total);
+        if (botTotal + size > perBotDailyLimitBytes) {
+          return { ok: false as const, reason: 'bot' as const, dailyBytes: botTotal, limitBytes: perBotDailyLimitBytes };
         }
       }
 
@@ -2210,7 +2224,8 @@ export class HubDB {
     channel_messages: number;
     total: number;
   }> {
-    const rows = await this.driver.all<{ type: string; count: number }>(`
+    // Note: pg returns COUNT(*) as string (int8) — coerce with Number()
+    const rows = await this.driver.all<{ type: string; count: number | string }>(`
       SELECT type, COUNT(*) as count FROM catchup_events
       WHERE target_bot_id = ? AND occurred_at > ?
       GROUP BY type
@@ -2225,20 +2240,21 @@ export class HubDB {
     };
 
     for (const row of rows) {
+      const c = Number(row.count);
       switch (row.type) {
         case 'thread_invited':
-          counts.thread_invites = row.count;
+          counts.thread_invites = c;
           break;
         case 'thread_status_changed':
-          counts.thread_status_changes = row.count;
+          counts.thread_status_changes = c;
           break;
         case 'thread_message_summary':
         case 'thread_artifact_added':
         case 'thread_participant_removed':
-          counts.thread_activities += row.count;
+          counts.thread_activities += c;
           break;
         case 'channel_message_summary':
-          counts.channel_messages = row.count;
+          counts.channel_messages = c;
           break;
       }
     }
@@ -2252,7 +2268,7 @@ export class HubDB {
   async cleanupOldCatchupEvents(maxAgeDays: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
     const result = await this.driver.run(
-      'DELETE FROM catchup_events WHERE rowid IN (SELECT rowid FROM catchup_events WHERE occurred_at < ? LIMIT ?)',
+      `DELETE FROM catchup_events WHERE ${this.rowid} IN (SELECT ${this.rowid} FROM catchup_events WHERE occurred_at < ? LIMIT ?)`,
       [cutoff, batchSize],
     );
     return result.changes;
@@ -2412,26 +2428,29 @@ export class HubDB {
     return await this.driver.transaction(async (txn) => {
       if (resource === 'message') {
         const windowStart = now - 60000; // 1 minute
-        const row = await txn.get<{ count: number; oldest: number | null }>(
+        // Note: pg returns COUNT/MIN as string — coerce with Number()
+        const row = await txn.get<{ count: number | string; oldest: number | string | null }>(
           `SELECT COUNT(*) as count, MIN(created_at) as oldest FROM rate_limit_events
            WHERE org_id = ? AND bot_id = ? AND resource_type = 'message' AND created_at > ?`,
           [orgId, botId, windowStart],
         );
 
-        if (row!.count >= settings.messages_per_minute_per_bot) {
-          const retryAfter = row!.oldest ? Math.ceil((row!.oldest + 60000 - now) / 1000) : 60;
+        if (Number(row!.count) >= settings.messages_per_minute_per_bot) {
+          const oldest = row!.oldest != null ? Number(row!.oldest) : null;
+          const retryAfter = oldest ? Math.ceil((oldest + 60000 - now) / 1000) : 60;
           return { allowed: false as const, retryAfter: Math.max(retryAfter, 1) };
         }
       } else {
         const windowStart = now - 3600000; // 1 hour
-        const row = await txn.get<{ count: number; oldest: number | null }>(
+        const row = await txn.get<{ count: number | string; oldest: number | string | null }>(
           `SELECT COUNT(*) as count, MIN(created_at) as oldest FROM rate_limit_events
            WHERE org_id = ? AND bot_id = ? AND resource_type = 'thread' AND created_at > ?`,
           [orgId, botId, windowStart],
         );
 
-        if (row!.count >= settings.threads_per_hour_per_bot) {
-          const retryAfter = row!.oldest ? Math.ceil((row!.oldest + 3600000 - now) / 1000) : 3600;
+        if (Number(row!.count) >= settings.threads_per_hour_per_bot) {
+          const oldest = row!.oldest != null ? Number(row!.oldest) : null;
+          const retryAfter = oldest ? Math.ceil((oldest + 3600000 - now) / 1000) : 3600;
           return { allowed: false as const, retryAfter: Math.max(retryAfter, 1) };
         }
       }
@@ -2449,7 +2468,7 @@ export class HubDB {
   async cleanupOldRateLimitEvents(batchSize = 10000): Promise<number> {
     const cutoff = Date.now() - 3600000; // 1 hour
     const result = await this.driver.run(
-      'DELETE FROM rate_limit_events WHERE rowid IN (SELECT rowid FROM rate_limit_events WHERE created_at < ? LIMIT ?)',
+      `DELETE FROM rate_limit_events WHERE ${this.rowid} IN (SELECT ${this.rowid} FROM rate_limit_events WHERE created_at < ? LIMIT ?)`,
       [cutoff, batchSize],
     );
     return result.changes;
@@ -2530,7 +2549,7 @@ export class HubDB {
   async cleanupOldAuditLog(maxAgeDays: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
     const result = await this.driver.run(
-      'DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE created_at < ? LIMIT ?)',
+      `DELETE FROM audit_log WHERE ${this.rowid} IN (SELECT ${this.rowid} FROM audit_log WHERE created_at < ? LIMIT ?)`,
       [cutoff, batchSize],
     );
     return result.changes;
@@ -2543,9 +2562,10 @@ export class HubDB {
     let total = 0;
 
     // Delete channel messages older than TTL (batched)
+    const rid = this.rowid;
     const r1 = await this.driver.run(`
-      DELETE FROM messages WHERE rowid IN (
-        SELECT messages.rowid FROM messages
+      DELETE FROM messages WHERE ${rid} IN (
+        SELECT messages.${rid} FROM messages
         JOIN channels ON channels.id = messages.channel_id
         WHERE channels.org_id = ? AND messages.created_at < ?
         LIMIT ?
@@ -2555,8 +2575,8 @@ export class HubDB {
 
     // Delete thread messages older than TTL (only in resolved/closed threads, batched)
     const r2 = await this.driver.run(`
-      DELETE FROM thread_messages WHERE rowid IN (
-        SELECT thread_messages.rowid FROM thread_messages
+      DELETE FROM thread_messages WHERE ${rid} IN (
+        SELECT thread_messages.${rid} FROM thread_messages
         JOIN threads ON threads.id = thread_messages.thread_id
         WHERE threads.org_id = ? AND threads.status IN ('resolved', 'closed')
         AND thread_messages.created_at < ?
@@ -2573,8 +2593,8 @@ export class HubDB {
     const now = Date.now();
     const r = await this.driver.run(`
       UPDATE threads SET status = 'closed', close_reason = 'timeout', updated_at = ?, last_activity_at = ?, revision = revision + 1
-      WHERE rowid IN (
-        SELECT rowid FROM threads
+      WHERE ${this.rowid} IN (
+        SELECT ${this.rowid} FROM threads
         WHERE org_id = ? AND last_activity_at < ? AND status NOT IN ('resolved', 'closed')
         LIMIT ?
       )
@@ -2585,8 +2605,8 @@ export class HubDB {
   async cleanupExpiredArtifacts(orgId: string, days: number, batchSize = 5000): Promise<number> {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const r = await this.driver.run(`
-      DELETE FROM artifacts WHERE rowid IN (
-        SELECT artifacts.rowid FROM artifacts
+      DELETE FROM artifacts WHERE ${this.rowid} IN (
+        SELECT artifacts.${this.rowid} FROM artifacts
         JOIN threads ON threads.id = artifacts.thread_id
         WHERE threads.org_id = ? AND threads.status IN ('resolved', 'closed')
         AND artifacts.created_at < ?
