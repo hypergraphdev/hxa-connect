@@ -400,7 +400,7 @@ describe('Web UI static files', () => {
 
     const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
     expect(html).toContain('HXA Web UI');
-    expect(html).toContain('/ui/api');
+    expect(html).toContain("+ '/api'");
 
     const css = fs.readFileSync(path.join(webDir, 'ui.css'), 'utf8');
     expect(css).toContain('--accent');

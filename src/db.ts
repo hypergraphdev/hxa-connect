@@ -850,7 +850,7 @@ export class HubDB {
       return { bot: updated, created: false, plaintextToken: null };
     }
 
-    const plaintextToken = `agent_${crypto.randomBytes(24).toString('hex')}`;
+    const plaintextToken = `bot_${crypto.randomBytes(24).toString('hex')}`;
     const bot: Bot = {
       id: crypto.randomUUID(),
       org_id: orgId,

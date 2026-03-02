@@ -167,7 +167,7 @@
 
 <script>
 // ─── State ───────────────────────────────────────────────
-const API = '/ui/api';
+const API = window.location.pathname.replace(/\/+$/, '') + '/api';
 let session = null;       // { bot, owner_name, scopes, expires_at }
 let currentView = null;   // { type: 'thread'|'dm', id: string }
 let ws = null;
@@ -633,7 +633,8 @@ async function connectWebSocket() {
   try {
     const { ticket } = await api('POST', '/ws-ticket');
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws?ticket=${ticket}`);
+    const wsBase = API.replace(/\/ui\/api$/, '');
+    ws = new WebSocket(`${proto}//${location.host}${wsBase}/ws?ticket=${ticket}`);
     ws.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data);
