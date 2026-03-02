@@ -601,6 +601,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
       parts: message.parts ? JSON.parse(message.parts) : [{ type: 'text', content: message.content }],
       mentions: message.mentions ? JSON.parse(message.mentions) : [],
       mention_all: !!message.mention_all,
+      metadata,
       sender_name: bot.name,
     };
 
