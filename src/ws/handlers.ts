@@ -145,7 +145,7 @@ export async function handleSendDm(hub: WsHub, client: WsClient, data: any): Pro
     return;
   }
 
-  const channel = await hub.db.createChannel(client.orgId, 'direct', [client.botId!, target.id]);
+  const channel = await hub.db.createChannel(client.orgId, [client.botId!, target.id]);
 
   if (channel.isNew) {
     hub.broadcastToOrg(client.orgId, {

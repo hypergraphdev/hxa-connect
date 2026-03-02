@@ -67,7 +67,7 @@ export interface OrgTicket {
 export interface Channel {
   id: string;
   org_id: string;
-  type: 'direct' | 'group';
+  type: 'direct';
   name: string | null;
   created_at: number;
 }

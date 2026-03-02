@@ -47,7 +47,7 @@ async function seedTestDb(): Promise<void> {
   // Seed a channel
   await driver.run(
     "INSERT INTO channels (id, org_id, type, name, created_at) VALUES (?, ?, ?, ?, ?)",
-    ['ch1', 'org1', 'group', 'general', now],
+    ['ch1', 'org1', 'direct', 'general', now],
   );
 
   // Seed channel member
@@ -172,5 +172,63 @@ describe('migrate CLI', () => {
     // 1 org_settings, 1 audit_log, plus schema_versions entries = ~13-14 rows
     // The exact total depends on number of schema_versions entries
     expect(result).toMatch(/Total: \d+ rows/);
+  });
+});
+
+describe('remove_group_channels migration', () => {
+  it('deletes legacy group channels and their members/messages on init', async () => {
+    const driver = new SqliteDriver(dbPath);
+    // Create schema with old CHECK constraint that allows group
+    await driver.exec(`
+      CREATE TABLE orgs (id TEXT PRIMARY KEY, name TEXT, org_secret TEXT, persist_messages INTEGER DEFAULT 1, status TEXT DEFAULT 'active', created_at INTEGER);
+      CREATE TABLE bots (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, token TEXT, auth_role TEXT DEFAULT 'member', online INTEGER DEFAULT 0, created_at INTEGER);
+      CREATE TABLE channels (id TEXT PRIMARY KEY, org_id TEXT, type TEXT NOT NULL, name TEXT, created_at INTEGER);
+      CREATE TABLE channel_members (channel_id TEXT, bot_id TEXT, joined_at INTEGER, PRIMARY KEY(channel_id, bot_id));
+      CREATE TABLE messages (id TEXT PRIMARY KEY, channel_id TEXT, sender_id TEXT, content TEXT, content_type TEXT DEFAULT 'text', created_at INTEGER);
+    `);
+
+    const now = Date.now();
+    await driver.run("INSERT INTO orgs VALUES (?, ?, ?, ?, ?, ?)", ['org1', 'Org', 'secret', 1, 'active', now]);
+    await driver.run("INSERT INTO bots VALUES (?, ?, ?, ?, ?, ?, ?)", ['bot1', 'org1', 'Bot1', 'tok1', 'member', 0, now]);
+    await driver.run("INSERT INTO bots VALUES (?, ?, ?, ?, ?, ?, ?)", ['bot2', 'org1', 'Bot2', 'tok2', 'member', 0, now]);
+    await driver.run("INSERT INTO bots VALUES (?, ?, ?, ?, ?, ?, ?)", ['bot3', 'org1', 'Bot3', 'tok3', 'member', 0, now]);
+
+    // Direct channel (should survive)
+    await driver.run("INSERT INTO channels VALUES (?, ?, ?, ?, ?)", ['dm1', 'org1', 'direct', null, now]);
+    await driver.run("INSERT INTO channel_members VALUES (?, ?, ?)", ['dm1', 'bot1', now]);
+    await driver.run("INSERT INTO channel_members VALUES (?, ?, ?)", ['dm1', 'bot2', now]);
+    await driver.run("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)", ['msg1', 'dm1', 'bot1', 'DM msg', 'text', now]);
+
+    // Group channel (should be deleted)
+    await driver.run("INSERT INTO channels VALUES (?, ?, ?, ?, ?)", ['grp1', 'org1', 'group', 'general', now]);
+    await driver.run("INSERT INTO channel_members VALUES (?, ?, ?)", ['grp1', 'bot1', now]);
+    await driver.run("INSERT INTO channel_members VALUES (?, ?, ?)", ['grp1', 'bot2', now]);
+    await driver.run("INSERT INTO channel_members VALUES (?, ?, ?)", ['grp1', 'bot3', now]);
+    await driver.run("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)", ['msg2', 'grp1', 'bot1', 'Group msg', 'text', now]);
+
+    await driver.close();
+
+    // Now init HubDB which runs migration
+    const driver2 = new SqliteDriver(dbPath);
+    const db = new HubDB(driver2);
+    await db.init();
+
+    // Direct channel should survive
+    const dm = await driver2.get("SELECT * FROM channels WHERE id = 'dm1'");
+    expect(dm).toBeDefined();
+    const dmMembers = await driver2.all("SELECT * FROM channel_members WHERE channel_id = 'dm1'");
+    expect(dmMembers).toHaveLength(2);
+    const dmMsgs = await driver2.all("SELECT * FROM messages WHERE channel_id = 'dm1'");
+    expect(dmMsgs).toHaveLength(1);
+
+    // Group channel should be deleted
+    const grp = await driver2.get("SELECT * FROM channels WHERE id = 'grp1'");
+    expect(grp).toBeUndefined();
+    const grpMembers = await driver2.all("SELECT * FROM channel_members WHERE channel_id = 'grp1'");
+    expect(grpMembers).toHaveLength(0);
+    const grpMsgs = await driver2.all("SELECT * FROM messages WHERE channel_id = 'grp1'");
+    expect(grpMsgs).toHaveLength(0);
+
+    await driver2.close();
   });
 });

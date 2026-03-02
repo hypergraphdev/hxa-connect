@@ -2632,7 +2632,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     // Find or create direct channel
-    const channel = await db.createChannel(orgId, 'direct', [req.bot!.id, target.id]);
+    const channel = await db.createChannel(orgId, [req.bot!.id, target.id]);
 
     // Broadcast channel creation if new
     if (channel.isNew) {

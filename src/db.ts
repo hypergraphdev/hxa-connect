@@ -84,7 +84,7 @@ export class HubDB {
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-        type TEXT NOT NULL CHECK(type IN ('direct', 'group')),
+        type TEXT NOT NULL CHECK(type IN ('direct')),
         name TEXT,
         created_at INTEGER NOT NULL
       );
@@ -294,6 +294,28 @@ export class HubDB {
         ALTER TABLE thread_messages ADD COLUMN mentions TEXT DEFAULT NULL;
         ALTER TABLE thread_messages ADD COLUMN mention_all INTEGER DEFAULT 0;
       `);
+    });
+
+    // Delete any legacy group channels (group channels are no longer supported).
+    // Group channels cannot be safely converted to direct because they may have
+    // more than 2 members, which would violate the DM model and could cause
+    // duplicate direct channels between the same bot pair.
+    //
+    // Note: on existing databases, the old CHECK(type IN ('direct','group'))
+    // constraint persists because SQLite cannot ALTER CHECK constraints without
+    // table recreation. This is acceptable because createChannel() hardcodes
+    // type='direct' — no code path can create group channels.
+    await this.runMigration('remove_group_channels', async () => {
+      // Delete members first (FK), then channels
+      await this.driver.run(
+        "DELETE FROM channel_members WHERE channel_id IN (SELECT id FROM channels WHERE type = 'group')",
+      );
+      await this.driver.run(
+        "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE type = 'group')",
+      );
+      await this.driver.run(
+        "DELETE FROM channels WHERE type = 'group'",
+      );
     });
   }
 
@@ -1249,9 +1271,9 @@ export class HubDB {
 
   // ─── Channel Operations ──────────────────────────────────
 
-  async createChannel(orgId: string, type: 'direct' | 'group', memberIds: string[], name?: string): Promise<Channel & { isNew?: boolean }> {
-    // For direct channels, check if one already exists between these two bots
-    if (type === 'direct' && memberIds.length === 2) {
+  async createChannel(orgId: string, memberIds: string[], name?: string): Promise<Channel & { isNew?: boolean }> {
+    // Check if a direct channel already exists between these two bots
+    if (memberIds.length === 2) {
       const existing = await this.findDirectChannel(memberIds[0], memberIds[1]);
       if (existing) return { ...existing, isNew: false };
     }
@@ -1259,7 +1281,7 @@ export class HubDB {
     const channel: Channel = {
       id: crypto.randomUUID(),
       org_id: orgId,
-      type,
+      type: 'direct',
       name: name || null,
       created_at: Date.now(),
     };
