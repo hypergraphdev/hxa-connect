@@ -386,3 +386,23 @@ describe('WebSocket ticket', () => {
     expect(body.expires_in).toBe(30);
   });
 });
+
+// ─── Web UI Static Files ───────────────────────────────────
+
+describe('Web UI static files', () => {
+  it('frontend files exist in web/ui/', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const webDir = path.resolve(import.meta.dirname, '..', 'web', 'ui');
+
+    expect(fs.existsSync(path.join(webDir, 'index.html'))).toBe(true);
+    expect(fs.existsSync(path.join(webDir, 'ui.css'))).toBe(true);
+
+    const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
+    expect(html).toContain('HXA Web UI');
+    expect(html).toContain('/ui/api');
+
+    const css = fs.readFileSync(path.join(webDir, 'ui.css'), 'utf8');
+    expect(css).toContain('--accent');
+  });
+});

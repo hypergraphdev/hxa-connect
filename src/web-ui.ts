@@ -389,8 +389,17 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
 
+    // Enrich with sender names
+    const enriched = await Promise.all(messages.map(async (m) => {
+      const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
+      return {
+        ...m,
+        sender_name: sender?.name || 'unknown',
+      };
+    }));
+
     res.json({
-      items: messages,
+      items: enriched,
       has_more: hasMore,
       ...(hasMore && messages.length > 0 ? { next_cursor: messages[messages.length - 1].id } : {}),
     });
