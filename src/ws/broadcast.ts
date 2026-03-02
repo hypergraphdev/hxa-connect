@@ -95,13 +95,16 @@ export async function broadcastThreadEvent(
 
   await fireThreadWebhooks(db, webhookManager, participantIds, event, excludeWebhookBotId);
 
+  // thread_created is an org-wide notification — send to all org admins
+  // regardless of subscription. Other thread events require subscription.
+  const isOrgWideEvent = event.type === 'thread_created';
+
   const participantSet = new Set(participantIds);
   for (const client of clients) {
     if (client.orgId !== orgId) continue;
 
-    // Org admins only receive thread events for subscribed threads
     if (client.isOrgAdmin) {
-      if (client.subscriptions.has(threadId)) {
+      if (isOrgWideEvent || client.subscriptions.has(threadId)) {
         sendToClient(client, event);
       }
       continue;

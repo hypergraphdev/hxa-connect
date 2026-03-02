@@ -505,19 +505,24 @@ function autoResizeTextarea(el) {
 
 async function sendThreadMessage() {
   if (!currentView || currentView.type !== 'thread') return;
+  const threadId = currentView.id;
   const input = document.getElementById('thread-input');
   const content = input.value.trim();
   if (!content) return;
 
   input.disabled = true;
   try {
-    const msg = await api('POST', `/threads/${currentView.id}/messages`, { content });
-    // Append to message list
-    const container = document.getElementById('thread-messages');
-    const emptyEl = container.querySelector('.list-empty');
-    if (emptyEl) emptyEl.remove();
-    container.appendChild(createMessageEl(msg));
-    container.scrollTop = container.scrollHeight;
+    const msg = await api('POST', `/threads/${threadId}/messages`, { content });
+    // Only append if user is still viewing the same thread
+    if (currentView?.type === 'thread' && currentView.id === threadId) {
+      const container = document.getElementById('thread-messages');
+      if (!container.querySelector(`[data-id="${msg.id}"]`)) {
+        const emptyEl = container.querySelector('.list-empty');
+        if (emptyEl) emptyEl.remove();
+        container.appendChild(createMessageEl(msg));
+        container.scrollTop = container.scrollHeight;
+      }
+    }
     input.value = '';
     input.style.height = 'auto';
   } catch (e) {
@@ -584,6 +589,26 @@ async function connectWebSocket() {
 }
 
 function handleWSEvent(event) {
+  if (event.type === 'thread_created' && event.thread) {
+    // New thread — prepend to sidebar if not already present
+    const list = document.getElementById('thread-list');
+    if (!list.querySelector(`[data-id="${event.thread.id}"]`)) {
+      const emptyEl = list.querySelector('.list-empty');
+      if (emptyEl) emptyEl.remove();
+      const el = document.createElement('div');
+      el.className = 'list-item';
+      el.dataset.id = event.thread.id;
+      el.onclick = () => openThread(event.thread.id);
+      el.innerHTML = `
+        <div class="list-item-title">${esc(event.thread.topic || 'Untitled')}</div>
+        <div class="list-item-meta">
+          <span class="badge badge-green">${esc(event.thread.status || 'active')}</span>
+          <span>just now</span>
+        </div>
+      `;
+      list.prepend(el);
+    }
+  }
   if (event.type === 'thread_message' && currentView?.type === 'thread' && currentView.id === event.thread_id) {
     // Don't duplicate if we just sent it
     const container = document.getElementById('thread-messages');
