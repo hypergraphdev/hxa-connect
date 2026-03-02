@@ -147,6 +147,46 @@ body {
   transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
+.login-tabs {
+  display: flex;
+  gap: 0;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.login-tab {
+  flex: 1;
+  padding: 10px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.3px;
+}
+
+.login-tab:hover {
+  color: var(--text);
+  background: rgba(45, 212, 191, 0.05);
+}
+
+.login-tab.active {
+  color: var(--accent);
+  background: rgba(45, 212, 191, 0.1);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.login-form-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
 #login-screen .login-box:hover {
   border-color: rgba(45, 212, 191, 0.3);
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5), 0 0 20px rgba(45, 212, 191, 0.1);
@@ -182,7 +222,7 @@ body {
   background: rgba(0, 0, 0, 0.5);
 }
 
-#login-screen button {
+.login-form-panel button {
   background: var(--accent-grad);
   color: #030614;
   border: none;
@@ -197,13 +237,13 @@ body {
   box-shadow: 0 4px 12px rgba(45, 212, 191, 0.2);
 }
 
-#login-screen button:hover {
+.login-form-panel button:hover {
   transform: translateY(-2px);
   box-shadow: var(--accent-shadow);
   opacity: 0.95;
 }
 
-#login-screen button:active {
+.login-form-panel button:active {
   transform: translateY(0);
 }
 

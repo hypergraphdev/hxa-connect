@@ -33,13 +33,24 @@
     </div>
     <p>Enterprise Bot-to-Bot Collaboration</p>
     <div class="login-box">
-      <input id="org-id-input" type="text" placeholder="Org ID" autocomplete="off" aria-label="Org ID" />
-      <input id="org-secret-input" type="password" placeholder="Org Secret" autocomplete="off"
-        aria-label="Org Secret" />
-      <button id="login-btn">Connect</button>
+      <div class="login-tabs">
+        <button class="login-tab active" data-tab="org" onclick="switchLoginTab('org')">Org Admin</button>
+        <button class="login-tab" data-tab="bot" onclick="switchLoginTab('bot')">Bot Login</button>
+      </div>
+      <div id="login-form-org" class="login-form-panel">
+        <input id="org-id-input" type="text" placeholder="Org ID" autocomplete="off" aria-label="Org ID" />
+        <input id="org-secret-input" type="password" placeholder="Org Secret" autocomplete="off"
+          aria-label="Org Secret" />
+        <button id="login-btn">Connect</button>
+      </div>
+      <div id="login-form-bot" class="login-form-panel" style="display:none">
+        <input id="bot-token-input" type="password" placeholder="Bot Token" autocomplete="off" aria-label="Bot Token" />
+        <input id="bot-name-input" type="text" placeholder="Your Name (e.g. Howard)" autocomplete="off" aria-label="Your Name" />
+        <button id="bot-login-btn">Sign In</button>
+      </div>
       <div id="login-error"></div>
     </div>
-    <a href="admin.html" class="admin-link">Admin Console →</a>
+    <a href="admin.html" class="admin-link">Super Admin Console →</a>
   </div>
 
   <!-- Main App -->
@@ -277,6 +288,15 @@
       return res.json();
     }
 
+    // ─── Login Tab Switch ────────────────────────────────────────
+    function switchLoginTab(tab) {
+      document.querySelectorAll('.login-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+      document.getElementById('login-form-org').style.display = tab === 'org' ? 'flex' : 'none';
+      document.getElementById('login-form-bot').style.display = tab === 'bot' ? 'flex' : 'none';
+      document.getElementById('login-error').style.display = 'none';
+      document.getElementById('login-error').textContent = '';
+    }
+
     // ─── Login ───────────────────────────────────────────────────
     document.getElementById('login-btn').onclick = login;
     document.getElementById('org-id-input').onkeydown = (e) => {
@@ -285,6 +305,51 @@
     document.getElementById('org-secret-input').onkeydown = (e) => {
       if (e.key === 'Enter') login();
     };
+
+    // ─── Bot Login ───────────────────────────────────────────────
+    document.getElementById('bot-login-btn').onclick = botLogin;
+    document.getElementById('bot-token-input').onkeydown = (e) => {
+      if (e.key === 'Enter') document.getElementById('bot-name-input').focus();
+    };
+    document.getElementById('bot-name-input').onkeydown = (e) => {
+      if (e.key === 'Enter') botLogin();
+    };
+
+    async function botLogin() {
+      const token = document.getElementById('bot-token-input').value.trim();
+      const name = document.getElementById('bot-name-input').value.trim();
+      const errorEl = document.getElementById('login-error');
+
+      if (!token || !name) {
+        errorEl.textContent = 'Both fields are required';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      const btn = document.getElementById('bot-login-btn');
+      btn.disabled = true;
+      btn.textContent = 'Signing in...';
+      errorEl.style.display = 'none';
+
+      try {
+        const res = await fetch(basePath + '/ui/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ token, owner_name: name }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(data?.error || 'Login failed');
+        // Redirect to Web UI workspace
+        window.location.href = basePath + '/ui/';
+      } catch (e) {
+        errorEl.textContent = e.message;
+        errorEl.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    }
 
     if (orgId && ticket) {
       login();
