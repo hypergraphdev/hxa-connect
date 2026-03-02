@@ -28,6 +28,24 @@ import type {
   PlatformInviteCode,
 } from './types.js';
 
+// ─── Cursor Helpers ──────────────────────────────────────────
+
+/** Encode a (timestamp, id) pair into an opaque cursor string. */
+export function encodeCursor(t: number, id: string): string {
+  return Buffer.from(JSON.stringify({ t, id })).toString('base64url');
+}
+
+/** Decode an opaque cursor. Returns null if invalid. */
+export function decodeCursor(cursor: string): { t: number; id: string } | null {
+  try {
+    const obj = JSON.parse(Buffer.from(cursor, 'base64url').toString());
+    if (typeof obj.t === 'number' && typeof obj.id === 'string') return obj;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Database Layer ──────────────────────────────────────────
 
 export class HubDB {
@@ -316,6 +334,23 @@ export class HubDB {
       await this.driver.run(
         "DELETE FROM channels WHERE type = 'group'",
       );
+    });
+
+    // Composite indexes for cursor-based pagination (PR1: history browsing API)
+    await this.runMigration('history_api_indexes', async () => {
+      // Thread listing cursor: (last_activity_at DESC, id DESC)
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_threads_activity_id ON threads(last_activity_at DESC, id DESC);
+      `);
+      // Thread messages cursor: (created_at DESC, id DESC) — already indexed by (thread_id, created_at),
+      // add composite for stable cursor pagination within a thread
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_thread_messages_cursor ON thread_messages(thread_id, created_at DESC, id DESC);
+      `);
+      // DM channel messages cursor: (created_at DESC, id DESC)
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_messages_cursor ON messages(channel_id, created_at DESC, id DESC);
+      `);
     });
   }
 
@@ -1416,9 +1451,9 @@ export class HubDB {
         [before],
       );
       if (!cursorRow) {
-        // Unknown cursor — return from newest
+        // Unknown cursor — return from newest with stable ordering
         return await this.driver.all<Message>(
-          'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?',
+          'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
           [channelId, limit + 1],
         );
       }
@@ -1428,8 +1463,9 @@ export class HubDB {
         [channelId, cursorRow.created_at, cursorRow.created_at, before, limit + 1],
       );
     }
+    // No cursor — start from newest with stable ordering
     return await this.driver.all<Message>(
-      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?',
+      'SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
       [channelId, limit + 1],
     );
   }
@@ -1583,6 +1619,141 @@ export class HubDB {
       ? await this.driver.all<any>(query, [botId, status, limit])
       : await this.driver.all<any>(query, [botId, limit]);
     return rows.map(row => this.rowToThread(row));
+  }
+
+  /**
+   * Cursor-paginated thread list for a bot.
+   * Cursor key: (last_activity_at DESC, id DESC), opaque-encoded.
+   * Returns limit+1 rows so the caller can detect has_more.
+   */
+  async listThreadsForBotPaginated(
+    botId: string,
+    opts: { status?: ThreadStatus; cursor?: string; limit: number; search?: string },
+  ): Promise<(Thread & { participant_count: number })[]> {
+    const conditions = ['tp.bot_id = ?'];
+    const params: any[] = [botId];
+
+    if (opts.status) { conditions.push('t.status = ?'); params.push(opts.status); }
+    if (opts.search) { conditions.push('t.topic LIKE ?'); params.push(`%${opts.search}%`); }
+
+    if (opts.cursor) {
+      const c = decodeCursor(opts.cursor);
+      if (c) {
+        conditions.push('(t.last_activity_at < ? OR (t.last_activity_at = ? AND t.id < ?))');
+        params.push(c.t, c.t, c.id);
+      }
+    }
+
+    params.push(opts.limit + 1);
+    const rows = await this.driver.all<any>(`
+      SELECT t.*, (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = t.id) AS participant_count
+      FROM threads t
+      JOIN thread_participants tp ON t.id = tp.thread_id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY t.last_activity_at DESC, t.id DESC
+      LIMIT ?
+    `, params);
+
+    return rows.map((row: any) => {
+      const count = Number(row.participant_count);
+      delete row.participant_count;
+      return { ...this.rowToThread(row), participant_count: count };
+    });
+  }
+
+  /**
+   * Paginated DM channels for a bot with last message preview and counterpart bot info.
+   * Sorted by last activity (most recent message or channel creation) DESC.
+   * Returns limit+1 rows for has_more detection.
+   */
+  async getWorkspaceDMs(
+    botId: string,
+    cursor: string | undefined,
+    limit: number,
+  ): Promise<{
+    channel: Channel;
+    counterpart_bot: { id: string; name: string; online: boolean; bio: string | null; role: string | null };
+    last_message_preview: { content: string; sender_id: string; sender_name: string; created_at: number } | null;
+    last_activity_at: number;
+  }[]> {
+    // Use a subquery so that last_activity_at alias is available in the outer
+    // WHERE and ORDER BY — PostgreSQL does not allow alias references in WHERE.
+    const innerConditions = ['cm.bot_id = ?', "c.type = 'direct'"];
+    const params: any[] = [botId];
+
+    const innerSql = `
+      SELECT c.*, COALESCE(
+        (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id),
+        c.created_at
+      ) AS last_activity_at
+      FROM channels c
+      JOIN channel_members cm ON c.id = cm.channel_id
+      WHERE ${innerConditions.join(' AND ')}
+    `;
+
+    const outerConditions: string[] = [];
+    if (cursor) {
+      const c = decodeCursor(cursor);
+      if (c) {
+        outerConditions.push('(last_activity_at < ? OR (last_activity_at = ? AND id < ?))');
+        params.push(c.t, c.t, c.id);
+      }
+    }
+
+    const outerWhere = outerConditions.length > 0 ? `WHERE ${outerConditions.join(' AND ')}` : '';
+    params.push(limit + 1);
+    const channels = await this.driver.all<any>(`
+      SELECT * FROM (${innerSql}) AS sub
+      ${outerWhere}
+      ORDER BY last_activity_at DESC, id DESC
+      LIMIT ?
+    `, params);
+
+    const result: {
+      channel: Channel;
+      counterpart_bot: { id: string; name: string; online: boolean; bio: string | null; role: string | null };
+      last_message_preview: { content: string; sender_id: string; sender_name: string; created_at: number } | null;
+      last_activity_at: number;
+    }[] = [];
+
+    for (const ch of channels) {
+      const lastActivityAt = ch.last_activity_at;
+      delete ch.last_activity_at;
+
+      // Find counterpart bot
+      const counterpartRow = await this.driver.get<any>(
+        'SELECT b.id, b.name, b.online, b.bio, b.role FROM channel_members cm JOIN bots b ON cm.bot_id = b.id WHERE cm.channel_id = ? AND cm.bot_id != ?',
+        [ch.id, botId],
+      );
+      const counterpart = counterpartRow
+        ? { id: counterpartRow.id, name: counterpartRow.name, online: !!counterpartRow.online, bio: counterpartRow.bio ?? null, role: counterpartRow.role ?? null }
+        : { id: 'unknown', name: 'unknown', online: false, bio: null, role: null };
+
+      // Get last message preview
+      const lastMsg = await this.driver.get<any>(
+        'SELECT m.content, m.sender_id, m.created_at FROM messages m WHERE m.channel_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 1',
+        [ch.id],
+      );
+      let lastMessagePreview = null;
+      if (lastMsg) {
+        const senderBot = await this.getBotById(lastMsg.sender_id);
+        lastMessagePreview = {
+          content: lastMsg.content.length > 200 ? lastMsg.content.slice(0, 200) + '…' : lastMsg.content,
+          sender_id: lastMsg.sender_id,
+          sender_name: senderBot?.name ?? 'unknown',
+          created_at: lastMsg.created_at,
+        };
+      }
+
+      result.push({
+        channel: { id: ch.id, org_id: ch.org_id, type: ch.type, name: ch.name, created_at: ch.created_at },
+        counterpart_bot: counterpart,
+        last_message_preview: lastMessagePreview,
+        last_activity_at: lastActivityAt,
+      });
+    }
+
+    return result;
   }
 
   async updateThreadStatus(threadId: string, status: ThreadStatus, closeReason?: CloseReason | null, expectedRevision?: number): Promise<Thread | undefined> {
@@ -1817,8 +1988,9 @@ export class HubDB {
         [before],
       );
       if (!cursorRow) {
+        // Unknown cursor — fall back to newest; include id tiebreaker for stable ordering
         const rows = await this.driver.all<any>(
-          'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?',
+          'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
           [threadId, limit + 1],
         );
         return rows.map(row => this.rowToThreadMessage(row));
@@ -1829,8 +2001,9 @@ export class HubDB {
       );
       return rows.map(row => this.rowToThreadMessage(row));
     }
+    // No cursor — start from newest; include id tiebreaker for stable ordering
     const rows = await this.driver.all<any>(
-      'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?',
+      'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
       [threadId, limit + 1],
     );
     return rows.map(row => this.rowToThreadMessage(row));

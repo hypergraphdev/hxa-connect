@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HubDB } from './db.js';
+import { HubDB, encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireBot, requireOrg, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
@@ -942,6 +942,49 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   });
 
   /**
+   * GET /api/me/workspace — Aggregate endpoint for Web UI initial load.
+   * Returns bot info + paginated DM list + paginated thread list.
+   */
+  auth.get('/api/me/workspace', requireBot, requireScope('read'), async (req, res) => {
+    const bot = req.bot!;
+
+    const dmLimit = Math.min(Math.max(parseInt(getQueryString(req.query.dm_limit) || '') || 20, 1), 100);
+    const threadLimit = Math.min(Math.max(parseInt(getQueryString(req.query.thread_limit) || '') || 20, 1), 100);
+    const dmCursor = getQueryString(req.query.dm_cursor);
+    const threadCursor = getQueryString(req.query.thread_cursor);
+
+    const [dmRows, threadRows] = await Promise.all([
+      db.getWorkspaceDMs(bot.id, dmCursor, dmLimit),
+      db.listThreadsForBotPaginated(bot.id, { cursor: threadCursor, limit: threadLimit }),
+    ]);
+
+    const dmHasMore = dmRows.length > dmLimit;
+    const dmItems = dmHasMore ? dmRows.slice(0, dmLimit) : dmRows;
+    const threadHasMore = threadRows.length > threadLimit;
+    const threadItems = threadHasMore ? threadRows.slice(0, threadLimit) : threadRows;
+
+    const response: Record<string, unknown> = {
+      bot: toBotResponse(bot),
+      dms: {
+        items: dmItems,
+        has_more: dmHasMore,
+        ...(dmHasMore && dmItems.length > 0 ? {
+          next_cursor: encodeCursor(dmItems[dmItems.length - 1].last_activity_at, dmItems[dmItems.length - 1].channel.id),
+        } : {}),
+      },
+      threads: {
+        items: threadItems,
+        has_more: threadHasMore,
+        ...(threadHasMore && threadItems.length > 0 ? {
+          next_cursor: encodeCursor(threadItems[threadItems.length - 1].last_activity_at, threadItems[threadItems.length - 1].id),
+        } : {}),
+      },
+    };
+
+    res.json(response);
+  });
+
+  /**
    * PATCH /api/me/profile — Update current bot profile fields
    */
   auth.patch('/api/me/profile', requireBot, requireScope('profile'), async (req, res) => {
@@ -1752,6 +1795,28 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     }
 
     const status = statusRaw as ThreadStatus | undefined;
+    const cursor = getQueryString(req.query.cursor);
+    const limitParam = getQueryString(req.query.limit);
+    const search = getQueryString(req.query.q)?.trim();
+
+    // When cursor, search, or limit specified → paginated response
+    if (cursor || search || limitParam) {
+      const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
+      const rows = await db.listThreadsForBotPaginated(req.bot!.id, { status, cursor, limit, search });
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const response: Record<string, unknown> = {
+        items,
+        has_more: hasMore,
+      };
+      if (hasMore && items.length > 0) {
+        response.next_cursor = encodeCursor(items[items.length - 1].last_activity_at, items[items.length - 1].id);
+      }
+      res.json(response);
+      return;
+    }
+
+    // Legacy: no pagination params → return flat array
     const threads = await db.listThreadsForBot(req.bot!.id, status);
     res.json(threads);
   });
@@ -2295,6 +2360,32 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     if (!thread) return;
 
     const limit = Math.min(Math.max(parseInt(getQueryString(req.query.limit) || '') || 50, 1), 200);
+    const cursorParam = getQueryString(req.query.cursor);
+
+    // Cursor-based pagination: cursor is a message ID (or undefined for first page).
+    // Enter paginated mode when 'cursor' query key is present (even if empty string).
+    if (req.query.cursor !== undefined) {
+      const rows = await db.getThreadMessagesPaginated(thread.id, cursorParam || undefined, limit);
+      const hasMore = rows.length > limit;
+      const messages = hasMore ? rows.slice(0, limit) : rows;
+
+      const enriched = await Promise.all(messages.map(async (m) => {
+        const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
+        return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+      }));
+
+      const response: Record<string, unknown> = {
+        items: enriched,
+        has_more: hasMore,
+      };
+      if (hasMore && messages.length > 0) {
+        response.next_cursor = messages[messages.length - 1].id;
+      }
+      res.json(response);
+      return;
+    }
+
+    // Legacy timestamp-based path
     const beforeStr = getQueryString(req.query.before);
     const before = beforeStr ? parseInt(beforeStr) : undefined;
     const sinceStr = getQueryString(req.query.since);
