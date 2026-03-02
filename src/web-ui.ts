@@ -281,7 +281,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
     // Set cookie — HttpOnly, SameSite=Strict
     // Secure flag based on actual protocol (respects trust proxy + x-forwarded-proto)
     res.setHeader('Set-Cookie',
-      `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/ui${req.secure ? '; Secure' : ''}; Max-Age=${SESSION_TTL_MS / 1000}`,
+      `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/${req.secure ? '; Secure' : ''}; Max-Age=${SESSION_TTL_MS / 1000}`,
     );
 
     res.json({
@@ -306,7 +306,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
     if (sessionId) sessions.delete(sessionId);
 
     res.setHeader('Set-Cookie',
-      `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/ui; Max-Age=0`,
+      `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
     );
     res.json({ ok: true });
   });

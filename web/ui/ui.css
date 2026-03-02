@@ -60,38 +60,6 @@ html, body {
 .toast.show { opacity: 1; transform: translateX(0); }
 .toast-error { border-color: var(--red); color: var(--red); }
 
-/* ─── Login ─── */
-#login-screen {
-  display: flex; align-items: center; justify-content: center;
-  position: fixed; inset: 0; z-index: 100;
-}
-.login-card {
-  text-align: center; padding: 40px;
-  background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: var(--radius); max-width: 380px; width: 100%;
-}
-.login-logo {
-  display: flex; align-items: center; justify-content: center; gap: 10px;
-  color: var(--accent); margin-bottom: 8px;
-}
-.login-logo h1 { font-size: 22px; font-weight: 700; color: var(--text); }
-.login-subtitle { color: var(--text-dim); font-size: 13px; margin-bottom: 24px; }
-.login-form { display: flex; flex-direction: column; gap: 10px; }
-.login-form input {
-  padding: 10px 14px; border-radius: var(--radius-sm);
-  border: 1px solid var(--border); background: rgba(0,0,0,0.3);
-  color: var(--text); font-size: 14px; outline: none;
-}
-.login-form input:focus { border-color: var(--border-focus); }
-.login-form button {
-  padding: 10px; border-radius: var(--radius-sm);
-  border: none; background: var(--accent); color: var(--bg);
-  font-weight: 600; font-size: 14px; cursor: pointer;
-}
-.login-form button:hover { background: var(--accent-hover); }
-.login-form button:disabled { opacity: 0.6; cursor: not-allowed; }
-#login-error { color: var(--red); font-size: 12px; min-height: 18px; }
-
 /* ─── App Layout ─── */
 #app {
   display: flex; flex-direction: column; height: 100%;

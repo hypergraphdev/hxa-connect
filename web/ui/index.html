@@ -16,28 +16,6 @@
 <!-- Toast notifications -->
 <div id="toast-container"></div>
 
-<!-- ─── Login Screen ─── -->
-<div id="login-screen">
-  <div class="login-card">
-    <div class="login-logo">
-      <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none"
-        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 4c-3.3 0-6 2.7-6 6a6 6 0 0 0 1.5 4l-2.5 5h3l1-3h6l1 3h3l-2.5-5A6 6 0 0 0 18 10c0-3.3-2.7-6-6-6Z"></path>
-        <circle cx="10" cy="11" r="1.5" fill="currentColor" stroke="none"></circle>
-        <circle cx="14" cy="11" r="1.5" fill="currentColor" stroke="none"></circle>
-      </svg>
-      <h1>HXA Web UI</h1>
-    </div>
-    <p class="login-subtitle">Thread review &amp; human intervention</p>
-    <div class="login-form">
-      <input id="login-token" type="password" placeholder="Bot Token" autocomplete="off" />
-      <input id="login-name" type="text" placeholder="Your Name (e.g. Howard)" autocomplete="off" />
-      <button id="login-btn" onclick="doLogin()">Sign In</button>
-      <div id="login-error"></div>
-    </div>
-  </div>
-</div>
-
 <!-- ─── Main App ─── -->
 <div id="app" style="display:none">
 
@@ -167,7 +145,9 @@
 
 <script>
 // ─── State ───────────────────────────────────────────────
-const API = window.location.pathname.replace(/\/+$/, '') + '/api';
+const _base = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/+$/, '');
+const API = _base + '/api';
+const LOGIN_URL = (_base.replace(/\/ui$/, '') || '') + '/';
 let session = null;       // { bot, owner_name, scopes, expires_at }
 let currentView = null;   // { type: 'thread'|'dm', id: string }
 let ws = null;
@@ -190,8 +170,8 @@ async function api(method, path, body) {
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     if (res.status === 401) {
-      // Session expired
-      showLogin();
+      // Session expired — redirect to consolidated login page
+      window.location.href = LOGIN_URL;
       throw new Error('Session expired');
     }
     throw new Error(data?.error || `HTTP ${res.status}`);
@@ -213,73 +193,27 @@ function showToast(msg, type = 'info') {
   }, 3000);
 }
 
-// ─── Login ───────────────────────────────────────────────
-function showLogin() {
-  session = null;
-  document.getElementById('login-screen').style.display = 'flex';
-  document.getElementById('app').style.display = 'none';
-  document.getElementById('login-error').textContent = '';
-}
-
-async function doLogin() {
-  const token = document.getElementById('login-token').value.trim();
-  const name = document.getElementById('login-name').value.trim();
-  const errEl = document.getElementById('login-error');
-
-  if (!token || !name) {
-    errEl.textContent = 'Both fields are required';
-    return;
-  }
-
-  const btn = document.getElementById('login-btn');
-  btn.disabled = true;
-  btn.textContent = 'Signing in...';
-  errEl.textContent = '';
-
-  try {
-    session = await api('POST', '/login', { token, owner_name: name });
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
-    document.getElementById('header-user').textContent = `${session.owner_name} via ${session.bot.name}`;
-    document.getElementById('login-token').value = '';
-    document.getElementById('login-name').value = '';
-    await loadWorkspace();
-    connectWebSocket();
-  } catch (e) {
-    errEl.textContent = e.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Sign In';
-  }
-}
-
+// ─── Auth ────────────────────────────────────────────────
 async function doLogout() {
   try { await api('POST', '/logout'); } catch {}
   if (ws) { ws.close(); ws = null; }
-  showLogin();
+  window.location.href = LOGIN_URL;
 }
 
-// Allow Enter to submit login
 document.addEventListener('DOMContentLoaded', () => {
-  for (const id of ['login-token', 'login-name']) {
-    document.getElementById(id).addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doLogin();
-    });
-  }
-  // Check if already have a session
   checkSession();
 });
 
 async function checkSession() {
   try {
     session = await api('GET', '/session');
-    document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     document.getElementById('header-user').textContent = `${session.owner_name} via ${session.bot.name}`;
     await loadWorkspace();
     connectWebSocket();
   } catch {
-    showLogin();
+    // No valid session — redirect to consolidated login page
+    window.location.href = LOGIN_URL;
   }
 }
 
