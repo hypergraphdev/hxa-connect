@@ -9,6 +9,7 @@ import { SqliteDriver, PostgresDriver } from './db/index.js';
 import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
+import { createWebUIRouter } from './web-ui.js';
 import { DEFAULT_CONFIG, type HubConfig } from './types.js';
 import { logger, generateRequestId } from './logger.js';
 
@@ -101,6 +102,7 @@ async function main() {
 
   // Create Express app
   const app = express();
+  app.set('trust proxy', 1); // Trust first proxy (for req.secure behind TLS termination)
   app.use(cors({
     origin: Array.isArray(config.cors_origins)
       ? (config.cors_origins.length === 0 ? false : config.cors_origins)
@@ -140,6 +142,10 @@ async function main() {
       next(err);
     }
   });
+
+  // Web UI backend — session-authenticated proxy for human operators
+  // Must be mounted before the main API router, which has catch-all auth middleware.
+  app.use('/ui/api', createWebUIRouter(db, hubWs, config));
 
   app.use(createRouter(db, hubWs, config));
 
