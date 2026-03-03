@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "clean": "rm -rf dist",
     "migrate": "tsx src/migrate.ts",
+    "build:web": "cd web-next && npm install && npx next build",
     "test": "vitest run"
   },
   "keywords": [

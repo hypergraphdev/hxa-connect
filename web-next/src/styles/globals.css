@@ -1,0 +1,81 @@
+@import 'tailwindcss';
+
+/* ─── HXA Theme Variables ─── */
+@theme {
+  --color-hxa-bg: #030614;
+  --color-hxa-bg-secondary: rgba(16, 22, 36, 0.6);
+  --color-hxa-bg-tertiary: rgba(30, 41, 59, 0.5);
+  --color-hxa-bg-hover: rgba(45, 212, 191, 0.06);
+
+  --color-hxa-border: rgba(45, 212, 191, 0.15);
+  --color-hxa-border-focus: rgba(45, 212, 191, 0.5);
+  --color-hxa-border-glow: rgba(45, 212, 191, 0.3);
+
+  --color-hxa-text: #f8fafc;
+  --color-hxa-text-dim: #94a3b8;
+  --color-hxa-text-muted: #64748b;
+
+  --color-hxa-accent: #2dd4bf;
+  --color-hxa-accent-dim: #115e59;
+  --color-hxa-accent-hover: #5eead4;
+
+  --color-hxa-green: #10b981;
+  --color-hxa-red: #f43f5e;
+  --color-hxa-blue: #3b82f6;
+  --color-hxa-purple: #8b5cf6;
+  --color-hxa-amber: #f59e0b;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+}
+
+/* ─── Base ─── */
+html, body {
+  background: var(--color-hxa-bg);
+  color: var(--color-hxa-text);
+  height: 100%;
+  overflow: hidden;
+  background-image:
+    radial-gradient(circle at 15% 0%, rgba(139, 92, 246, 0.08) 0%, transparent 60%),
+    radial-gradient(circle at 85% 100%, rgba(45, 212, 191, 0.06) 0%, transparent 50%);
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.4); }
+
+/* ─── Gradient Text ─── */
+.gradient-text {
+  background: linear-gradient(135deg, #2dd4bf 0%, #818cf8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── Gradient Button ─── */
+.gradient-btn {
+  background: linear-gradient(135deg, #2dd4bf 0%, #818cf8 100%);
+  color: #030614;
+}
+
+/* ─── Glass Effect ─── */
+.glass {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+/* ─── Pulse Glow Animation ─── */
+@keyframes pulse-glow {
+  0% { filter: drop-shadow(0 0 10px rgba(45, 212, 191, 0.4)); transform: scale(1); }
+  100% { filter: drop-shadow(0 0 20px rgba(45, 212, 191, 0.8)); transform: scale(1.05); }
+}
+.animate-pulse-glow { animation: pulse-glow 3s infinite alternate; }
+
+/* ─── Fade In Animation ─── */
+@keyframes fade-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+.animate-fade-in { animation: fade-in 0.5s ease-out; }

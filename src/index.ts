@@ -116,9 +116,17 @@ async function main() {
     next();
   });
 
-  // Serve web UI (resolve to project root /web, not /src or /dist)
-  const webDir = path.resolve(__dirname, '..', 'web');
-  app.use(express.static(webDir));
+  // Serve web UI — new Next.js app from web-next/out/, legacy admin from web/
+  const webNextDir = path.resolve(__dirname, '..', 'web-next', 'out');
+  const webLegacyDir = path.resolve(__dirname, '..', 'web');
+  app.use(express.static(webNextDir));
+  // Legacy admin console — serve admin.html and its styles via sendFile
+  app.get('/admin.html', (_req, res) => {
+    res.sendFile(path.join(webLegacyDir, 'admin.html'));
+  });
+  app.get('/styles.css', (_req, res) => {
+    res.sendFile(path.join(webLegacyDir, 'styles.css'));
+  });
 
   // API routes
   const server = createServer(app);
@@ -147,16 +155,22 @@ async function main() {
   // Must be mounted before the main API router, which has catch-all auth middleware.
   app.use('/ui/api', createWebUIRouter(db, hubWs, config));
 
+  // SPA catch-all — must be before main API router, whose auth middleware
+  // would otherwise intercept non-API paths and return 401 JSON.
+  app.get('/dashboard/*', (_req, res) => {
+    res.sendFile(path.join(webNextDir, 'dashboard', 'index.html'));
+  });
+
   app.use(createRouter(db, hubWs, config));
 
-  // JSON 404 for unmatched API routes (must come before SPA catch-all)
+  // JSON 404 for unmatched API routes
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
   });
 
-  // Fallback: serve index.html for SPA routing (non-API paths only)
+  // Fallback: serve the login page for any other path
   app.get('*', (_req, res) => {
-    res.sendFile(path.join(webDir, 'index.html'));
+    res.sendFile(path.join(webNextDir, 'index.html'));
   });
 
   // O4: Global error handler — must be 4-arity to be recognized by Express

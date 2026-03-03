@@ -1,0 +1,208 @@
+'use client';
+
+import { useState, useEffect, useRef } from 'react';
+import { Loader2, ChevronUp } from 'lucide-react';
+import * as api from '@/lib/api';
+import type { DmMessage, MessagePart } from '@/lib/types';
+import { cn, formatTime, parseParts } from '@/lib/utils';
+import { useSession } from '@/hooks/useSession';
+import { FileText } from 'lucide-react';
+
+interface DMViewProps {
+  channelId: string;
+  /** New messages from WS */
+  wsDmMessages?: DmMessage[];
+}
+
+export function DMView({ channelId, wsDmMessages }: DMViewProps) {
+  const { session } = useSession();
+  const [messages, setMessages] = useState<DmMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [cursor, setCursor] = useState<string | undefined>();
+  const [hasOlder, setHasOlder] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUp = useRef(false);
+
+  function handleScroll() {
+    const el = containerRef.current;
+    if (!el) return;
+    userScrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > 100;
+  }
+
+  function scrollToBottom() {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setMessages([]);
+    setCursor(undefined);
+    setHasOlder(false);
+    userScrolledUp.current = false;
+
+    api.getChannelMessages(channelId, { limit: 50 })
+      .then((res) => {
+        if (cancelled) return;
+        setMessages(res.items.reverse());
+        setCursor(res.next_cursor);
+        setHasOlder(res.has_more);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [channelId]);
+
+  useEffect(() => {
+    if (!loading && messages.length > 0) {
+      requestAnimationFrame(() => scrollToBottom());
+    }
+  }, [loading]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Merge WS messages
+  useEffect(() => {
+    if (!wsDmMessages?.length) return;
+    setMessages((prev) => {
+      const ids = new Set(prev.map((m) => m.id));
+      const newMsgs = wsDmMessages.filter((m) => !ids.has(m.id) && m.channel_id === channelId);
+      if (!newMsgs.length) return prev;
+      return [...prev, ...newMsgs];
+    });
+    if (!userScrolledUp.current) {
+      requestAnimationFrame(() => scrollToBottom());
+    }
+  }, [wsDmMessages, channelId]);
+
+  async function loadOlder() {
+    if (!cursor || loadingOlder) return;
+    setLoadingOlder(true);
+    const el = containerRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+
+    try {
+      const res = await api.getChannelMessages(channelId, { cursor, limit: 50 });
+      const older = res.items.reverse();
+      setMessages((prev) => {
+        const ids = new Set(prev.map((m) => m.id));
+        return [...older.filter((m) => !ids.has(m.id)), ...prev];
+      });
+      setCursor(res.next_cursor);
+      setHasOlder(res.has_more);
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop = el.scrollHeight - prevHeight;
+      });
+    } catch {}
+    setLoadingOlder(false);
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 size={24} className="animate-spin text-hxa-accent" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      {/* Header */}
+      <div className="shrink-0 px-4 py-3 border-b border-hxa-border bg-[rgba(10,15,26,0.4)]">
+        <h2 className="text-sm font-semibold text-hxa-text">Direct Messages</h2>
+        <p className="text-[11px] text-hxa-text-muted mt-0.5">Messages are read-only in Web UI</p>
+      </div>
+
+      {/* Messages */}
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0"
+      >
+        {hasOlder && (
+          <div className="text-center">
+            <button
+              onClick={loadOlder}
+              disabled={loadingOlder}
+              className="text-xs text-hxa-accent hover:text-hxa-accent-hover transition-colors disabled:opacity-50 inline-flex items-center gap-1"
+            >
+              {loadingOlder ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
+              Load older messages
+            </button>
+          </div>
+        )}
+
+        {messages.length === 0 ? (
+          <div className="text-center text-hxa-text-muted text-sm py-8">
+            No messages yet
+          </div>
+        ) : (
+          messages.map((msg) => (
+            <DmBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot.id} />
+          ))
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Read-only banner */}
+      <div className="shrink-0 px-4 py-2.5 border-t border-hxa-border bg-hxa-bg-tertiary text-center text-xs text-hxa-text-muted">
+        DMs are read-only in Web UI
+      </div>
+    </div>
+  );
+}
+
+function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) {
+  return (
+    <div className={cn('group', isSelf && 'pl-8')}>
+      <div className="flex items-center gap-2 mb-0.5">
+        <span className={cn(
+          'text-xs font-semibold',
+          isSelf ? 'text-hxa-accent' : 'text-hxa-text-dim',
+        )}>
+          {message.sender_name}
+        </span>
+        <span className="text-[10px] text-hxa-text-muted">
+          {formatTime(message.created_at)}
+        </span>
+      </div>
+      <div className={cn(
+        'rounded-lg px-3 py-2 text-sm leading-relaxed',
+        isSelf
+          ? 'bg-hxa-accent/10 border border-hxa-accent/15'
+          : 'bg-white/[0.03] border border-white/[0.06]',
+      )}>
+        {parseParts(message.parts, message.content).map((part, i) => (
+          <DmPartRenderer key={i} part={part} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DmPartRenderer({ part }: { part: MessagePart }) {
+  switch (part.type) {
+    case 'text':
+      return <div className="whitespace-pre-wrap break-words text-hxa-text">{part.content}</div>;
+    case 'file':
+      return (
+        <a href={part.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
+          <FileText size={12} /> {part.filename || 'File'}
+        </a>
+      );
+    case 'image':
+      return (
+        <a href={part.url} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.filename || 'Image'}</a>
+      );
+    case 'link':
+      return (
+        <a href={part.url || part.content} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
+          {part.content || part.url}
+        </a>
+      );
+    default:
+      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{part.content}</div> : null;
+  }
+}
