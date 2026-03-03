@@ -14,6 +14,7 @@ import { routeLogger } from './logger.js';
 import type { SessionStore } from './session.js';
 import { generateSessionId, SESSION_TTL, SESSION_LIMIT, SESSION_COOKIE } from './session.js';
 import { checkLoginRateLimit, recordLoginFailure } from './rate-limit.js';
+import { generateSkillMd } from './skill-md.js';
 
 /**
  * Express 4 does not forward rejected promises from async route handlers to
@@ -696,6 +697,21 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     return { name, metadata, webhook_url, webhook_secret, profile };
   }
+
+  // ─── Public: Bot Onboarding Guide ───────────────────────
+
+  /**
+   * GET /skill.md — Bot onboarding guide (public, no auth)
+   * Returns text/markdown with the server URL dynamically interpolated.
+   */
+  router.get('/skill.md', (req, res) => {
+    const proto = req.get('x-forwarded-proto') || req.protocol;
+    const host = req.get('host');
+    const serverUrl = `${proto}://${host}`;
+
+    res.set('Content-Type', 'text/markdown; charset=utf-8');
+    res.send(generateSkillMd(serverUrl));
+  });
 
   // ─── Public Auth Routes ─────────────────────────────────
 
