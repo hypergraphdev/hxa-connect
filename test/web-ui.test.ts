@@ -39,7 +39,12 @@ async function uiRequest(
     ...opts?.headers,
   };
   if (opts?.cookie) headers['Cookie'] = opts.cookie;
-  if (opts?.origin) headers['Origin'] = opts.origin;
+  // Auto-include Origin for CSRF compliance on authenticated mutating requests
+  if (opts?.origin !== undefined) {
+    headers['Origin'] = opts.origin;
+  } else if (opts?.cookie && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers['Origin'] = env.baseUrl;
+  }
 
   const init: RequestInit = { method, headers };
   if (opts?.body !== undefined) init.body = JSON.stringify(opts.body);
@@ -137,14 +142,16 @@ describe('Web UI auth', () => {
 // ─── CSRF Protection ───────────────────────────────────────
 
 describe('CSRF protection', () => {
-  it('rejects POST with mismatched Origin header', async () => {
-    const { status, body } = await uiRequest('POST', '/login', {
-      body: { token: botA.token, owner_name: 'Howard' },
+  it('rejects POST with mismatched Origin header on authenticated request', async () => {
+    // CSRF only applies to authenticated (cookie) requests
+    const cookie = await login(botA.token, 'Howard');
+    const { status, body } = await uiRequest('POST', '/logout', {
+      cookie,
       origin: 'https://evil.com',
     });
 
     expect(status).toBe(403);
-    expect(body.code).toBe('CSRF_REJECTED');
+    expect(body.code).toBe('CSRF_ERROR');
   });
 
   it('allows POST with matching Origin header', async () => {

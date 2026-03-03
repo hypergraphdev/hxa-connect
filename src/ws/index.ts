@@ -2,10 +2,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import type { HubDB } from '../db.js';
 import type { WebhookManager } from '../webhook.js';
-import type { HubConfig, Message, TokenScope, WsServerEvent } from '../types.js';
+import type { HubConfig, Message, SessionRole, TokenScope, WsServerEvent } from '../types.js';
 import { URL } from 'node:url';
 import { redeemWsTicket, type WsTicket } from '../ws-tickets.js';
 import { wsLogger } from '../logger.js';
+import type { SessionStore } from '../session.js';
 
 import type { WsClient, WsHub } from './protocol.js';
 import { incrementBotConnections, decrementBotConnections } from './protocol.js';
@@ -39,6 +40,8 @@ export class HubWS implements WsHub {
   readonly webhookManager: WebhookManager;
   readonly config: HubConfig;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private sessionHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private sessionStore: SessionStore | null = null;
   private startedAt = Date.now();
 
   constructor(server: Server, db: HubDB, webhookManager: WebhookManager, config: HubConfig) {
@@ -65,8 +68,6 @@ export class HubWS implements WsHub {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const ticketParam = url.searchParams.get('ticket');
 
-      let token: string | null = null;
-
       let redeemedTicket: WsTicket | undefined;
 
       if (ticketParam) {
@@ -75,9 +76,43 @@ export class HubWS implements WsHub {
           ws.close(4001, 'Invalid or expired ticket');
           return;
         }
-        token = redeemedTicket.token;
       } else {
         ws.close(4001, 'Missing ticket. Use POST /api/ws-ticket to obtain a one-time ticket.');
+        return;
+      }
+
+      const token = redeemedTicket.token ?? null;
+
+      // Session-based connection (ADR-002)
+      if (redeemedTicket?.sessionId) {
+        // Re-check org status (may have changed since ticket was issued)
+        if (redeemedTicket.orgId) {
+          const org = await db.getOrgById(redeemedTicket.orgId);
+          if (!org || org.status !== 'active') {
+            ws.close(4100, 'Organization is not active');
+            return;
+          }
+        }
+
+        const client: WsClient = {
+          ws,
+          sessionId: redeemedTicket.sessionId,
+          role: redeemedTicket.role,
+          botId: redeemedTicket.botId,
+          orgId: redeemedTicket.orgId!,
+          isOrgAdmin: redeemedTicket.role === 'org_admin',
+          scopes: redeemedTicket.scopes ?? null,
+          alive: true,
+          subscriptions: new Set(),
+        };
+        this.clients.add(client);
+        this.setupHandlers(client);
+        return;
+      }
+
+      // Token-based paths require a token from the redeemed ticket
+      if (!token) {
+        ws.close(4001, 'Invalid ticket');
         return;
       }
 
@@ -179,37 +214,6 @@ export class HubWS implements WsHub {
         // Scoped token references an unknown bot — reject explicitly
         ws.close(4001, 'Token references unknown bot');
         return;
-      }
-
-      // Try org ticket (reusable session token from login) — for web UI / human admins
-      const orgTicket = await db.getOrgTicket(token);
-      if (orgTicket && orgTicket.reusable && !orgTicket.consumed && orgTicket.expires_at > Date.now()) {
-        const ticketOrg = await db.getOrgById(orgTicket.org_id);
-        if (ticketOrg) {
-          // Phase 3: Validate org binding if ws-ticket specifies an orgId
-          if (redeemedTicket?.orgId && redeemedTicket.orgId !== ticketOrg.id) {
-            ws.close(4003, 'Token does not belong to ticket org');
-            return;
-          }
-
-          // Phase 4: Check org status before allowing connection
-          if (ticketOrg.status !== 'active') {
-            ws.close(4100, 'Organization is not active');
-            return;
-          }
-
-          const client: WsClient = {
-            ws,
-            orgId: ticketOrg.id,
-            isOrgAdmin: true,
-            scopes: null, // org admin = full access
-            alive: true,
-            subscriptions: new Set(),
-          };
-          this.clients.add(client);
-          this.setupHandlers(client);
-          return;
-        }
       }
 
       ws.close(4001, 'Invalid token');
@@ -359,6 +363,67 @@ export class HubWS implements WsHub {
     }
   }
 
+  // ─── Session integration (ADR-002) ──────────────────────
+
+  /** Set the session store and start 60s session validation heartbeat. */
+  setSessionStore(store: SessionStore): void {
+    this.sessionStore = store;
+    this.sessionHeartbeatInterval = setInterval(async () => {
+      if (!this.sessionStore) return;
+      for (const client of [...this.clients]) {
+        if (client.sessionId) {
+          const session = await this.sessionStore.get(client.sessionId);
+          if (!session) {
+            client.ws.close(4002, 'Session expired');
+            this.clients.delete(client);
+          }
+        }
+      }
+    }, 60_000);
+  }
+
+  // ─── Session revocation (ADR-002) ────────────────────────
+
+  /** Disconnect all WS clients tied to a specific session. */
+  disconnectBySessionId(sessionId: string): void {
+    for (const client of [...this.clients]) {
+      if (client.sessionId === sessionId) {
+        client.ws.close(4002, 'Session revoked');
+        this.clients.delete(client);
+      }
+    }
+  }
+
+  /** Disconnect all WS clients with a given role (and optional org scope). */
+  disconnectByRole(role: SessionRole, orgId?: string): void {
+    for (const client of [...this.clients]) {
+      if (client.role === role && (!orgId || client.orgId === orgId)) {
+        client.ws.close(4002, 'Credential rotated');
+        this.clients.delete(client);
+      }
+    }
+  }
+
+  /** Disconnect all WS clients tied to a specific bot (token + session). */
+  disconnectByBotId(botId: string): void {
+    for (const client of [...this.clients]) {
+      if (client.botId === botId) {
+        client.ws.close(4002, 'Token regenerated');
+        this.clients.delete(client);
+      }
+    }
+  }
+
+  /** Disconnect only session-based WS clients for a specific bot (preserves token-auth M2M connections). */
+  disconnectSessionClientsByBotId(botId: string): void {
+    for (const client of [...this.clients]) {
+      if (client.botId === botId && client.sessionId) {
+        client.ws.close(4002, 'Session evicted');
+        this.clients.delete(client);
+      }
+    }
+  }
+
   /** O1: Return health stats for the /health endpoint */
   getHealthStats(): { uptime_ms: number; connected_clients: number; connected_bots: number; ws_metrics: import('./metrics.js').WsMetrics } {
     const botIds = new Set<string>();
@@ -378,10 +443,14 @@ export class HubWS implements WsHub {
    * @param code WebSocket close code: 1012 for service restart (clients reconnect immediately), 1001 for going away.
    */
   async shutdown(code: number = 1001): Promise<void> {
-    // Stop heartbeat
+    // Stop heartbeats
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
+    }
+    if (this.sessionHeartbeatInterval) {
+      clearInterval(this.sessionHeartbeatInterval);
+      this.sessionHeartbeatInterval = null;
     }
 
     const reason = code === 1012 ? 'Service restart' : 'Server shutting down';

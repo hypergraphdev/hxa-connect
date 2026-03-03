@@ -9,6 +9,19 @@ import crypto from 'node:crypto';
 //         ticket invalidation, role management, X-Org-Id validation
 // ═══════════════════════════════════════════════════════════════
 
+async function loginAsSuperAdmin(baseUrl: string, adminSecret: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'super_admin', admin_secret: adminSecret }),
+  });
+  if (!res.ok) throw new Error(`Super admin login failed: ${res.status}`);
+  const setCookie = res.headers.get('set-cookie') || '';
+  const match = setCookie.match(/hxa_session=([^;]+)/);
+  if (!match) throw new Error('No session cookie');
+  return match[1];
+}
+
 // ─── 1. Login-to-Register Full Auth Flow ─────────────────────
 
 describe('Login-to-Register Auth Flow', () => {
@@ -25,28 +38,28 @@ describe('Login-to-Register Auth Flow', () => {
 
   afterAll(() => env.cleanup());
 
-  it('Step 1: POST /api/auth/login with valid org_secret returns a ticket', async () => {
-    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+  it('Step 1: POST /api/auth/login with valid org_secret returns a session', async () => {
+    const res = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'org_admin', org_id: orgId, org_secret: orgSecret }),
     });
-    expect(status).toBe(200);
-    expect(body.ticket).toBeTypeOf('string');
-    expect(body.expires_at).toBeTypeOf('number');
-    expect(body.expires_at).toBeGreaterThan(Date.now());
-    expect(body.reusable).toBe(false);
-    expect(body.org).toEqual({ id: orgId, name: 'auth-flow-org' });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get('set-cookie') || '';
+    expect(setCookie).toMatch(/hxa_session=/);
+    const body = await res.json() as any;
+    expect(body.session.role).toBe('org_admin');
+    expect(body.session.org_id).toBe(orgId);
+    expect(body.session.expires_at).toBeDefined();
   });
 
   it('Step 2: POST /api/auth/register with ticket registers bot as member', async () => {
-    // Login to get a ticket
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const ticket = loginBody.ticket;
+    // Create ticket via DB
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     // Register first bot — all bots default to member
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket, name: 'alpha-bot', bio: 'first bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'alpha-bot', bio: 'first bot' },
     });
     expect(status).toBe(200);
     expect(body.bot_id).toBeTypeOf('string');
@@ -57,24 +70,20 @@ describe('Login-to-Register Auth Flow', () => {
   });
 
   it('Step 3: subsequent registered bots are also members', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'beta-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'beta-bot' },
     });
     expect(status).toBe(200);
     expect(body.auth_role).toBe('member');
   });
 
   it('Step 4: bot token authenticates API calls (GET /api/me)', async () => {
-    // Get a token via login+register
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // Get a token via DB ticket + register
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'gamma-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'gamma-bot' },
     });
 
     const { status, body } = await api(env.baseUrl, 'GET', '/api/me', {
@@ -86,12 +95,10 @@ describe('Login-to-Register Auth Flow', () => {
   });
 
   it('Step 5: bot can send a message via thread', async () => {
-    // Login + register
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // DB ticket + register
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'delta-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'delta-bot' },
     });
 
     // Create a thread
@@ -113,18 +120,18 @@ describe('Login-to-Register Auth Flow', () => {
 
   it('rejects login with wrong org_secret', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: 'wrong-secret' },
+      body: { type: 'org_admin', org_id: orgId, org_secret: 'wrong-secret' },
     });
     expect(status).toBe(401);
-    expect(body.code).toBe('INVALID_SECRET');
+    expect(body.code).toBe('INVALID_CREDENTIALS');
   });
 
   it('rejects login with nonexistent org_id', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: 'nonexistent-org-id', org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: 'nonexistent-org-id', org_secret: orgSecret },
     });
-    expect(status).toBe(404);
-    expect(body.code).toBe('NOT_FOUND');
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_CREDENTIALS');
   });
 
   it('rejects login with missing org_id', async () => {
@@ -160,53 +167,47 @@ describe('Login-to-Register Auth Flow', () => {
   });
 
   it('rejects register when ticket belongs to different org', async () => {
-    // Create a second org
+    // Create a second org and a ticket for it
     const org2 = await env.createOrg('other-org');
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: org2.id, org_secret: org2.org_secret },
-    });
+    const ticket = await env.db.createOrgTicket(org2.id, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     // Try to register in the first org using the second org's ticket
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'cross-org-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'cross-org-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
   });
 
   it('one-time ticket cannot be reused', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: false },
-    });
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     // First registration consumes the ticket
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'single-use-1' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'single-use-1' },
     });
     expect(s1).toBe(200);
 
     // Second registration fails — ticket consumed
     const { status: s2, body: b2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'single-use-2' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'single-use-2' },
     });
     expect(s2).toBe(401);
     expect(b2.code).toBe('TICKET_CONSUMED');
   });
 
   it('reusable ticket can be used multiple times', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: true },
-    });
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { reusable: true, expiresAt: Date.now() + 3600000 });
 
     // First registration
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reuse-1' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'reuse-1' },
     });
     expect(s1).toBe(200);
 
     // Second registration with same ticket
     const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reuse-2' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'reuse-2' },
     });
     expect(s2).toBe(200);
   });
@@ -226,12 +227,10 @@ describe('X-Org-Id Header Validation', () => {
     orgId = org.id;
     orgSecret = org.org_secret;
 
-    // Register a bot via the new auth flow
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // Register a bot via DB ticket
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'orgid-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'orgid-bot' },
     });
     botToken = regBody.token;
   });
@@ -289,7 +288,7 @@ describe('Secret Rotation and Ticket Invalidation', () => {
 
   it('login works with initial secret', async () => {
     const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(status).toBe(200);
   });
@@ -312,28 +311,25 @@ describe('Secret Rotation and Ticket Invalidation', () => {
 
     // Old secret fails
     const { status: oldStatus, body: oldBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(oldStatus).toBe(401);
-    expect(oldBody.code).toBe('INVALID_SECRET');
+    expect(oldBody.code).toBe('INVALID_CREDENTIALS');
 
     // New secret works
     const { status: newStatus, body: newBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: newSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: newSecret },
     });
     expect(newStatus).toBe(200);
-    expect(newBody.ticket).toBeTypeOf('string');
+    expect(newBody.session).toBeDefined();
 
     // Update for subsequent tests
     orgSecret = newSecret;
   });
 
   it('outstanding tickets are invalidated on rotation', async () => {
-    // Login to get a ticket
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const preRotationTicket = loginBody.ticket;
+    // Create a ticket via DB
+    const preRotationTicket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     // Rotate the secret
     const { body: rotateBody } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
@@ -343,29 +339,25 @@ describe('Secret Rotation and Ticket Invalidation', () => {
 
     // Pre-rotation ticket should be invalidated
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: preRotationTicket, name: 'orphan-bot' },
+      body: { org_id: orgId, ticket: preRotationTicket.id, name: 'orphan-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
 
-    // Login with new secret and register works
-    const { body: newLogin } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // Create new ticket via DB and register works
+    const newTicket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { status: regStatus, body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: newLogin.ticket, name: 'post-rotation-bot' },
+      body: { org_id: orgId, ticket: newTicket.id, name: 'post-rotation-bot' },
     });
     expect(regStatus).toBe(200);
     expect(regBody.name).toBe('post-rotation-bot');
   });
 
   it('non-admin bot cannot rotate secret', async () => {
-    // Register a member
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // Register a member via DB ticket
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: memberBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'member-no-rotate' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'member-no-rotate' },
     });
     // member-no-rotate is a member (not first bot)
 
@@ -477,13 +469,11 @@ describe('Role Management', () => {
   });
 
   it('rejects role change for bot in different org', async () => {
-    // Create another org + bot
+    // Create another org + bot via DB ticket
     const org2 = await env.createOrg('role-org-2');
-    const { body: login2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: org2.id, org_secret: org2.org_secret },
-    });
+    const ticket2 = await env.db.createOrgTicket(org2.id, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: otherAgent } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: org2.id, ticket: login2.ticket, name: 'other-org-bot' },
+      body: { org_id: org2.id, ticket: ticket2.id, name: 'other-org-bot' },
     });
 
     // Try to change cross-org bot role
@@ -517,7 +507,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
 
   it('returns unpaginated array when no cursor/limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -526,7 +516,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
 
   it('returns paginated response with limit param', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=2', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items).toBeDefined();
@@ -544,7 +534,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
         ? `/api/bots?limit=2&cursor=${cursor}`
         : '/api/bots?limit=2';
       const { body } = await api(env.baseUrl, 'GET', url, {
-        token: orgTicket,
+        cookie: orgTicket,
       });
 
       allItems.push(...body.items);
@@ -562,7 +552,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
 
   it('returns empty result for large cursor past end', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=10&cursor=zzzzzzzz', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items.length).toBe(0);
@@ -571,7 +561,7 @@ describe('Paginated Bots (GET /api/bots)', () => {
 
   it('clamps limit to maximum of 200', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=999', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     // With only 5 bots and limit clamped to 200, all should be returned
@@ -618,7 +608,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   it('returns paginated response with limit param', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=3', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items).toBeDefined();
@@ -636,7 +626,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
         ? `/api/org/threads?limit=3&cursor=${cursor}`
         : '/api/org/threads?limit=3';
       const { body } = await api(env.baseUrl, 'GET', url, {
-        token: orgTicket,
+        cookie: orgTicket,
       });
 
       allItems.push(...body.items);
@@ -653,7 +643,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   it('filters by status', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?status=closed&limit=50', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items.length).toBe(1);
@@ -663,7 +653,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   it('returns empty result when no threads match filter', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?status=resolved&limit=50', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items.length).toBe(0);
@@ -672,7 +662,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   it('returns empty for cursor past end', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=10&cursor=zzzzzzzz', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items.length).toBe(0);
@@ -681,7 +671,7 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
 
   it('clamps limit over 200', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=500', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     // All 7 threads fit under clamped limit of 200
@@ -728,7 +718,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
 
   it('returns unpaginated array when no cursor/limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/artifacts`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -737,7 +727,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
 
   it('returns paginated response with limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/artifacts?limit=2`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items.length).toBe(2);
@@ -754,7 +744,7 @@ describe('Paginated Artifacts (GET /api/org/threads/:id/artifacts)', () => {
         ? `/api/org/threads/${threadId}/artifacts?limit=2&cursor=${cursor}`
         : `/api/org/threads/${threadId}/artifacts?limit=2`;
       const { body } = await api(env.baseUrl, 'GET', url, {
-        token: orgTicket,
+        cookie: orgTicket,
       });
 
       allItems.push(...body.items);
@@ -807,7 +797,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
 
   it('returns flat array without before param (backward compat)', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=3`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     // Without before=id, returns legacy flat array (backward compat)
@@ -818,13 +808,13 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
   it('paginates with before=message_id (cursor)', async () => {
     // Get newest message ID first (flat array, newest first)
     const { body: initial } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=1`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     const newestId = initial[0].id;
 
     // Now use cursor-based pagination starting after the newest
     const { body: page1 } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=3&before=${newestId}`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(page1.messages).toBeDefined();
     expect(page1.messages.length).toBe(3);
@@ -834,7 +824,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
     const lastId = page1.messages[page1.messages.length - 1].id;
 
     const { body: page2 } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=3&before=${lastId}`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(page2.messages.length).toBe(2); // 6 total - 1 newest - 3 page1 = 2 remaining
     expect(page2.has_more).toBe(false);
@@ -849,7 +839,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
   it('returns all 6 messages across pages with no duplicates', async () => {
     // Start with flat array (newest first)
     const { body: initial } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=2`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     const allMsgs: any[] = [...initial];
     // Legacy response is oldest-first; use oldest message as cursor to avoid overlap
@@ -857,7 +847,7 @@ describe('Paginated Thread Messages (GET /api/org/threads/:id/messages)', () => 
 
     for (let page = 0; page < 10; page++) {
       const { body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=2&before=${before}`, {
-        token: orgTicket,
+        cookie: orgTicket,
       });
 
       allMsgs.push(...body.messages);
@@ -878,11 +868,13 @@ describe('Org Lifecycle and Auth', () => {
   let env: TestEnv;
   let orgId: string;
   let orgSecret: string;
+  let superAdminCookie: string;
 
   beforeAll(async () => {
     env = await createTestEnv({ admin_secret: 'super-secret' });
+    superAdminCookie = await loginAsSuperAdmin(env.baseUrl, 'super-secret');
     const { body: orgBody } = await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { name: 'lifecycle-org' },
     });
     orgId = orgBody.id;
@@ -893,7 +885,7 @@ describe('Org Lifecycle and Auth', () => {
 
   it('login works on active org', async () => {
     const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(status).toBe(200);
   });
@@ -901,57 +893,52 @@ describe('Org Lifecycle and Auth', () => {
   it('login is blocked on suspended org', async () => {
     // Suspend org
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(status).toBe(403);
-    expect(body.code).toBe('ORG_SUSPENDED');
+    expect(body.code).toBe('ORG_INACTIVE');
 
     // Reactivate
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'active' },
     });
   });
 
   it('tickets from pre-suspend are invalidated', async () => {
-    // Login to get a ticket
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
-    const preTicket = loginBody.ticket;
+    // Create a ticket via DB
+    const preTicket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
     // Suspend (invalidates tickets)
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
     // Reactivate
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'active' },
     });
 
     // Pre-suspend ticket should be invalidated
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: preTicket, name: 'stale-ticket-bot' },
+      body: { org_id: orgId, ticket: preTicket.id, name: 'stale-ticket-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
   });
 
   it('bot token is blocked when org is suspended', async () => {
-    // Register a bot while active
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
-    });
+    // Register a bot while active via DB ticket
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'suspended-test-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'suspended-test-bot' },
     });
 
     // Verify it works
@@ -962,7 +949,7 @@ describe('Org Lifecycle and Auth', () => {
 
     // Suspend
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
@@ -975,7 +962,7 @@ describe('Org Lifecycle and Auth', () => {
 
     // Reactivate for cleanup
     await api(env.baseUrl, 'PATCH', `/api/orgs/${orgId}`, {
-      token: 'super-secret',
+      cookie: superAdminCookie,
       body: { status: 'active' },
     });
   });
@@ -985,16 +972,18 @@ describe('Org Lifecycle and Auth', () => {
 
 describe('Super Admin Org Management', () => {
   let env: TestEnv;
+  let superAdminCookie: string;
 
   beforeAll(async () => {
     env = await createTestEnv({ admin_secret: 'admin-key' });
+    superAdminCookie = await loginAsSuperAdmin(env.baseUrl, 'admin-key');
   });
 
   afterAll(() => env.cleanup());
 
   it('creates org via super admin', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'admin-key',
+      cookie: superAdminCookie,
       body: { name: 'admin-created-org' },
     });
     expect(status).toBe(200);
@@ -1021,16 +1010,16 @@ describe('Super Admin Org Management', () => {
   it('lists orgs via super admin (without exposing keys)', async () => {
     // Create a couple of orgs
     await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'admin-key',
+      cookie: superAdminCookie,
       body: { name: 'org-a' },
     });
     await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'admin-key',
+      cookie: superAdminCookie,
       body: { name: 'org-b' },
     });
 
     const { status, body } = await api(env.baseUrl, 'GET', '/api/orgs', {
-      token: 'admin-key',
+      cookie: superAdminCookie,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -1046,21 +1035,23 @@ describe('Super Admin Org Management', () => {
   it('full lifecycle: create org, login, register, use API', async () => {
     // Step 1: Super admin creates org
     const { body: orgBody } = await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'admin-key',
+      cookie: superAdminCookie,
       body: { name: 'full-lifecycle-org' },
     });
     const orgId = orgBody.id;
     const orgSecret = orgBody.org_secret;
 
-    // Step 2: Login with org_secret
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+    // Step 2: Login with org_secret to get session
+    const { status: loginStatus, body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
-    expect(loginBody.ticket).toBeTypeOf('string');
+    expect(loginStatus).toBe(200);
+    expect(loginBody.session).toBeDefined();
 
-    // Step 3: Register bot
+    // Step 3: Register bot via DB ticket
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
     const { body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'lifecycle-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'lifecycle-bot' },
     });
     expect(regBody.token).toBeTypeOf('string');
     expect(regBody.auth_role).toBe('member'); // all bots default to member
@@ -1106,58 +1097,57 @@ describe('Ticket Expiration', () => {
   afterAll(() => env.cleanup());
 
   it('ticket with very short TTL expires', async () => {
-    // Login with expires_in=1 (1 second)
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, expires_in: 1 },
-    });
+    // Create a ticket via DB with 1-second expiry
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 1000 });
 
     // Wait for ticket to expire
     await new Promise(resolve => setTimeout(resolve, 1500));
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'expired-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'expired-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('TICKET_EXPIRED');
   });
 
-  it('custom expires_in is respected', async () => {
-    const { body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, expires_in: 3600 },
+  it('custom ticket expiry is respected', async () => {
+    // Create a ticket via DB with 1-hour expiry
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
+    // Ticket should be usable (not expired)
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticket.id, name: 'custom-expiry-bot' },
     });
-    // Ticket should expire in ~3600s from now
-    const expectedExpiry = Date.now() + 3600 * 1000;
-    // Allow 5s tolerance for test execution time
-    expect(body.expires_at).toBeGreaterThan(expectedExpiry - 5000);
-    expect(body.expires_at).toBeLessThan(expectedExpiry + 5000);
+    expect(status).toBe(200);
   });
 
-  it('expired reusable session ticket returns TICKET_EXPIRED on API calls', async () => {
-    // Login with reusable ticket, very short TTL
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: true, expires_in: 1 },
-    });
-    expect(loginBody.ticket).toBeTruthy();
+  it('expired reusable ticket returns TICKET_EXPIRED on register', async () => {
+    // Create a reusable ticket with very short TTL
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { reusable: true, expiresAt: Date.now() + 1000 });
 
     // Wait for ticket to expire
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // Use expired ticket on a protected endpoint (not register)
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
-      headers: { Authorization: `Bearer ${loginBody.ticket}`, 'X-Org-Id': orgId },
+    // Use expired ticket to register
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticket.id, name: 'expired-reusable-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('TICKET_EXPIRED');
   });
 
-  it('default login TTL is 24 hours', async () => {
-    const { body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: true },
+  it('default org_admin session TTL is 8 hours', async () => {
+    const res = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'org_admin', org_id: orgId, org_secret: orgSecret }),
     });
-    // Default TTL should be ~24 hours (86400s)
-    const expectedExpiry = Date.now() + 86400 * 1000;
-    expect(body.expires_at).toBeGreaterThan(expectedExpiry - 5000);
-    expect(body.expires_at).toBeLessThan(expectedExpiry + 5000);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    // Default org_admin TTL should be ~8 hours
+    const expectedExpiry = Date.now() + 8 * 3600 * 1000;
+    const expiresAt = new Date(body.session.expires_at).getTime();
+    expect(expiresAt).toBeGreaterThan(expectedExpiry - 10000);
+    expect(expiresAt).toBeLessThan(expectedExpiry + 10000);
   });
 });
 
@@ -1183,7 +1173,7 @@ describe('Mixed Auth Types', () => {
 
   it('org ticket works as Bearer for org-level endpoints', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.id).toBe(orgId);
@@ -1251,7 +1241,7 @@ describe('WS Ticket Exchange (POST /api/ws-ticket)', () => {
 
   it('org ticket can exchange for ws-ticket', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/ws-ticket', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.ticket).toBeTypeOf('string');

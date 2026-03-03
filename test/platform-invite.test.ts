@@ -9,18 +9,33 @@ import { createTestEnv, api, type TestEnv } from './helpers.js';
 
 const ADMIN_SECRET = 'test-admin-secret';
 
+async function loginAsSuperAdmin(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'super_admin', admin_secret: ADMIN_SECRET }),
+  });
+  if (!res.ok) throw new Error(`Super admin login failed: ${res.status}`);
+  const setCookie = res.headers.get('set-cookie') || '';
+  const match = setCookie.match(/hxa_session=([^;]+)/);
+  if (!match) throw new Error('No session cookie');
+  return match[1];
+}
+
 describe('Platform Invite Codes — Admin CRUD', () => {
   let env: TestEnv;
+  let adminCookie: string;
 
   beforeAll(async () => {
     env = await createTestEnv({ admin_secret: ADMIN_SECRET });
+    adminCookie = await loginAsSuperAdmin(env.baseUrl);
   });
 
   afterAll(() => env.cleanup());
 
   it('POST /api/platform/invite-codes creates a code (default: unlimited uses, 90d expiry)', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'general' },
     });
     expect(status).toBe(201);
@@ -35,7 +50,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('POST /api/platform/invite-codes with max_uses creates a limited code', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'limited', max_uses: 5, expires_in: 3600 },
     });
     expect(status).toBe(201);
@@ -48,7 +63,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('POST /api/platform/invite-codes rejects invalid max_uses', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { max_uses: -1 },
     });
     expect(status).toBe(400);
@@ -72,7 +87,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('GET /api/platform/invite-codes lists all codes', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -92,18 +107,18 @@ describe('Platform Invite Codes — Admin CRUD', () => {
   it('DELETE /api/platform/invite-codes/:id revokes a code', async () => {
     // Create a code to delete
     const { body: created } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'to-delete' },
     });
 
     const { status } = await api(env.baseUrl, 'DELETE', `/api/platform/invite-codes/${created.id}`, {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     expect(status).toBe(204);
 
     // Verify it's gone from the list
     const { body: list } = await api(env.baseUrl, 'GET', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     const found = list.find((c: any) => c.id === created.id);
     expect(found).toBeUndefined();
@@ -111,7 +126,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('POST /api/platform/invite-codes with expires_in=0 creates a never-expiring code', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'never-expires', expires_in: 0 },
     });
     expect(status).toBe(201);
@@ -121,7 +136,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('never-expiring code shows expired=false in listing', async () => {
     const { body: list } = await api(env.baseUrl, 'GET', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     const neverExpires = list.find((c: any) => c.label === 'never-expires');
     expect(neverExpires).toBeDefined();
@@ -131,7 +146,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
   it('DELETE /api/platform/invite-codes/:id returns 404 for unknown id', async () => {
     const { status, body } = await api(env.baseUrl, 'DELETE', '/api/platform/invite-codes/nonexistent', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     expect(status).toBe(404);
     expect(body.code).toBe('NOT_FOUND');
@@ -140,23 +155,25 @@ describe('Platform Invite Codes — Admin CRUD', () => {
 
 describe('Platform Orgs — Self-Service Creation', () => {
   let env: TestEnv;
+  let adminCookie: string;
   let inviteCode: string;
   let limitedCode: string;
   let limitedCodeId: string;
 
   beforeAll(async () => {
     env = await createTestEnv({ admin_secret: ADMIN_SECRET });
+    adminCookie = await loginAsSuperAdmin(env.baseUrl);
 
     // Create an unlimited invite code
     const { body: unlimited } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'unlimited' },
     });
     inviteCode = unlimited.code;
 
     // Create a limited invite code (max 2 uses)
     const { body: limited } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'limited-2', max_uses: 2 },
     });
     limitedCode = limited.code;
@@ -182,16 +199,16 @@ describe('Platform Orgs — Self-Service Creation', () => {
       body: { invite_code: inviteCode, name: 'functional-test-org' },
     });
 
-    // Login with the returned org_secret
+    // Login with the returned org_secret (session-based auth)
     const { status: loginStatus, body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgBody.org_id, org_secret: orgBody.org_secret },
+      body: { type: 'org_admin', org_id: orgBody.org_id, org_secret: orgBody.org_secret },
     });
     expect(loginStatus).toBe(200);
-    expect(loginBody.ticket).toBeTypeOf('string');
+    expect(loginBody.session.role).toBe('org_admin');
 
-    // Register a bot
+    // Register a bot using org_secret directly
     const { status: regStatus, body: regBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgBody.org_id, ticket: loginBody.ticket, name: 'test-bot' },
+      body: { org_id: orgBody.org_id, org_secret: orgBody.org_secret, name: 'test-bot' },
     });
     expect(regStatus).toBe(200);
     expect(regBody.bot_id).toBeTypeOf('string');
@@ -231,7 +248,7 @@ describe('Platform Orgs — Self-Service Creation', () => {
 
   it('exhausted code shows in listing as exhausted', async () => {
     const { body: list } = await api(env.baseUrl, 'GET', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
     const found = list.find((c: any) => c.id === limitedCodeId);
     expect(found).toBeDefined();
@@ -242,7 +259,7 @@ describe('Platform Orgs — Self-Service Creation', () => {
   it('never-expiring code can be used to create orgs', async () => {
     // Create a never-expiring code
     const { body: created } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'never-expire-use-test', expires_in: 0 },
     });
     expect(created.expires_at).toBe(0);
@@ -291,11 +308,11 @@ describe('Platform Orgs — Self-Service Creation', () => {
   it('revoked invite code no longer works', async () => {
     // Create and then revoke a code
     const { body: created } = await api(env.baseUrl, 'POST', '/api/platform/invite-codes', {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
       body: { label: 'revoke-test' },
     });
     await api(env.baseUrl, 'DELETE', `/api/platform/invite-codes/${created.id}`, {
-      token: ADMIN_SECRET,
+      cookie: adminCookie,
     });
 
     // Try to use the revoked code

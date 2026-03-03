@@ -12,6 +12,9 @@ import { createRouter } from './routes.js';
 import { createWebUIRouter } from './web-ui.js';
 import { DEFAULT_CONFIG, type HubConfig } from './types.js';
 import { logger, generateRequestId } from './logger.js';
+import { SqliteSessionStore, RedisSessionStore, type SessionStore } from './session.js';
+import { sessionMiddleware, csrfMiddleware } from './session-middleware.js';
+import { startRateLimitCleanup } from './rate-limit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +98,25 @@ async function main() {
   await db.init();
   console.log(`  Database: ${isPostgres ? 'PostgreSQL' : path.resolve(config.data_dir) + '/hxa-connect.db'}`);
 
+  // Initialize session store (ADR-002)
+  const sessionStoreType = (process.env.SESSION_STORE || 'sqlite').toLowerCase();
+  let sessionStore: SessionStore;
+
+  if (sessionStoreType === 'redis') {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) {
+      console.error('FATAL: SESSION_STORE=redis requires REDIS_URL to be set.');
+      process.exit(1);
+    }
+    const { default: IORedis } = await import('ioredis');
+    const redisClient = new IORedis(redisUrl);
+    sessionStore = new RedisSessionStore(redisClient);
+    console.log(`  Sessions: Redis (${redisUrl.replace(/\/\/.*@/, '//***@')})`);
+  } else {
+    sessionStore = new SqliteSessionStore(driver);
+    console.log('  Sessions: SQLite');
+  }
+
   // Ensure files directory exists
   const filesDir = path.join(config.data_dir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
@@ -116,22 +138,21 @@ async function main() {
     next();
   });
 
-  // Serve web UI — new Next.js app from web-next/out/, legacy admin from web/
+  // Session middleware: parse cookie, load session, sliding expiry (ADR-002)
+  app.use(sessionMiddleware(sessionStore));
+  app.use(csrfMiddleware());
+
+  // Serve web UI — Next.js app from web-next/out/
   const webNextDir = path.resolve(__dirname, '..', 'web-next', 'out');
-  const webLegacyDir = path.resolve(__dirname, '..', 'web');
   app.use(express.static(webNextDir));
-  // Legacy admin console — serve admin.html and its styles via sendFile
-  app.get('/admin.html', (_req, res) => {
-    res.sendFile(path.join(webLegacyDir, 'admin.html'));
-  });
-  app.get('/styles.css', (_req, res) => {
-    res.sendFile(path.join(webLegacyDir, 'styles.css'));
-  });
 
   // API routes
   const server = createServer(app);
   const webhookManager = new WebhookManager(db);
   const hubWs = new HubWS(server, db, webhookManager, config);
+
+  // Wire session store to WS for session heartbeat validation (ADR-002)
+  hubWs.setSessionStore(sessionStore);
 
   // O1: Health endpoint (no auth, before router so it's always accessible)
   app.get('/health', async (_req, res, next) => {
@@ -153,7 +174,7 @@ async function main() {
 
   // Web UI backend — session-authenticated proxy for human operators
   // Must be mounted before the main API router, which has catch-all auth middleware.
-  app.use('/ui/api', createWebUIRouter(db, hubWs, config));
+  app.use('/ui/api', createWebUIRouter(db, hubWs, config, sessionStore));
 
   // SPA catch-all — must be before main API router, whose auth middleware
   // would otherwise intercept non-API paths and return 401 JSON.
@@ -161,7 +182,7 @@ async function main() {
     res.sendFile(path.join(webNextDir, 'dashboard', 'index.html'));
   });
 
-  app.use(createRouter(db, hubWs, config));
+  app.use(createRouter(db, hubWs, config, sessionStore));
 
   // JSON 404 for unmatched API routes
   app.all('/api/*', (_req, res) => {
@@ -205,6 +226,16 @@ async function main() {
       logger.error({ err }, 'Lifecycle cleanup error');
     });
   }, 6 * 60 * 60 * 1000);
+
+  // Session purge: every 15 minutes (ADR-002)
+  setInterval(() => {
+    sessionStore.purgeExpired().catch(err => {
+      logger.error({ err }, 'Session purge error');
+    });
+  }, 15 * 60 * 1000);
+
+  // Login rate limit cleanup
+  startRateLimitCleanup();
 
   // O7: Rate limit events cleanup: runs every 10 minutes (separate from lifecycle)
   setInterval(() => {

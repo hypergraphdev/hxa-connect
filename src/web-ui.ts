@@ -5,143 +5,57 @@
  * the existing bot token system. Humans log in with their bot's token and
  * can browse DMs (read-only) and participate in threads.
  *
+ * Uses the shared SessionStore (ADR-002) for session management.
+ * CSRF protection and session middleware are handled globally by session-middleware.ts.
+ *
  * Mount this router at a prefix (e.g. /ui) on the main Express app.
  */
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import crypto from 'node:crypto';
 import type { HubDB } from './db.js';
 import { encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
 import { issueWsTicket } from './ws-tickets.js';
-import type { Bot, TokenScope, MessagePart } from './types.js';
+import type { Bot, TokenScope, SessionRole } from './types.js';
 import { SCOPE_REQUIREMENTS, validateParts } from './types.js';
 import type { HubConfig } from './types.js';
-
-// ─── Session Store ───────────────────────────────────────────
-
-interface Session {
-  id: string;
-  bot_id: string;
-  org_id: string;
-  owner_name: string;
-  /** The raw bot token (primary or scoped) — used for ws-ticket issuance */
-  token: string;
-  scopes: TokenScope[];
-  /** Whether the session was created with a scoped token (vs primary bot token) */
-  is_scoped_token: boolean;
-  created_at: number;
-  expires_at: number;
-}
-
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const SESSION_COOKIE = 'hxa_session';
-const sessions = new Map<string, Session>();
-
-function purgeExpiredSessions() {
-  const now = Date.now();
-  for (const [id, session] of sessions) {
-    if (session.expires_at < now) {
-      sessions.delete(id);
-    }
-  }
-}
-
-/** Parse cookies from the Cookie header. */
-function parseCookies(header: string | undefined): Record<string, string> {
-  if (!header) return {};
-  const result: Record<string, string> = {};
-  for (const pair of header.split(';')) {
-    const idx = pair.indexOf('=');
-    if (idx < 0) continue;
-    const key = pair.slice(0, idx).trim();
-    const val = pair.slice(idx + 1).trim();
-    try { result[key] = decodeURIComponent(val); } catch { result[key] = val; }
-  }
-  return result;
-}
+import type { SessionStore } from './session.js';
+import { generateSessionId, SESSION_TTL, SESSION_LIMIT, SESSION_COOKIE } from './session.js';
+import { logger } from './logger.js';
+import { checkLoginRateLimit, recordLoginFailure } from './rate-limit.js';
 
 // ─── Middleware ───────────────────────────────────────────────
 
-/** Extend Express Request for Web UI session context. */
+/** Extend Express Request for Web UI bot context. */
 declare global {
   namespace Express {
     interface Request {
-      uiSession?: Session;
       uiBot?: Bot;
     }
   }
 }
 
-/** CSRF protection: validate Origin header on mutating requests. */
-function csrfMiddleware(req: Request, res: Response, next: NextFunction) {
-  const method = req.method.toUpperCase();
-  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
-    next();
-    return;
-  }
-
-  const origin = req.headers.origin;
-  if (!origin) {
-    // No Origin header — could be same-origin request (browsers always send
-    // Origin for cross-origin). Allow it; SameSite=Strict cookie provides
-    // defense-in-depth.
-    next();
-    return;
-  }
-
-  // Validate Origin matches the request host
-  const host = req.headers.host;
-  if (!host) {
-    res.status(403).json({ error: 'Missing Host header', code: 'CSRF_REJECTED' });
-    return;
-  }
-
-  try {
-    const originUrl = new URL(origin);
-    // Compare hostname:port (Origin includes scheme but not path)
-    const originHost = originUrl.port
-      ? `${originUrl.hostname}:${originUrl.port}`
-      : originUrl.hostname;
-    // Host header may or may not include port
-    const reqHost = host.split(':')[0];
-    const originHostname = originUrl.hostname;
-
-    if (originHostname !== reqHost && originHost !== host) {
-      res.status(403).json({ error: 'Origin mismatch', code: 'CSRF_REJECTED' });
-      return;
-    }
-  } catch {
-    res.status(403).json({ error: 'Invalid Origin header', code: 'CSRF_REJECTED' });
-    return;
-  }
-
-  next();
-}
-
-/** Session authentication middleware — resolves session cookie to bot. */
-function sessionAuth(db: HubDB) {
+/**
+ * Session authentication middleware for Web UI.
+ * Relies on global session middleware (req.session). Only accepts bot_owner sessions.
+ */
+function sessionAuth(db: HubDB, sessionStore: SessionStore) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    purgeExpiredSessions();
-
-    const cookies = parseCookies(req.headers.cookie);
-    const sessionId = cookies[SESSION_COOKIE];
-
-    if (!sessionId) {
+    // req.session is set by global session middleware (session-middleware.ts)
+    if (!req.session) {
       res.status(401).json({ error: 'Not authenticated', code: 'SESSION_REQUIRED' });
       return;
     }
 
-    const session = sessions.get(sessionId);
-    if (!session || session.expires_at < Date.now()) {
-      if (session) sessions.delete(sessionId);
-      res.status(401).json({ error: 'Session expired', code: 'SESSION_EXPIRED' });
+    // Web UI only supports bot_owner sessions
+    if (req.session.role !== 'bot_owner' || !req.session.bot_id) {
+      res.status(403).json({ error: 'Bot owner session required for Web UI', code: 'FORBIDDEN' });
       return;
     }
 
     // Verify bot still exists
-    const bot = await db.getBotById(session.bot_id);
+    const bot = await db.getBotById(req.session.bot_id);
     if (!bot) {
-      sessions.delete(sessionId);
+      await sessionStore.delete(req.session.id);
       res.status(401).json({ error: 'Bot no longer exists', code: 'SESSION_INVALID' });
       return;
     }
@@ -149,27 +63,11 @@ function sessionAuth(db: HubDB) {
     // Re-check org status (mirrors main API auth behavior)
     const org = await db.getOrgById(bot.org_id);
     if (!org || org.status === 'suspended' || org.status === 'destroyed') {
-      sessions.delete(sessionId);
+      await sessionStore.delete(req.session.id);
       res.status(403).json({ error: 'Organization is not accessible', code: 'ORG_INACCESSIBLE' });
       return;
     }
 
-    // Re-check scoped token validity (if session was created with a scoped token)
-    if (session.is_scoped_token) {
-      const scopedToken = await db.getBotTokenByToken(session.token);
-      if (!scopedToken) {
-        sessions.delete(sessionId);
-        res.status(401).json({ error: 'Token revoked', code: 'TOKEN_REVOKED' });
-        return;
-      }
-      if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
-        sessions.delete(sessionId);
-        res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
-        return;
-      }
-    }
-
-    req.uiSession = session;
     req.uiBot = bot;
     next();
   };
@@ -179,7 +77,7 @@ function sessionAuth(db: HubDB) {
 function requireUIScope(operation: keyof typeof SCOPE_REQUIREMENTS) {
   const allowedScopes = SCOPE_REQUIREMENTS[operation];
   return (req: Request, res: Response, next: NextFunction) => {
-    const scopes = req.uiSession?.scopes ?? [];
+    const scopes = req.session?.scopes ?? [];
     const hasScope = scopes.some(s => allowedScopes.includes(s));
     if (!hasScope) {
       res.status(403).json({
@@ -194,15 +92,12 @@ function requireUIScope(operation: keyof typeof SCOPE_REQUIREMENTS) {
 
 // ─── Router Factory ──────────────────────────────────────────
 
-export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Router {
+export function createWebUIRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionStore: SessionStore): Router {
   const maxMessageLength = config?.max_message_length ?? 65536;
+  const isDev = process.env.DEV_MODE === 'true';
   const router = Router();
 
-  // Apply CSRF protection to all routes
-  router.use(csrfMiddleware);
-
-  // ── Parse JSON body ─────────────────────────────────────
-  // (relies on parent app's express.json() already being applied)
+  // CSRF and session middleware are applied globally in index.ts
 
   // ── Login ───────────────────────────────────────────────
 
@@ -210,6 +105,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
    * POST /login — Authenticate with bot token + owner name.
    * Body: { token: string, owner_name: string }
    * Returns: session info. Sets HttpOnly session cookie.
+   * Creates a bot_owner session in the shared SessionStore.
    */
   router.post('/login', async (req: Request, res: Response) => {
     const { token, owner_name } = req.body;
@@ -223,6 +119,17 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
       return;
     }
 
+    // Rate limit check (matches main API)
+    const ip = req.ip || 'unknown';
+    const identifier = token.slice(0, 8);
+    const rateCheck = checkLoginRateLimit(ip, 'bot', identifier);
+    if (!rateCheck.allowed) {
+      res.status(429).set('Retry-After', String(rateCheck.retryAfter)).json({
+        error: 'Too many failed login attempts', code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter,
+      });
+      return;
+    }
+
     // Verify token — try primary bot token first, then scoped token
     let bot: Bot | undefined;
     let scopes: TokenScope[] = ['full'];
@@ -233,6 +140,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
       const scopedToken = await db.getBotTokenByToken(token);
       if (scopedToken) {
         if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
+          recordLoginFailure(ip, 'bot', identifier);
           res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
           return;
         }
@@ -244,6 +152,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
     }
 
     if (!bot) {
+      recordLoginFailure(ip, 'bot', identifier);
       res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
       return;
     }
@@ -262,27 +171,42 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
       return;
     }
 
-    // Create session
-    purgeExpiredSessions();
-    const sessionId = crypto.randomBytes(32).toString('hex');
-    const session: Session = {
-      id: sessionId,
-      bot_id: bot.id,
+    // Enforce concurrent session limit (matches main API)
+    const limit = SESSION_LIMIT['bot_owner'];
+    const count = await sessionStore.countByRole('bot_owner', bot.org_id, bot.id);
+    if (count >= limit) {
+      await sessionStore.deleteByBotId(bot.id);
+      ws.disconnectSessionClientsByBotId(bot.id);
+    }
+
+    // Create session in shared SessionStore
+    const now = Date.now();
+    const session = {
+      id: generateSessionId(),
+      role: 'bot_owner' as SessionRole,
       org_id: bot.org_id,
+      bot_id: bot.id,
       owner_name: owner_name.trim(),
-      token,
       scopes,
       is_scoped_token: isScopedToken,
-      created_at: Date.now(),
-      expires_at: Date.now() + SESSION_TTL_MS,
+      created_at: now,
+      expires_at: now + SESSION_TTL['bot_owner'],
     };
-    sessions.set(sessionId, session);
+    await sessionStore.set(session);
+
+    // Audit log — bot_owner always has org_id
+    await db.recordAudit(bot.org_id, bot.id, 'auth.login', 'session', session.id, {
+      role: 'bot_owner', ip: req.ip, user_agent: req.headers['user-agent'], source: 'web-ui',
+    });
 
     // Set cookie — HttpOnly, SameSite=Strict
-    // Secure flag based on actual protocol (respects trust proxy + x-forwarded-proto)
-    res.setHeader('Set-Cookie',
-      `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/${req.secure ? '; Secure' : ''}; Max-Age=${SESSION_TTL_MS / 1000}`,
-    );
+    res.cookie(SESSION_COOKIE, session.id, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: !isDev,
+      path: '/',
+      maxAge: SESSION_TTL['bot_owner'],
+    });
 
     res.json({
       bot: { id: bot.id, name: bot.name, org_id: bot.org_id },
@@ -295,26 +219,30 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
   // ── All routes below require session ────────────────────
 
   const auth = Router();
-  auth.use(sessionAuth(db));
+  auth.use(sessionAuth(db, sessionStore));
   router.use(auth);
 
   // ── Logout ──────────────────────────────────────────────
 
-  auth.post('/logout', (req: Request, res: Response) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const sessionId = cookies[SESSION_COOKIE];
-    if (sessionId) sessions.delete(sessionId);
-
-    res.setHeader('Set-Cookie',
-      `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
-    );
+  auth.post('/logout', async (req: Request, res: Response) => {
+    if (req.session) {
+      // Audit log — bot_owner always has org_id
+      if (req.session.org_id) {
+        await db.recordAudit(req.session.org_id, req.session.bot_id, 'auth.logout', 'session', req.session.id, {
+          role: req.session.role, ip: req.ip, source: 'web-ui',
+        });
+      }
+      await sessionStore.delete(req.session.id);
+      ws.disconnectBySessionId(req.session.id);
+    }
+    res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: !isDev, path: '/' });
     res.json({ ok: true });
   });
 
   // ── Session Info ────────────────────────────────────────
 
   auth.get('/session', (req: Request, res: Response) => {
-    const s = req.uiSession!;
+    const s = req.session!;
     const bot = req.uiBot!;
     res.json({
       bot: { id: bot.id, name: bot.name, org_id: bot.org_id },
@@ -511,7 +439,7 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
 
   auth.post('/threads/:id/messages', requireUIScope('thread'), async (req: Request, res: Response) => {
     const bot = req.uiBot!;
-    const session = req.uiSession!;
+    const session = req.session!;
     const threadId = req.params.id as string;
 
     const thread = await db.getThread(threadId);
@@ -650,8 +578,15 @@ export function createWebUIRouter(db: HubDB, ws: HubWS, config?: HubConfig): Rou
   // ── WebSocket Ticket ────────────────────────────────────
 
   auth.post('/ws-ticket', (req: Request, res: Response) => {
-    const session = req.uiSession!;
-    const ticketId = issueWsTicket(session.token, session.org_id);
+    const session = req.session!;
+    const ticketId = issueWsTicket({
+      sessionId: session.id,
+      role: session.role,
+      botId: session.bot_id || undefined,
+      orgId: session.org_id!,
+      scopes: session.scopes,
+      isScopedToken: session.is_scoped_token,
+    });
     res.json({ ticket: ticketId, expires_in: 30 });
   });
 

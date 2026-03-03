@@ -26,6 +26,7 @@ import type {
   ThreadPermissionPolicy,
   OrgTicket,
   PlatformInviteCode,
+  AuthRole,
 } from './types.js';
 
 // ─── Cursor Helpers ──────────────────────────────────────────
@@ -229,7 +230,7 @@ export class HubDB {
 
       CREATE TABLE IF NOT EXISTS org_settings (
         org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
-        messages_per_minute_per_bot INTEGER DEFAULT 60,
+        messages_per_minute_per_bot INTEGER DEFAULT 120,
         threads_per_hour_per_bot INTEGER DEFAULT 30,
         file_upload_mb_per_day_per_bot INTEGER DEFAULT 100,
         message_ttl_days INTEGER,
@@ -334,6 +335,26 @@ export class HubDB {
       await this.driver.run(
         "DELETE FROM channels WHERE type = 'group'",
       );
+    });
+
+    // Sessions table (ADR-002: unified session auth)
+    await this.runMigration('sessions_table', async () => {
+      await this.driver.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          role TEXT NOT NULL,
+          org_id TEXT,
+          bot_id TEXT,
+          owner_name TEXT,
+          scopes TEXT,
+          is_scoped_token INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_org_role ON sessions(org_id, role);
+        CREATE INDEX IF NOT EXISTS idx_sessions_bot ON sessions(bot_id);
+      `);
     });
 
     // Composite indexes for cursor-based pagination (PR1: history browsing API)
@@ -760,6 +781,7 @@ export class HubDB {
     webhookUrl?: string | null,
     webhookSecret?: string | null,
     profile?: BotProfileInput,
+    authRole: AuthRole = 'member',
   ): Promise<{ bot: Bot; created: boolean; plaintextToken: string | null }> {
     // Check if bot already exists → return existing token
     const existing = await this.driver.get<any>(
@@ -871,7 +893,7 @@ export class HubDB {
       active_hours: serializedProfile.active_hours ?? null,
       version: serializedProfile.version ?? '1.0.0',
       runtime: serializedProfile.runtime ?? null,
-      auth_role: 'member',
+      auth_role: authRole,
       online: false,
       last_seen_at: now,
       created_at: now,
@@ -2551,7 +2573,7 @@ export class HubDB {
     // Return defaults if no row exists
     return {
       org_id: orgId,
-      messages_per_minute_per_bot: 60,
+      messages_per_minute_per_bot: 120,
       threads_per_hour_per_bot: 30,
       file_upload_mb_per_day_per_bot: 100,
       message_ttl_days: null,

@@ -6,11 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HubDB, encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
-import { authMiddleware, requireBot, requireOrg, requireScope, requireAuthRole } from './auth.js';
+import { authMiddleware, requireBot, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
-import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy } from './types.js';
+import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy, type SessionRole } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 import { routeLogger } from './logger.js';
+import type { SessionStore } from './session.js';
+import { generateSessionId, SESSION_TTL, SESSION_LIMIT, SESSION_COOKIE } from './session.js';
+import { checkLoginRateLimit, recordLoginFailure } from './rate-limit.js';
 
 /**
  * Express 4 does not forward rejected promises from async route handlers to
@@ -215,40 +218,29 @@ const CLOSE_REASONS = new Set<CloseReason>(['manual', 'timeout', 'error']);
 const ARTIFACT_TYPES = new Set<ArtifactType>(['text', 'markdown', 'json', 'code', 'file', 'link']);
 const ARTIFACT_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
 
-export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
+export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionStore: SessionStore): Router {
   const router = wrapAsyncRouter(Router());
 
   // ─── Public: Setup ────────────────────────────────────────
 
-  // Admin secret check helper
+  // Admin check: session cookie (super_admin) or dev mode (no secret configured)
   function requireAdmin(req: import('express').Request, res: import('express').Response): boolean {
-    if (!config.admin_secret) return true; // No secret = open (local/dev mode)
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-    if (!token) {
-      res.status(401).json({ error: 'Admin authentication required', code: 'AUTH_REQUIRED' });
-      return false;
-    }
-    const expected = Buffer.from(config.admin_secret, 'utf8');
-    const actual = Buffer.from(token, 'utf8');
-    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
-      res.status(401).json({ error: 'Admin authentication required', code: 'AUTH_REQUIRED' });
-      return false;
-    }
-    return true;
+    if (req.session?.role === 'super_admin') return true;
+    if (!config.admin_secret) return true; // No secret = open (dev mode only)
+    res.status(401).json({ error: 'Admin authentication required. Use POST /api/auth/login with type=super_admin', code: 'AUTH_REQUIRED' });
+    return false;
   }
 
   function requireOrgOrBot(req: import('express').Request, res: import('express').Response): string | undefined {
+    if (req.session?.org_id) return req.session.org_id;
     if (req.bot) return req.bot.org_id;
-    if (req.org) return req.org.id;
     res.status(403).json({ error: 'Authentication required', code: 'FORBIDDEN' });
     return undefined;
   }
 
+  // Org admin check: session (org_admin/super_admin) or admin bot Bearer token
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
-    // Ticket auth (authType='org') proves org_secret knowledge — that's admin
-    if (req.authType === 'org' && req.org) return true;
-    // Admin bots also qualify
+    if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') return true;
     if (req.bot?.auth_role === 'admin') return true;
     res.status(403).json({ error: 'Organization admin authentication required', code: 'FORBIDDEN' });
     return false;
@@ -469,6 +461,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const newSecretHash = HubDB.hashToken(newSecret);
     await db.rotateOrgSecret(org.id, newSecretHash);
     await db.invalidateOrgTickets(org.id);
+
+    // Revoke existing org_admin sessions and disconnect WS clients
+    await sessionStore.deleteByRole('org_admin', org.id);
+    ws.disconnectByRole('org_admin', org.id);
 
     res.json({ org_secret: newSecret });
   });
@@ -696,83 +692,307 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     return { name, metadata, webhook_url, webhook_secret, profile };
   }
 
-  // ─── Public Auth Routes (Ticket-Based) ──────────────────
+  // ─── Public Auth Routes ─────────────────────────────────
+
+  const isDev = process.env.DEV_MODE === 'true';
 
   /**
-   * POST /api/auth/login — Authenticate with org credentials and receive a ticket
-   * Body: { org_id, org_secret, reusable?, expires_in? }
-   * Returns: { ticket, expires_at, reusable, org: { id, name } }
+   * POST /api/auth/login — Unified session login (ADR-002)
+   * Body: { type: 'bot', token, owner_name }
+   *     | { type: 'org_admin', org_id, org_secret }
+   *     | { type: 'super_admin', admin_secret }
+   * Returns: { session: { role, org_id?, bot_id?, expires_at } }
+   * Sets HttpOnly session cookie.
    */
   router.post('/api/auth/login', async (req, res) => {
-    const { org_id, org_secret, reusable, expires_in } = req.body;
+    const { type } = req.body;
 
-    // Validate required fields
-    if (!org_id || typeof org_id !== 'string') {
-      res.status(400).json({ error: 'org_id is required', code: 'VALIDATION_ERROR' });
-      return;
-    }
-    if (!org_secret || typeof org_secret !== 'string') {
-      res.status(400).json({ error: 'org_secret is required', code: 'VALIDATION_ERROR' });
+    if (!type || !['bot', 'org_admin', 'super_admin'].includes(type)) {
+      res.status(400).json({ error: 'Invalid login type. Must be: bot, org_admin, or super_admin', code: 'VALIDATION_ERROR' });
       return;
     }
 
-    // Look up org
-    const org = await db.getOrgById(org_id);
-    if (!org) {
-      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
-      return;
+    const ip = req.ip || 'unknown';
+
+    switch (type as string) {
+      case 'bot': {
+        const { token, owner_name } = req.body;
+        if (!token || typeof token !== 'string') {
+          res.status(400).json({ error: 'token is required', code: 'VALIDATION_ERROR' });
+          return;
+        }
+
+        const identifier = token.slice(0, 8);
+        const rateCheck = checkLoginRateLimit(ip, 'bot', identifier);
+        if (!rateCheck.allowed) {
+          res.status(429).set('Retry-After', String(rateCheck.retryAfter)).json({
+            error: 'Too many failed login attempts', code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter,
+          });
+          return;
+        }
+
+        // Try primary bot token
+        let bot = await db.getBotByToken(token);
+        let scopes: TokenScope[] = ['full'];
+        let isScopedToken = false;
+
+        // Try scoped token if primary not found
+        if (!bot) {
+          const scopedToken = await db.getBotTokenByToken(token);
+          if (scopedToken) {
+            if (scopedToken.expires_at !== null && scopedToken.expires_at < Date.now()) {
+              recordLoginFailure(ip, 'bot', identifier);
+              res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+              return;
+            }
+            bot = await db.getBotById(scopedToken.bot_id);
+            scopes = scopedToken.scopes;
+            isScopedToken = true;
+          }
+        }
+
+        if (!bot) {
+          recordLoginFailure(ip, 'bot', identifier);
+          res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
+          return;
+        }
+
+        const org = await db.getOrgById(bot.org_id);
+        if (!org || org.status !== 'active') {
+          res.status(403).json({ error: `Organization is ${org?.status || 'not found'}`, code: 'ORG_INACTIVE' });
+          return;
+        }
+
+        // Enforce concurrent session limit (5 per bot)
+        await enforceSessionLimit(sessionStore, 'bot_owner', org.id, bot.id);
+
+        const session = createSession('bot_owner', org.id, bot.id, owner_name || null, scopes, isScopedToken);
+        await sessionStore.set(session);
+        setSessionCookie(res, session);
+
+        // Audit
+        await db.recordAudit(org.id, bot.id, 'auth.login', 'session', session.id, {
+          role: 'bot_owner', ip, user_agent: req.headers['user-agent'],
+        });
+
+        res.json({
+          session: { role: session.role, org_id: session.org_id, bot_id: session.bot_id, expires_at: session.expires_at },
+        });
+        return;
+      }
+
+      case 'org_admin': {
+        const { org_id, org_secret } = req.body;
+        if (!org_id || typeof org_id !== 'string') {
+          res.status(400).json({ error: 'org_id is required', code: 'VALIDATION_ERROR' });
+          return;
+        }
+        if (!org_secret || typeof org_secret !== 'string') {
+          res.status(400).json({ error: 'org_secret is required', code: 'VALIDATION_ERROR' });
+          return;
+        }
+
+        const rateCheck = checkLoginRateLimit(ip, 'org_admin', org_id);
+        if (!rateCheck.allowed) {
+          res.status(429).set('Retry-After', String(rateCheck.retryAfter)).json({
+            error: 'Too many failed login attempts', code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter,
+          });
+          return;
+        }
+
+        const org = await db.getOrgById(org_id);
+        if (!org) {
+          recordLoginFailure(ip, 'org_admin', org_id);
+          res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+          return;
+        }
+
+        if (!await db.verifyOrgSecret(org.id, org_secret)) {
+          recordLoginFailure(ip, 'org_admin', org_id);
+          res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+          return;
+        }
+
+        if (org.status !== 'active') {
+          res.status(403).json({ error: `Organization is ${org.status}`, code: 'ORG_INACTIVE' });
+          return;
+        }
+
+        await enforceSessionLimit(sessionStore, 'org_admin', org.id);
+
+        const session = createSession('org_admin', org.id, null, null, null, false);
+        await sessionStore.set(session);
+        setSessionCookie(res, session);
+
+        await db.recordAudit(org.id, null, 'auth.login', 'session', session.id, {
+          role: 'org_admin', ip, user_agent: req.headers['user-agent'],
+        });
+
+        res.json({
+          session: { role: session.role, org_id: session.org_id, expires_at: session.expires_at },
+        });
+        return;
+      }
+
+      case 'super_admin': {
+        const { admin_secret } = req.body;
+        if (!admin_secret || typeof admin_secret !== 'string') {
+          res.status(400).json({ error: 'admin_secret is required', code: 'VALIDATION_ERROR' });
+          return;
+        }
+
+        const rateCheck = checkLoginRateLimit(ip, 'super_admin', '');
+        if (!rateCheck.allowed) {
+          res.status(429).set('Retry-After', String(rateCheck.retryAfter)).json({
+            error: 'Too many failed login attempts', code: 'RATE_LIMITED', retry_after: rateCheck.retryAfter,
+          });
+          return;
+        }
+
+        if (!config.admin_secret) {
+          res.status(500).json({ error: 'Admin secret not configured', code: 'SERVER_ERROR' });
+          return;
+        }
+
+        const expected = Buffer.from(config.admin_secret, 'utf8');
+        const actual = Buffer.from(admin_secret, 'utf8');
+        if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+          recordLoginFailure(ip, 'super_admin', '');
+          res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+          return;
+        }
+
+        await enforceSessionLimit(sessionStore, 'super_admin');
+
+        const session = createSession('super_admin', null, null, null, null, false);
+        await sessionStore.set(session);
+        setSessionCookie(res, session);
+
+        // super_admin has no org_id — log to app log only (audit_log.org_id is FK)
+        routeLogger.info({ sessionId: session.id, role: 'super_admin', ip }, 'auth.login');
+
+        res.json({
+          session: { role: session.role, expires_at: session.expires_at },
+        });
+        return;
+      }
     }
-
-    // Verify org_secret
-    if (!await db.verifyOrgSecret(org.id, org_secret)) {
-      res.status(401).json({ error: 'Invalid org secret', code: 'INVALID_SECRET' });
-      return;
-    }
-
-    // Check org status
-    if (org.status !== 'active') {
-      const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
-      res.status(403).json({ error: `Organization is ${org.status}`, code });
-      return;
-    }
-
-    // Calculate expiry (default 24 hours for web UI sessions)
-    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 86400;
-    const expiresAt = Date.now() + expiresInSec * 1000;
-
-    // Store the hash of the plaintext org_secret in the ticket for rotation binding
-    const secretHash = HubDB.hashToken(org_secret);
-
-    const isReusable = reusable === true;
-    const ticket = await db.createOrgTicket(org.id, secretHash, {
-      reusable: isReusable,
-      expiresAt,
-      createdBy: 'login',
-    });
-
-    res.json({
-      ticket: ticket.id,
-      expires_at: ticket.expires_at,
-      reusable: ticket.reusable,
-      org: { id: org.id, name: org.name },
-    });
   });
 
   /**
-   * POST /api/auth/register — Register a bot using a ticket (no Bearer auth needed)
-   * Body: { org_id, ticket, name, ...profile fields }
+   * POST /api/auth/logout — Clear session
+   */
+  router.post('/api/auth/logout', async (req, res) => {
+    if (!req.session) {
+      res.status(401).json({ error: 'No active session', code: 'AUTH_REQUIRED' });
+      return;
+    }
+
+    const session = req.session;
+    await sessionStore.delete(session.id);
+
+    // Disconnect any active WS connections for this session
+    ws.disconnectBySessionId(session.id);
+
+    // Clear cookie
+    res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: !isDev, path: '/' });
+
+    // Audit (only for roles with org_id)
+    if (session.org_id) {
+      await db.recordAudit(session.org_id, session.bot_id, 'auth.logout', 'session', session.id, {
+        role: session.role, ip: req.ip,
+      });
+    } else {
+      routeLogger.info({ sessionId: session.id, role: session.role, ip: req.ip }, 'auth.logout');
+    }
+
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/auth/session — Current session info
+   */
+  router.get('/api/auth/session', (req, res) => {
+    if (!req.session) {
+      res.status(401).json({ error: 'No active session', code: 'AUTH_REQUIRED' });
+      return;
+    }
+    const s = req.session;
+    res.json({
+      role: s.role,
+      org_id: s.org_id,
+      bot_id: s.bot_id,
+      owner_name: s.owner_name,
+      scopes: s.scopes,
+      is_scoped_token: s.is_scoped_token,
+      expires_at: s.expires_at,
+    });
+  });
+
+  // Session helper functions
+  function createSession(
+    role: SessionRole, orgId: string | null, botId: string | null,
+    ownerName: string | null, scopes: TokenScope[] | null, isScopedToken: boolean,
+  ) {
+    const now = Date.now();
+    return {
+      id: generateSessionId(),
+      role,
+      org_id: orgId,
+      bot_id: botId,
+      owner_name: ownerName,
+      scopes,
+      is_scoped_token: isScopedToken,
+      created_at: now,
+      expires_at: now + SESSION_TTL[role],
+    };
+  }
+
+  function setSessionCookie(res: Response, session: { id: string; role: SessionRole; expires_at: number }) {
+    const ttlMs = session.expires_at - Date.now();
+    res.cookie(SESSION_COOKIE, session.id, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: !isDev,
+      path: '/',
+      maxAge: ttlMs,
+    });
+  }
+
+  async function enforceSessionLimit(store: SessionStore, role: SessionRole, orgId?: string, botId?: string) {
+    const limit = SESSION_LIMIT[role];
+    const count = await store.countByRole(role, orgId || undefined, botId || undefined);
+    if (count >= limit) {
+      // Evict oldest sessions over the limit
+      // For simplicity, delete all sessions of this role/scope and the new one replaces them
+      // A more refined approach would keep (limit - 1) newest, but this is simpler
+      // and the limit is generous enough (3-5) that hitting it is rare
+      if (botId) {
+        await store.deleteByBotId(botId);
+        ws.disconnectSessionClientsByBotId(botId);
+      } else {
+        await store.deleteByRole(role, orgId || undefined);
+        ws.disconnectByRole(role, orgId);
+      }
+    }
+  }
+
+  /**
+   * POST /api/auth/register — Register a bot using a ticket or org_secret (ADR-002)
+   * Body: { org_id, ticket, name, ...profile }           → auth_role: 'member'
+   *     | { org_id, org_secret, name, ...profile }        → auth_role: 'admin'
    * Returns: { bot_id, token, name, auth_role }
    */
   router.post('/api/auth/register', async (req, res) => {
-    const { org_id, ticket: ticketId } = req.body;
+    const { org_id, ticket: ticketId, org_secret } = req.body;
 
     // Validate required fields
     if (!org_id || typeof org_id !== 'string') {
       res.status(400).json({ error: 'org_id is required', code: 'VALIDATION_ERROR' });
       return;
     }
-    if (!ticketId || typeof ticketId !== 'string') {
-      res.status(400).json({ error: 'ticket is required', code: 'VALIDATION_ERROR' });
+    if (!ticketId && !org_secret) {
+      res.status(400).json({ error: 'ticket or org_secret is required', code: 'VALIDATION_ERROR' });
       return;
     }
 
@@ -780,53 +1000,71 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const validated = await validateRegistrationBody(req.body, res);
     if (!validated) return; // response already sent
 
-    // Get and validate the ticket
-    const ticket = await db.getOrgTicket(ticketId);
-    if (!ticket) {
-      res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
-      return;
-    }
+    let authRole: 'admin' | 'member' = 'member';
 
-    // Check ticket belongs to this org
-    if (ticket.org_id !== org_id) {
-      res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
-      return;
-    }
+    if (org_secret && typeof org_secret === 'string') {
+      // org_secret path — register as admin
+      const org = await db.getOrgById(org_id);
+      if (!org) {
+        res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+        return;
+      }
+      if (!await db.verifyOrgSecret(org.id, org_secret)) {
+        res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+        return;
+      }
+      if (org.status !== 'active') {
+        const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+        res.status(403).json({ error: `Organization is ${org.status}`, code });
+        return;
+      }
+      authRole = 'admin';
+    } else {
+      // ticket path — register as member
+      if (!ticketId || typeof ticketId !== 'string') {
+        res.status(400).json({ error: 'ticket is required', code: 'VALIDATION_ERROR' });
+        return;
+      }
 
-    // Check not expired
-    if (ticket.expires_at <= Date.now()) {
-      res.status(401).json({ error: 'Ticket expired', code: 'TICKET_EXPIRED' });
-      return;
-    }
-
-    // Check not already consumed (for one-time tickets)
-    if (!ticket.reusable && ticket.consumed) {
-      res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
-      return;
-    }
-
-    // Redeem the ticket (atomic consume for one-time tickets)
-    if (!ticket.reusable) {
-      const redeemed = await db.redeemOrgTicket(ticketId);
-      if (!redeemed) {
+      const ticket = await db.getOrgTicket(ticketId);
+      if (!ticket) {
+        res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
+        return;
+      }
+      if (ticket.org_id !== org_id) {
+        res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
+        return;
+      }
+      if (ticket.expires_at <= Date.now()) {
+        res.status(401).json({ error: 'Ticket expired', code: 'TICKET_EXPIRED' });
+        return;
+      }
+      if (!ticket.reusable && ticket.consumed) {
         res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
+        return;
+      }
+      if (!ticket.reusable) {
+        const redeemed = await db.redeemOrgTicket(ticketId);
+        if (!redeemed) {
+          res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
+          return;
+        }
+      }
+
+      // Get org and check status
+      const org = await db.getOrgById(org_id);
+      if (!org) {
+        res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+        return;
+      }
+      if (org.status !== 'active') {
+        const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+        res.status(403).json({ error: `Organization is ${org.status}`, code });
         return;
       }
     }
 
-    // Get org and check status
-    const org = await db.getOrgById(org_id);
-    if (!org) {
-      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
-      return;
-    }
-    if (org.status !== 'active') {
-      const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
-      res.status(403).json({ error: `Organization is ${org.status}`, code });
-      return;
-    }
-
-    // Register the bot (always as member — org admin promotes via Web UI)
+    // Register the bot
     const { bot, created, plaintextToken } = await db.registerBot(
       org_id,
       validated.name,
@@ -834,16 +1072,19 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       validated.webhook_url,
       validated.webhook_secret,
       validated.profile,
+      authRole,
     );
 
     // Audit
-    await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, { name: bot.name, reregister: !created, via: 'ticket' });
+    const via = org_secret ? 'org_secret' : 'ticket';
+    await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, {
+      name: bot.name, reregister: !created, via, auth_role: authRole,
+    });
 
     const response: Record<string, unknown> = {
       bot_id: bot.id,
       ...toBotResponse(bot),
     };
-    // Only include token on initial registration
     if (created && plaintextToken !== null) {
       response.token = plaintextToken;
     }
@@ -892,7 +1133,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.delete('/api/bots/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
-    const orgId = req.org?.id || req.bot?.org_id;
+    const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const bot = await db.getBotById(req.params.id as string);
     if (!bot || bot.org_id !== orgId) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
@@ -1215,21 +1456,21 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     const orgId = requireOrgOrBot(req, res);
     if (!orgId) return;
 
-    // Org caller: paginated behavior (migrated from old GET /api/bots)
-    if (req.authType === 'org') {
+    // Session caller (org_admin/super_admin): paginated behavior
+    if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') {
       const cursor = getQueryString(req.query.cursor);
       const limitParam = getQueryString(req.query.limit);
       const search = getQueryString(req.query.search)?.trim();
 
       // When no pagination params and no search, fall back to unpaginated behavior
       if (!cursor && !limitParam && !search) {
-        const bots = await db.listBots(req.org!.id);
+        const bots = await db.listBots(orgId);
         res.json(bots.map(a => toBotResponse(a)));
         return;
       }
 
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
-      const rows = await db.listBotsPaginated(req.org!.id, cursor, limit, search);
+      const rows = await db.listBotsPaginated(orgId, cursor, limit, search);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
       const response: Record<string, unknown> = {
@@ -1323,7 +1564,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
-    if (req.org && channel.org_id !== req.org.id) {
+    if (req.session?.org_id && channel.org_id !== req.session.org_id) {
       res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
       return;
     }
@@ -1342,7 +1583,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
   /**
    * GET /api/bots/:id/channels — List channels a bot participates in
-   * Auth: Bot token (same org) or org ticket/admin bot
+   * Auth: Bot token (same org) or session/admin bot
    * Returns: [{ id, type, name, created_at, last_activity_at, members }]
    */
   auth.get('/api/bots/:id/channels', requireScope('read'), async (req, res) => {
@@ -1379,7 +1620,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/org/threads', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const statusRaw = getQueryString(req.query.status);
     if (statusRaw && !THREAD_STATUSES.has(statusRaw as ThreadStatus)) {
@@ -1423,7 +1664,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/org/threads/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
@@ -1455,7 +1696,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/org/threads/:id/messages', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
@@ -1509,7 +1750,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/org/threads/:id/artifacts', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
@@ -1546,7 +1787,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.patch('/api/org/threads/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const thread = await db.getThread(req.params.id as string);
     if (!thread || thread.org_id !== orgId) {
@@ -2624,7 +2865,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       res.status(403).json({ error: 'Not a member of this channel', code: 'FORBIDDEN' });
       return;
     }
-    if (req.org && channel.org_id !== req.org.id) {
+    if (req.session?.org_id && channel.org_id !== req.session.org_id) {
       res.status(403).json({ error: 'Channel not in your org', code: 'FORBIDDEN' });
       return;
     }
@@ -3000,7 +3241,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/org/settings', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
     res.json(await db.getOrgSettings(orgId));
   });
 
@@ -3011,7 +3252,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.patch('/api/org/settings', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const {
       messages_per_minute_per_bot,
@@ -3102,7 +3343,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
 
     const { reusable, expires_in } = req.body;
 
-    const orgId = req.bot?.org_id || req.org?.id;
+    const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const org = orgId ? await db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
@@ -3140,7 +3381,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
   auth.post('/api/org/rotate-secret', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
-    const orgId = req.bot?.org_id || req.org?.id;
+    const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const org = orgId ? await db.getOrgById(orgId) : undefined;
     if (!org) {
       res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
@@ -3162,6 +3403,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
     // Invalidate all unredeemed org_tickets for this org
     await db.invalidateOrgTickets(orgId!);
 
+    // Revoke existing org_admin sessions and disconnect WS clients
+    await sessionStore.deleteByRole('org_admin', orgId!);
+    ws.disconnectByRole('org_admin', orgId!);
+
     res.json({ org_secret: newSecret });
   });
 
@@ -3182,7 +3427,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
       return;
     }
 
-    const orgId = req.bot?.org_id || req.org?.id;
+    const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const targetBotId = req.params.bot_id as string;
     const targetBot = await db.getBotById(targetBotId);
     if (!targetBot) {
@@ -3221,17 +3466,33 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    * This avoids leaking the token in server logs via the URL query param.
    */
   auth.post('/api/ws-ticket', async (req, res) => {
-    // Use the raw token stored by authMiddleware (from Bearer header)
-    const token = req.rawToken;
+    // Session cookie auth (ADR-002)
+    if (req.session) {
+      if (req.session.role === 'super_admin') {
+        res.status(403).json({ error: 'super_admin cannot use WebSocket', code: 'FORBIDDEN' });
+        return;
+      }
+      const ticketId = issueWsTicket({
+        sessionId: req.session.id,
+        role: req.session.role,
+        botId: req.session.bot_id || undefined,
+        orgId: req.session.org_id!,
+        scopes: req.session.scopes,
+        isScopedToken: req.session.is_scoped_token,
+      });
+      res.json({ ticket: ticketId, expires_in: 30 });
+      return;
+    }
 
+    // Bot Bearer token flow
+    const token = req.rawToken;
     if (!token) {
       res.status(401).json({ error: 'Authentication token required for ticket exchange', code: 'AUTH_REQUIRED' });
       return;
     }
 
-    // Phase 3: Include org context in the ticket for WS org binding
     const orgId = req.bot?.org_id || req.org?.id;
-    const ticketId = issueWsTicket(token, orgId);
+    const ticketId = issueWsTicket({ token, orgId });
 
     res.json({
       ticket: ticketId,
@@ -3248,7 +3509,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
    */
   auth.get('/api/audit', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.org?.id || req.bot?.org_id)!;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
 
     const sinceStr = getQueryString(req.query.since);
     const since = sinceStr ? parseInt(sinceStr) : undefined;

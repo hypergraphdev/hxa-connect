@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { HubDB } from './db.js';
-import type { Bot, Org, TokenScope } from './types.js';
+import type { Bot, Org, TokenScope, Session } from './types.js';
 import { SCOPE_REQUIREMENTS } from './types.js';
 
 // Extend Express Request to include auth context
@@ -9,7 +9,7 @@ declare global {
     interface Request {
       bot?: Bot;
       org?: Org;
-      authType?: 'bot' | 'org';
+      authType?: 'bot';
       /** Token scopes for the current request. Primary bot tokens have ['full']. */
       tokenScopes?: TokenScope[];
       /** ID of the scoped token used (null if primary bot token or org ticket). */
@@ -18,6 +18,8 @@ declare global {
       rawToken?: string;
       /** Unique request ID for log correlation. */
       requestId?: string;
+      /** Session from cookie auth (ADR-002). */
+      session?: Session;
     }
   }
 }
@@ -37,11 +39,34 @@ function extractToken(req: Request): string | undefined {
 }
 
 /**
- * Middleware: Authenticate as bot (via bot token) or org (via reusable ticket)
- * Sets req.bot, req.org, and req.tokenScopes
+ * Middleware: Authenticate as bot (via bot token) or session (via cookie).
+ * Sets req.bot, req.org, and req.tokenScopes for bot auth.
+ * Session auth is handled by session-middleware.ts (sets req.session).
  */
 export function authMiddleware(db: HubDB) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // Session already authenticated via session-middleware (ADR-002)
+    if (req.session) {
+      // Check org status for all org-scoped sessions (org_admin + bot_owner)
+      if (req.session.org_id && (req.session.role === 'org_admin' || req.session.role === 'bot_owner')) {
+        const org = await db.getOrgById(req.session.org_id);
+        if (org && org.status === 'suspended') {
+          res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
+          return;
+        }
+        if (org && org.status === 'destroyed') {
+          res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
+          return;
+        }
+      }
+      // Set tokenScopes for bot_owner sessions so requireScope works correctly
+      if (req.session.role === 'bot_owner') {
+        req.tokenScopes = req.session.scopes ?? ['full'];
+      }
+      next();
+      return;
+    }
+
     const token = extractToken(req);
 
     if (!token) {
@@ -137,30 +162,6 @@ export function authMiddleware(db: HubDB) {
       }
     }
 
-    // Try org ticket (reusable session token from login)
-    const ticket = await db.getOrgTicket(token);
-    if (ticket && ticket.reusable && !ticket.consumed) {
-      if (ticket.expires_at <= Date.now()) {
-        res.status(401).json({ error: 'Session expired', code: 'TICKET_EXPIRED' });
-        return;
-      }
-      const ticketOrg = await db.getOrgById(ticket.org_id);
-      if (ticketOrg) {
-        if (ticketOrg.status === 'suspended') {
-          res.status(403).json({ error: 'Organization is suspended', code: 'ORG_SUSPENDED' });
-          return;
-        }
-        if (ticketOrg.status === 'destroyed') {
-          res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
-          return;
-        }
-        req.org = ticketOrg;
-        req.authType = 'org';
-        next();
-        return;
-      }
-    }
-
     res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
   };
 }
@@ -177,14 +178,14 @@ export function requireBot(req: Request, res: Response, next: NextFunction) {
 }
 
 /**
- * Middleware: Require org admin authentication
+ * Middleware: Require org-level authentication (session org_admin/super_admin).
  */
 export function requireOrg(req: Request, res: Response, next: NextFunction) {
-  if (!req.org || req.authType !== 'org') {
-    res.status(403).json({ error: 'Organization authentication required', code: 'FORBIDDEN' });
+  if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') {
+    next();
     return;
   }
-  next();
+  res.status(403).json({ error: 'Organization admin authentication required', code: 'FORBIDDEN' });
 }
 
 /**
@@ -212,8 +213,8 @@ export function requireAuthRole(role: 'admin') {
 export function requireScope(operation: keyof typeof SCOPE_REQUIREMENTS) {
   const allowedScopes = SCOPE_REQUIREMENTS[operation];
   return (req: Request, res: Response, next: NextFunction) => {
-    // Org-level auth bypasses scope checks
-    if (req.authType === 'org') {
+    // Session-based org/platform auth bypasses scope checks
+    if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') {
       next();
       return;
     }

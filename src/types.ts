@@ -236,6 +236,22 @@ export interface BotToken {
   last_used_at: number | null;
 }
 
+// ─── Sessions (ADR-002) ──────────────────────────────────────
+
+export type SessionRole = 'bot_owner' | 'org_admin' | 'super_admin';
+
+export interface Session {
+  id: string;
+  role: SessionRole;
+  bot_id: string | null;       // set for bot_owner
+  org_id: string | null;       // null for super_admin
+  owner_name: string | null;   // set for bot_owner
+  scopes: TokenScope[] | null; // carried from login token
+  is_scoped_token: boolean;
+  created_at: number;
+  expires_at: number;
+}
+
 // ─── Thread Permission Policies ─────────────────────────────
 
 /**
@@ -278,7 +294,8 @@ export type AuditAction =
   | 'artifact.add' | 'artifact.update'
   | 'file.upload'
   | 'settings.update'
-  | 'lifecycle.cleanup';
+  | 'lifecycle.cleanup'
+  | 'auth.login' | 'auth.login_failed' | 'auth.logout' | 'auth.session_revoked';
 
 export interface AuditEntry {
   id: string;

@@ -159,7 +159,7 @@ describe('Auth Types', () => {
   });
 
   it('authenticates with org ticket', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', { token: orgTicket });
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', { cookie: orgTicket });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
   });
@@ -238,7 +238,7 @@ describe('Auth Types', () => {
 
   it('org ticket bypasses scope checks', async () => {
     // Org ticket can access bot listing (which requires 'read' scope for bots)
-    const { status } = await api(env.baseUrl, 'GET', '/api/bots', { token: orgTicket });
+    const { status } = await api(env.baseUrl, 'GET', '/api/bots', { cookie: orgTicket });
     expect(status).toBe(200);
   });
 
@@ -878,51 +878,48 @@ describe('Phase 2: Auth Login', () => {
 
   afterAll(() => env.cleanup());
 
-  it('issues a ticket on valid login', async () => {
+  it('creates a session on valid org_admin login', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(status).toBe(200);
-    expect(body.ticket).toBeTypeOf('string');
-    expect(body.expires_at).toBeTypeOf('number');
-    expect(body.reusable).toBe(false);
-    expect(body.org.id).toBe(orgId);
-    expect(body.org.name).toBe('login-org');
-  });
-
-  it('issues a reusable ticket', async () => {
-    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: true, expires_in: 3600 },
-    });
-    expect(status).toBe(200);
-    expect(body.reusable).toBe(true);
-    expect(body.expires_at).toBeGreaterThan(Date.now() + 3500 * 1000);
+    expect(body.session).toBeDefined();
+    expect(body.session.role).toBe('org_admin');
+    expect(body.session.org_id).toBe(orgId);
+    expect(body.session.expires_at).toBeTypeOf('number');
   });
 
   it('rejects wrong org_secret', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: 'wrong-secret' },
+      body: { type: 'org_admin', org_id: orgId, org_secret: 'wrong-secret' },
     });
     expect(status).toBe(401);
-    expect(body.code).toBe('INVALID_SECRET');
+    expect(body.code).toBe('INVALID_CREDENTIALS');
   });
 
   it('rejects unknown org_id', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: 'nonexistent', org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: 'nonexistent', org_secret: orgSecret },
     });
-    expect(status).toBe(404);
-    expect(body.code).toBe('NOT_FOUND');
+    expect(status).toBe(401);
+    expect(body.code).toBe('INVALID_CREDENTIALS');
   });
 
-  it('rejects missing fields', async () => {
+  it('rejects missing type field', async () => {
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { org_id: orgId, org_secret: orgSecret },
+    });
+    expect(status).toBe(400);
+  });
+
+  it('rejects missing fields for org_admin', async () => {
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_secret: orgSecret },
+      body: { type: 'org_admin', org_secret: orgSecret },
     });
     expect(s1).toBe(400);
 
     const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId },
+      body: { type: 'org_admin', org_id: orgId },
     });
     expect(s2).toBe(400);
   });
@@ -943,14 +940,14 @@ describe('Phase 2: Ticket-Based Registration', () => {
   afterAll(() => env.cleanup());
 
   it('all bots register as member by default', async () => {
-    // Login to get a ticket
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+    // Create ticket via DB
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
     // Register first bot
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'first-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'first-bot' },
     });
     expect(status).toBe(200);
     expect(body.bot_id).toBeTypeOf('string');
@@ -960,48 +957,49 @@ describe('Phase 2: Ticket-Based Registration', () => {
   });
 
   it('second bot also registers as member', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'second-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'second-bot' },
     });
     expect(status).toBe(200);
     expect(body.auth_role).toBe('member');
   });
 
   it('one-time ticket cannot be reused', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: false },
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
     // First use — succeeds
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'onetime-bot-1' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'onetime-bot-1' },
     });
     expect(s1).toBe(200);
 
     // Second use — fails
     const { status: s2, body: b2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'onetime-bot-2' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'onetime-bot-2' },
     });
     expect(s2).toBe(401);
     expect(b2.code).toBe('TICKET_CONSUMED');
   });
 
   it('reusable ticket can be used multiple times', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret, reusable: true },
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      reusable: true,
+      expiresAt: Date.now() + 3600_000,
     });
 
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reusable-bot-1' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'reusable-bot-1' },
     });
     expect(s1).toBe(200);
 
     const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'reusable-bot-2' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'reusable-bot-2' },
     });
     expect(s2).toBe(200);
   });
@@ -1016,31 +1014,31 @@ describe('Phase 2: Ticket-Based Registration', () => {
 
   it('rejects ticket from wrong org', async () => {
     const otherOrg = await env.createOrg('other-org');
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: otherOrg.id, org_secret: otherOrg.org_secret },
+    const otherTicket = await env.db.createOrgTicket(otherOrg.id, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
     const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket, name: 'cross-org-bot' },
+      body: { org_id: orgId, ticket: otherTicket.id, name: 'cross-org-bot' },
     });
     expect(status).toBe(401);
     expect(body.code).toBe('INVALID_TICKET');
   });
 
   it('rejects missing required fields in ticket registration', async () => {
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
     // Missing name
     const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: loginBody.ticket },
+      body: { org_id: orgId, ticket: ticket.id },
     });
     expect(s1).toBe(400);
 
     // Missing org_id
     const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { ticket: loginBody.ticket, name: 'no-org-bot' },
+      body: { ticket: ticket.id, name: 'no-org-bot' },
     });
     expect(s2).toBe(400);
   });
@@ -1068,7 +1066,7 @@ describe('Phase 2: toAgentResponse includes auth_role', () => {
   });
 
   it('GET /api/bots includes auth_role in list', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', { token: orgTicket });
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', { cookie: orgTicket });
     expect(status).toBe(200);
     expect(body[0].auth_role).toBeDefined();
   });
@@ -1220,37 +1218,31 @@ describe('Phase 2: Org Secret Rotation', () => {
 
     // Login with new secret works
     const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: newSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: newSecret },
     });
     expect(status).toBe(200);
 
     // Login with old secret fails
     const { status: s2 } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: orgSecret },
+      body: { type: 'org_admin', org_id: orgId, org_secret: orgSecret },
     });
     expect(s2).toBe(401);
   });
 
   it('rotation invalidates outstanding tickets', async () => {
-    // Get a new secret first
-    const { body: rotBody } = await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
-      token: adminToken,
+    // Create a ticket via DB before rotation
+    const ticket = await env.db.createOrgTicket(orgId, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
 
-    // Login to get a ticket with current secret
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: orgId, org_secret: rotBody.org_secret },
-    });
-    const ticketBeforeRotation = loginBody.ticket;
-
-    // Rotate again
+    // Rotate secret
     await api(env.baseUrl, 'POST', '/api/org/rotate-secret', {
       token: adminToken,
     });
 
     // Try to use the old ticket — should fail (tickets were invalidated)
     const { status } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: orgId, ticket: ticketBeforeRotation, name: 'post-rotation-bot' },
+      body: { org_id: orgId, ticket: ticket.id, name: 'post-rotation-bot' },
     });
     expect(status).toBe(401);
   });
@@ -1386,16 +1378,27 @@ describe('Phase 3: WS Ticket Org Binding', () => {
 describe('Phase 4: Super Admin Org Lifecycle', () => {
   const ADMIN_SECRET = 'test-super-admin-secret';
   let env: TestEnv;
+  let superAdminCookie: string;
 
   beforeAll(async () => {
     env = await createTestEnv({ admin_secret: ADMIN_SECRET });
+
+    // Login as super_admin to get session cookie
+    const loginRes = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'super_admin', admin_secret: ADMIN_SECRET }),
+    });
+    const setCookie = loginRes.headers.get('set-cookie') || '';
+    const match = setCookie.match(/hxa_session=([^;]+)/);
+    superAdminCookie = match![1];
   });
 
   afterAll(() => env.cleanup());
 
   it('POST /api/orgs returns org_secret and status', async () => {
     const { status, body } = await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { name: 'lifecycle-org' },
     });
     expect(status).toBe(200);
@@ -1406,7 +1409,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
   it('POST /api/orgs requires admin auth', async () => {
     const { status } = await api(env.baseUrl, 'POST', '/api/orgs', {
-      token: 'wrong-secret',
+      cookie: 'invalid-session-cookie',
       body: { name: 'should-fail' },
     });
     expect(status).toBe(401);
@@ -1418,7 +1421,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     await env.registerBot(org.org_secret, 'list-bot');
 
     const { status, body } = await api(env.baseUrl, 'GET', '/api/orgs', {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -1434,7 +1437,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     const org = await env.createOrg('rename-me');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { name: 'renamed-org' },
     });
     expect(status).toBe(200);
@@ -1446,7 +1449,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     const org = await env.createOrg('suspend-me');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
     expect(status).toBe(200);
@@ -1458,13 +1461,13 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Suspend
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
     // Reactivate
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'active' },
     });
     expect(status).toBe(200);
@@ -1475,7 +1478,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     const org = await env.createOrg('no-destroy-patch');
 
     const { status, body } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'destroyed' },
     });
     expect(status).toBe(400);
@@ -1487,12 +1490,12 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Destroy via DELETE
     await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
 
     // Try to modify — org is gone (deleted from DB)
     const { status } = await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { name: 'impossible' },
     });
     expect(status).toBe(404);
@@ -1500,7 +1503,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
   it('PATCH /api/orgs/:id returns 404 for unknown org', async () => {
     const { status } = await api(env.baseUrl, 'PATCH', '/api/orgs/nonexistent-id', {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { name: 'nope' },
     });
     expect(status).toBe(404);
@@ -1510,13 +1513,13 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     const org = await env.createOrg('destroy-me');
 
     const { status } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
     expect(status).toBe(204);
 
     // Verify org is gone
     const { status: listStatus, body: orgs } = await api(env.baseUrl, 'GET', '/api/orgs', {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
     expect(listStatus).toBe(200);
     const found = orgs.find((o: any) => o.id === org.id);
@@ -1525,7 +1528,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
   it('DELETE /api/orgs/:id returns 404 for unknown org', async () => {
     const { status } = await api(env.baseUrl, 'DELETE', '/api/orgs/nonexistent-id', {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
     expect(status).toBe(404);
   });
@@ -1542,7 +1545,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Suspend org
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
@@ -1560,7 +1563,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Suspend
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
@@ -1572,7 +1575,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Reactivate
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'active' },
     });
 
@@ -1583,49 +1586,47 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
     expect(status).toBe(200);
   });
 
-  it('suspended org invalidates org tickets', async () => {
+  it('suspended org invalidates org sessions', async () => {
     const org = await env.createOrg('suspend-ticket-test');
-    const orgTicket = await env.loginAsOrg(org.org_secret);
+    const orgCookie = await env.loginAsOrg(org.org_secret);
 
-    // Verify ticket works initially
+    // Verify session works initially
     const { status: beforeStatus } = await api(env.baseUrl, 'GET', '/api/bots', {
-      token: orgTicket,
+      cookie: orgCookie,
     });
     expect(beforeStatus).toBe(200);
 
-    // Suspend — invalidates all outstanding org tickets
+    // Suspend — session still exists but middleware rejects for suspended org
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
-    // Org ticket should be invalidated (401, not 403)
+    // Org session should be rejected with ORG_SUSPENDED
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
-      token: orgTicket,
+      cookie: orgCookie,
     });
-    expect(status).toBe(401);
-    expect(body.code).toBe('INVALID_TOKEN');
+    expect(status).toBe(403);
+    expect(body.code).toBe('ORG_SUSPENDED');
   });
 
   it('suspension invalidates outstanding org tickets', async () => {
     const org = await env.createOrg('suspend-tickets-test');
 
-    // Login to get a ticket
-    const { body: loginBody } = await api(env.baseUrl, 'POST', '/api/auth/login', {
-      body: { org_id: org.id, org_secret: org.org_secret },
+    // Create a ticket via DB
+    const ticket = await env.db.createOrgTicket(org.id, 'test-hash', {
+      expiresAt: Date.now() + 3600_000,
     });
-    const ticket = loginBody.ticket;
-    expect(ticket).toBeTypeOf('string');
 
     // Suspend the org
     await api(env.baseUrl, 'PATCH', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
       body: { status: 'suspended' },
     });
 
     // Ticket should be invalidated
     const { status } = await api(env.baseUrl, 'POST', '/api/auth/register', {
-      body: { org_id: org.id, ticket, name: 'post-suspend-bot' },
+      body: { org_id: org.id, ticket: ticket.id, name: 'post-suspend-bot' },
     });
     expect(status).toBe(401);
   });
@@ -1642,7 +1643,7 @@ describe('Phase 4: Super Admin Org Lifecycle', () => {
 
     // Destroy
     const { status } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org.id}`, {
-      token: ADMIN_SECRET,
+      cookie: superAdminCookie,
     });
     expect(status).toBe(204);
 
@@ -1687,7 +1688,7 @@ describe('Phase 5: GET /api/org', () => {
 
   it('returns org info via org ticket', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.id).toBe(orgId);
@@ -1718,7 +1719,7 @@ describe('Phase 5: Agents Pagination', () => {
 
   it('returns unpaginated list when no params', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
@@ -1727,7 +1728,7 @@ describe('Phase 5: Agents Pagination', () => {
 
   it('returns paginated response with limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots?limit=2', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items).toHaveLength(2);
@@ -1741,7 +1742,7 @@ describe('Phase 5: Agents Pagination', () => {
 
     for (let page = 0; page < 10; page++) {
       const url = cursor ? `/api/bots?limit=2&cursor=${cursor}` : '/api/bots?limit=2';
-      const { body } = await api(env.baseUrl, 'GET', url, { token: orgTicket });
+      const { body } = await api(env.baseUrl, 'GET', url, { cookie: orgTicket });
       for (const a of body.items) allNames.push(a.name);
       if (!body.has_more) break;
       cursor = body.next_cursor;
@@ -1777,7 +1778,7 @@ describe('Phase 5: Threads Pagination', () => {
 
   it('returns paginated threads with limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=2', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.items).toHaveLength(2);
@@ -1792,7 +1793,7 @@ describe('Phase 5: Threads Pagination', () => {
     for (let page = 0; page < 10; page++) {
       const url = cursor ? `/api/org/threads?limit=2&cursor=${cursor}` : '/api/org/threads?limit=2';
       const { body } = await api(env.baseUrl, 'GET', url, {
-        token: orgTicket,
+        cookie: orgTicket,
       });
       for (const t of body.items) topics.push(t.topic);
       if (!body.has_more) break;
@@ -1887,7 +1888,7 @@ describe('Phase 5: Thread Messages Pagination', () => {
 
   it('returns thread messages with limit', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=2`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     const messages = body.messages || body;
@@ -1896,7 +1897,7 @@ describe('Phase 5: Thread Messages Pagination', () => {
 
   it('legacy format returns flat array', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);

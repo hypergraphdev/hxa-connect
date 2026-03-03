@@ -7,6 +7,7 @@ import type {
   Message,
   MessagePart,
   MentionRef,
+  SessionRole,
   ThreadMessage,
   ThreadStatus,
   CloseReason,
@@ -40,6 +41,10 @@ export interface WsClient {
   alive: boolean;
   /** Subscribed channel/thread IDs for org admin clients (message-level filtering). */
   subscriptions: Set<string>;
+  /** Session ID for session-based WS connections (ADR-002). */
+  sessionId?: string;
+  /** Session role for session-based WS connections (ADR-002). */
+  role?: SessionRole;
 }
 
 // ─── WsHub interface (dependency injection for handlers) ─────

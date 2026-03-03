@@ -153,7 +153,7 @@ describe('Thread Mentions', () => {
 
   it('org admin GET thread messages includes mention fields', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/org/threads/${threadId}/messages?limit=1`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
 
     expect(status).toBe(200);

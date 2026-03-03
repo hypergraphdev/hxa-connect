@@ -24,7 +24,7 @@ describe('Channel Cleanup — Removed Endpoints', () => {
 
   it('POST /api/channels returns 404', async () => {
     const { status } = await api(env.baseUrl, 'POST', '/api/channels', {
-      token: orgTicket,
+      cookie: orgTicket,
       body: { type: 'direct', members: ['a', 'b'] },
     });
     expect(status).toBe(404);
@@ -46,7 +46,7 @@ describe('Channel Cleanup — Removed Endpoints', () => {
 
   it('DELETE /api/channels/:id returns 404', async () => {
     const { status } = await api(env.baseUrl, 'DELETE', '/api/channels/fake-id', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(404);
   });
@@ -201,7 +201,7 @@ describe('GET /api/bots/:id/channels — New Endpoint', () => {
 
   it('org ticket can query any bot channels', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', `/api/bots/${bot1Id}/channels`, {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.length).toBe(2);
@@ -209,7 +209,7 @@ describe('GET /api/bots/:id/channels — New Endpoint', () => {
 
   it('resolves bot by name', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots/ch-bot-1/channels', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(200);
     expect(body.length).toBe(2);
@@ -217,7 +217,7 @@ describe('GET /api/bots/:id/channels — New Endpoint', () => {
 
   it('returns 404 for unknown bot', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/bots/nonexistent/channels', {
-      token: orgTicket,
+      cookie: orgTicket,
     });
     expect(status).toBe(404);
     expect(body.code).toBe('NOT_FOUND');

@@ -1,16 +1,23 @@
 import crypto from 'node:crypto';
+import type { SessionRole, TokenScope } from './types.js';
 
 // ─── WS Ticket Store ──────────────────────────────────────────
 // One-time short-lived tickets for secure WebSocket authentication.
 // Tickets are stored in memory (not DB) and invalidated immediately after use.
 
 export interface WsTicket {
-  /** The raw token that was exchanged for this ticket */
-  token: string;
+  /** The raw token that was exchanged for this ticket (bot API flow) */
+  token?: string;
   /** Org binding for multi-org validation (Phase 3) */
   orgId?: string;
   /** Epoch ms when this ticket expires (30s TTL) */
   expiresAt: number;
+  /** Session-based flow (ADR-002) */
+  sessionId?: string;
+  role?: SessionRole;
+  botId?: string;
+  scopes?: TokenScope[] | null;
+  isScopedToken?: boolean;
 }
 
 /** In-memory ticket store: ticketId → WsTicket (module-private to enforce one-time-use semantics) */
@@ -29,17 +36,32 @@ function purgeExpiredTickets() {
 }
 
 /**
- * Issue a one-time WS ticket for the given token.
- * Returns the ticket ID (to be used as ?ticket=xxx).
+ * Issue a one-time WS ticket.
+ * Accepts either a bot token (existing flow) or session identity (ADR-002).
  */
-export function issueWsTicket(token: string, orgId?: string): string {
+export function issueWsTicket(auth: { token: string; orgId?: string } | {
+  sessionId: string; role: SessionRole; botId?: string;
+  orgId: string; scopes?: TokenScope[] | null; isScopedToken?: boolean;
+}): string {
   purgeExpiredTickets();
   const ticketId = crypto.randomBytes(24).toString('hex');
-  wsTicketStore.set(ticketId, {
-    token,
-    ...(orgId ? { orgId } : {}),
-    expiresAt: Date.now() + WS_TICKET_TTL_MS,
-  });
+  if ('token' in auth) {
+    wsTicketStore.set(ticketId, {
+      token: auth.token,
+      orgId: auth.orgId,
+      expiresAt: Date.now() + WS_TICKET_TTL_MS,
+    });
+  } else {
+    wsTicketStore.set(ticketId, {
+      sessionId: auth.sessionId,
+      role: auth.role,
+      botId: auth.botId,
+      orgId: auth.orgId,
+      scopes: auth.scopes,
+      isScopedToken: auth.isScopedToken,
+      expiresAt: Date.now() + WS_TICKET_TTL_MS,
+    });
+  }
   return ticketId;
 }
 

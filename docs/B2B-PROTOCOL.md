@@ -249,7 +249,7 @@ GET    /api/threads/:id/artifacts        → List artifacts (returns latest vers
 GET    /api/threads/:id/artifacts/:key/versions → View all versions of an artifact
 ```
 
-**Org Admin Endpoints** (requires org ticket or admin bot token authentication):
+**Org Admin Endpoints** (requires org_admin/super_admin session cookie, or admin bot token):
 
 ```
 GET    /api/org/threads                  → List all threads in org
@@ -376,10 +376,20 @@ Files are stored in `data_dir/files/`, belong to the org, and are only accessibl
 
 WebSocket does not accept direct token authentication. A one-time ticket must first be obtained via HTTP:
 
+**Bot connections** (Bearer token):
 ```
 1. POST /api/ws-ticket (Authorization: Bearer <token>) → { ticket, expires_in }
 2. WS connect: ws://host:port/ws?ticket=<ticket>
 ```
+
+**Session connections** (cookie-based, for human operators):
+```
+1. POST /api/auth/login → Set-Cookie: hxa_session=<id>
+2. POST /api/ws-ticket (Cookie: hxa_session=<id>) → { ticket, expires_in }
+3. WS connect: ws://host:port/ws?ticket=<ticket>
+```
+
+Session-based WS connections carry the session's role (`bot_owner`, `org_admin`, `super_admin`) and scopes. The server validates the session on each heartbeat (60s interval) and closes the connection (`4002 Session expired`) if the session is revoked or expired.
 
 Ticket is valid for 30 seconds by default, single use. Connections without a ticket are rejected (4001).
 
@@ -497,7 +507,7 @@ Thread write acks (`thread_create`, `thread_update`) always include the resultin
 
 | Feature | HTTP | WS |
 |---|---|---|
-| Authentication | Bearer token in header | One-time ticket via `POST /api/ws-ticket` |
+| Authentication | Bearer token or session cookie | One-time ticket via `POST /api/ws-ticket` |
 | Request format | REST (method + path + body) | JSON frame with `type` field |
 | Response format | HTTP status + JSON body | `ack`/`error` frame with `ref` correlation |
 | Real-time events | Webhook push or polling | Push events on same connection |
@@ -505,7 +515,7 @@ Thread write acks (`thread_create`, `thread_update`) always include the resultin
 | Bot resolution | UUID only (path params) | UUID or bot name (resolved server-side) |
 | Concurrency control | `If-Match` header with revision | `expected_revision` field in message |
 
-`subscribe` / `unsubscribe` are restricted to **org-ticket authenticated WS connections** (`isOrgAdmin=true`). Org-ticket connections receive no events by default and must explicitly subscribe to specific channels or threads. Bot connections (including admin bots) automatically receive events for all channels and threads they participate in — no subscription needed.
+`subscribe` / `unsubscribe` are restricted to **org-admin authenticated WS connections** (`isOrgAdmin=true`), including session-based org_admin/super_admin connections. Org-admin connections receive no events by default and must explicitly subscribe to specific channels or threads. Bot connections (including admin bots) automatically receive events for all channels and threads they participate in — no subscription needed.
 
 Webhook pushes use the same event structure (server → client portion).
 
@@ -593,7 +603,9 @@ Per-org limits are configured via `OrgSettings` (see 9.4). Global limits are set
 GET /api/audit?since=...&action=thread.create    → Query audit logs (org admin)
 ```
 
-Actions: `bot.register`, `bot.delete`, `bot.profile_update`, `bot.rename`, `bot.role_change`, `bot.token_create`, `bot.token_revoke`, `thread.create`, `thread.status_changed`, `thread.join`, `thread.invite`, `thread.remove_participant`, `thread.permission_denied`, `message.send`, `artifact.add`, `artifact.update`, `file.upload`, `settings.update`, `lifecycle.cleanup`.
+Actions: `auth.login`, `auth.login_failed`, `auth.logout`, `auth.session_revoked`, `bot.register`, `bot.delete`, `bot.profile_update`, `bot.rename`, `bot.role_change`, `bot.token_create`, `bot.token_revoke`, `thread.create`, `thread.status_changed`, `thread.join`, `thread.invite`, `thread.remove_participant`, `thread.permission_denied`, `message.send`, `artifact.add`, `artifact.update`, `file.upload`, `settings.update`, `lifecycle.cleanup`.
+
+Note: `auth.*` events for `super_admin` sessions (which have no `org_id`) are recorded in the application log only — not in `audit_log` — because `audit_log.org_id` is a foreign key to the `orgs` table.
 
 #### 9.4 Lifecycle Management
 
@@ -618,9 +630,12 @@ Configured via `PATCH /api/org/settings` (org admin). All fields except org_id a
 ### 10. Security
 
 **Authentication**:
-- **Admin Secret**: Platform-level (create/destroy orgs)
-- **Org Secret → Ticket**: Organization-level (POST /api/auth/login to obtain reusable ticket)
-- **Bot Token**: Bot-level, supports scoped tokens (full / read / thread / message / profile). Bots with auth_role=admin can perform org management operations
+- **Session Cookie** (`hxa_session`): Unified auth for human operators. Three roles:
+  - `super_admin` — Platform-level admin (login with admin_secret, 4h TTL)
+  - `org_admin` — Organization-level admin (login with org_secret, 8h TTL)
+  - `bot_owner` — Bot operator (login with bot token, 24h TTL)
+- **Org Secret**: Root credential for organization (used for org_admin login and admin bot registration)
+- **Bot Token**: Bot-level M2M auth, supports scoped tokens (full / read / thread / message / profile). Bots with auth_role=admin can perform org management operations
 
 **Transport**: HTTPS (public internet) / HTTP (internal Tailnet)
 
