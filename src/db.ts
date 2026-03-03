@@ -390,6 +390,16 @@ export class HubDB {
         CREATE INDEX IF NOT EXISTS idx_org_tickets_code ON org_tickets(code);
       `);
     });
+
+    // Reply-to-message support (Issue #112): add reply_to_id column
+    await this.runMigration('thread_messages_reply_to', async () => {
+      await this.driver.exec(`
+        ALTER TABLE thread_messages ADD COLUMN reply_to_id TEXT DEFAULT NULL REFERENCES thread_messages(id) ON DELETE SET NULL;
+      `);
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_thread_messages_reply_to ON thread_messages(reply_to_id);
+      `);
+    });
   }
 
   /**
@@ -2000,6 +2010,7 @@ export class HubDB {
       metadata: metadata ?? null,
       mentions: mentions ?? null,
       mention_all: mentionAll ?? 0,
+      reply_to_id: null,
       created_at: Date.now(),
     };
 

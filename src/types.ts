@@ -132,6 +132,7 @@ export interface ThreadMessage {
   metadata: string | null; // JSON string
   mentions: string | null; // JSON string of MentionRef[]
   mention_all: number; // 0 or 1
+  reply_to_id: string | null;
   created_at: number;
 }
 
