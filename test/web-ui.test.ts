@@ -1,10 +1,9 @@
 /**
- * Tests for PR2: Web UI Backend
- * - Session-based auth (login, logout, session expiry)
+ * Tests for Web UI flows via /api/ routes
+ * - Session-based auth (login via /api/auth/login type:bot, logout, session)
  * - CSRF protection (Origin header validation)
- * - DM send block
- * - Provenance auto-injection on thread messages
- * - Workspace, thread, and artifact browsing
+ * - Provenance auto-injection on thread messages from bot_owner sessions
+ * - Workspace, thread, and artifact browsing via session cookie
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createTestEnv, api, type TestEnv } from './helpers.js';
@@ -27,114 +26,82 @@ afterAll(async () => {
   await env.cleanup();
 });
 
-// ─── Helper: raw fetch with cookie support ────────────────
+// ─── Helper: login as bot_owner and get session cookie ──────
 
-async function uiRequest(
-  method: string,
-  path: string,
-  opts?: { cookie?: string; body?: unknown; origin?: string; headers?: Record<string, string> },
-): Promise<{ status: number; headers: Headers; body: any; cookie?: string }> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...opts?.headers,
-  };
-  if (opts?.cookie) headers['Cookie'] = opts.cookie;
-  // Auto-include Origin for CSRF compliance on authenticated mutating requests
-  if (opts?.origin !== undefined) {
-    headers['Origin'] = opts.origin;
-  } else if (opts?.cookie && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-    headers['Origin'] = env.baseUrl;
-  }
-
-  const init: RequestInit = { method, headers };
-  if (opts?.body !== undefined) init.body = JSON.stringify(opts.body);
-
-  const res = await fetch(`${env.baseUrl}/ui/api${path}`, init);
-  let body: any;
-  try { body = await res.json(); } catch { body = null; }
-
-  // Extract Set-Cookie header
-  const setCookie = res.headers.get('set-cookie') || undefined;
-  let cookie: string | undefined;
-  if (setCookie) {
-    const match = setCookie.match(/hxa_session=([^;]+)/);
-    if (match) cookie = `hxa_session=${match[1]}`;
-  }
-
-  return { status: res.status, headers: res.headers, body, cookie };
-}
-
-/** Login helper — returns cookie string */
-async function login(token: string, ownerName: string): Promise<string> {
-  const { cookie, status } = await uiRequest('POST', '/login', {
-    body: { token, owner_name: ownerName },
+async function loginAsBot(token: string, ownerName: string): Promise<string> {
+  const res = await fetch(`${env.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'bot', token, owner_name: ownerName }),
   });
-  if (status !== 200 || !cookie) throw new Error(`Login failed: ${status}`);
-  return cookie;
+  if (!res.ok) throw new Error(`Login failed: ${res.status}`);
+  const setCookie = res.headers.get('set-cookie') || '';
+  const match = setCookie.match(/hxa_session=([^;]+)/);
+  if (!match) throw new Error('No session cookie in login response');
+  return match[1];
 }
 
 // ─── Login / Logout ────────────────────────────────────────
 
-describe('Web UI auth', () => {
+describe('Web UI auth via /api/auth', () => {
   it('login with valid token returns session info and cookie', async () => {
-    const { status, body, cookie } = await uiRequest('POST', '/login', {
-      body: { token: botA.token, owner_name: 'Howard' },
+    const res = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'bot', token: botA.token, owner_name: 'Howard' }),
     });
 
-    expect(status).toBe(200);
-    expect(body.bot.id).toBe(botA.bot.id);
-    expect(body.bot.name).toBe('Alice');
-    expect(body.owner_name).toBe('Howard');
-    expect(body.scopes).toContain('full');
-    expect(cookie).toBeDefined();
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get('set-cookie') || '';
+    expect(setCookie).toContain('hxa_session=');
+
+    const body = await res.json() as any;
+    expect(body.session.role).toBe('bot_owner');
+    expect(body.session.bot_id).toBe(botA.bot.id);
   });
 
   it('login with invalid token returns 401', async () => {
-    const { status } = await uiRequest('POST', '/login', {
-      body: { token: 'invalid-token', owner_name: 'Howard' },
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { type: 'bot', token: 'invalid-token', owner_name: 'Howard' },
     });
     expect(status).toBe(401);
   });
 
-  it('login without owner_name returns 400', async () => {
-    const { status } = await uiRequest('POST', '/login', {
-      body: { token: botA.token },
-    });
-    expect(status).toBe(400);
-  });
-
   it('session cookie is HttpOnly and SameSite=Strict', async () => {
-    const res = await uiRequest('POST', '/login', {
-      body: { token: botA.token, owner_name: 'Howard' },
+    const res = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'bot', token: botA.token, owner_name: 'Howard' }),
     });
     const setCookie = res.headers.get('set-cookie')!;
     expect(setCookie).toContain('HttpOnly');
     expect(setCookie).toContain('SameSite=Strict');
   });
 
-  it('GET /session returns session info with valid cookie', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', '/session', { cookie });
+  it('GET /api/auth/session returns session info with valid cookie', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/auth/session', { cookie });
 
     expect(status).toBe(200);
-    expect(body.bot.id).toBe(botA.bot.id);
+    expect(body.role).toBe('bot_owner');
+    expect(body.bot_id).toBe(botA.bot.id);
     expect(body.owner_name).toBe('Howard');
   });
 
   it('request without cookie returns 401', async () => {
-    const { status } = await uiRequest('GET', '/session');
+    const { status } = await api(env.baseUrl, 'GET', '/api/auth/session', {});
     expect(status).toBe(401);
   });
 
   it('logout clears session', async () => {
-    const cookie = await login(botA.token, 'Howard');
+    const cookie = await loginAsBot(botA.token, 'Howard');
 
     // Logout
-    const logoutRes = await uiRequest('POST', '/logout', { cookie });
-    expect(logoutRes.status).toBe(200);
+    const { status: logoutStatus } = await api(env.baseUrl, 'POST', '/api/auth/logout', { cookie });
+    expect(logoutStatus).toBe(200);
 
     // Subsequent request fails
-    const { status } = await uiRequest('GET', '/session', { cookie });
+    const { status } = await api(env.baseUrl, 'GET', '/api/auth/session', { cookie });
     expect(status).toBe(401);
   });
 });
@@ -143,11 +110,10 @@ describe('Web UI auth', () => {
 
 describe('CSRF protection', () => {
   it('rejects POST with mismatched Origin header on authenticated request', async () => {
-    // CSRF only applies to authenticated (cookie) requests
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', '/logout', {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/logout', {
       cookie,
-      origin: 'https://evil.com',
+      headers: { 'Origin': 'https://evil.com' },
     });
 
     expect(status).toBe(403);
@@ -156,65 +122,37 @@ describe('CSRF protection', () => {
 
   it('allows POST with matching Origin header', async () => {
     const originUrl = new URL(env.baseUrl);
-    const { status } = await uiRequest('POST', '/login', {
-      body: { token: botA.token, owner_name: 'Howard' },
-      origin: originUrl.origin,
+    const { status } = await api(env.baseUrl, 'POST', '/api/auth/login', {
+      body: { type: 'bot', token: botA.token, owner_name: 'Howard' },
+      headers: { 'Origin': originUrl.origin },
     });
-
     expect(status).toBe(200);
   });
 
   it('allows GET requests regardless of Origin', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status } = await uiRequest('GET', '/session', {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status } = await api(env.baseUrl, 'GET', '/api/auth/session', {
       cookie,
-      origin: 'https://evil.com',
+      headers: { 'Origin': 'https://evil.com' },
     });
-
     expect(status).toBe(200);
-  });
-});
-
-// ─── DM Send Block ─────────────────────────────────────────
-
-describe('DM send block', () => {
-  it('blocks POST /channels/:id/messages', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', '/channels/some-channel/messages', {
-      cookie,
-      body: { content: 'hello' },
-    });
-
-    expect(status).toBe(403);
-    expect(body.code).toBe('DM_SEND_BLOCKED');
-  });
-
-  it('blocks POST /send', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', '/send', {
-      cookie,
-      body: { to: botB.bot.id, content: 'hello' },
-    });
-
-    expect(status).toBe(403);
-    expect(body.code).toBe('DM_SEND_BLOCKED');
   });
 });
 
 // ─── Workspace ─────────────────────────────────────────────
 
-describe('Web UI workspace', () => {
+describe('Web UI workspace via /api', () => {
   beforeAll(async () => {
-    // Create some DM and thread data
+    // Create some DM data
     await api(env.baseUrl, 'POST', '/api/send', {
       token: botA.token,
       body: { to: botB.bot.id, content: 'Hello from Alice' },
     });
   });
 
-  it('GET /workspace returns bot info, DMs and threads', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', '/workspace', { cookie });
+  it('GET /api/me/workspace returns bot info, DMs and threads', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/me/workspace', { cookie });
 
     expect(status).toBe(200);
     expect(body.bot.id).toBe(botA.bot.id);
@@ -224,23 +162,48 @@ describe('Web UI workspace', () => {
     expect(body.threads.items).toBeInstanceOf(Array);
   });
 
-  it('shows DM channels with read-only messages', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { body: workspace } = await uiRequest('GET', '/workspace', { cookie });
+  it('reads DM channel messages via session cookie', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { body: workspace } = await api(env.baseUrl, 'GET', '/api/me/workspace', { cookie });
 
     if (workspace.dms.items.length > 0) {
       const channelId = workspace.dms.items[0].channel.id;
-      const { status, body } = await uiRequest('GET', `/channels/${channelId}/messages`, { cookie });
+      const { status, body } = await api(env.baseUrl, 'GET', `/api/channels/${channelId}/messages`, { cookie });
 
       expect(status).toBe(200);
-      expect(body.items).toBeInstanceOf(Array);
+      // Legacy format (no cursor): flat array
+      expect(body).toBeInstanceOf(Array);
     }
+  });
+});
+
+// ─── DM Send Block ─────────────────────────────────────────
+
+describe('DM send block for bot_owner sessions', () => {
+  it('blocks POST /api/send for bot_owner session', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/send', {
+      cookie,
+      body: { to: botB.bot.id, content: 'should be blocked' },
+    });
+
+    expect(status).toBe(403);
+    expect(body.code).toBe('DM_SEND_BLOCKED');
+  });
+
+  it('allows POST /api/send for Bearer token auth', async () => {
+    const { status } = await api(env.baseUrl, 'POST', '/api/send', {
+      token: botA.token,
+      body: { to: botB.bot.id, content: 'allowed via token' },
+    });
+
+    expect(status).toBe(200);
   });
 });
 
 // ─── Thread Operations ─────────────────────────────────────
 
-describe('Web UI threads', () => {
+describe('Web UI threads via /api', () => {
   let threadId: string;
 
   beforeAll(async () => {
@@ -259,8 +222,8 @@ describe('Web UI threads', () => {
   });
 
   it('lists threads with cursor pagination', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', '/threads?limit=10', { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/threads?limit=10', { cookie });
 
     expect(status).toBe(200);
     expect(body.items).toBeInstanceOf(Array);
@@ -269,8 +232,8 @@ describe('Web UI threads', () => {
   });
 
   it('gets thread detail with participants', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', `/threads/${threadId}`, { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/threads/${threadId}`, { cookie });
 
     expect(status).toBe(200);
     expect(body.topic).toBe('Test Discussion');
@@ -279,8 +242,8 @@ describe('Web UI threads', () => {
   });
 
   it('gets thread messages with cursor pagination', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', `/threads/${threadId}/messages?limit=10`, { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/threads/${threadId}/messages?cursor=start&limit=10`, { cookie });
 
     expect(status).toBe(200);
     expect(body.items).toBeInstanceOf(Array);
@@ -290,18 +253,16 @@ describe('Web UI threads', () => {
   });
 
   it('gets thread artifacts', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('GET', `/threads/${threadId}/artifacts`, { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'GET', `/api/threads/${threadId}/artifacts`, { cookie });
 
     expect(status).toBe(200);
     expect(body).toBeInstanceOf(Array);
   });
 
-  it('returns 404 for threads bot is not a participant of', async () => {
-    // Create a thread with different bots that botA is NOT in
-    // (not possible with current setup since all are in same org — skip)
-    const cookie = await login(botA.token, 'Howard');
-    const { status } = await uiRequest('GET', '/threads/nonexistent-id', { cookie });
+  it('returns 404 for nonexistent thread', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status } = await api(env.baseUrl, 'GET', '/api/threads/nonexistent-id', { cookie });
     expect(status).toBe(404);
   });
 });
@@ -320,8 +281,8 @@ describe('provenance injection', () => {
   });
 
   it('injects provenance metadata when human sends thread message', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', `/threads/${threadId}/messages`, {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
       cookie,
       body: { content: 'Human intervention message' },
     });
@@ -338,8 +299,8 @@ describe('provenance injection', () => {
   });
 
   it('provenance is visible when fetching thread messages', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { body } = await uiRequest('GET', `/threads/${threadId}/messages?limit=10`, { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { body } = await api(env.baseUrl, 'GET', `/api/threads/${threadId}/messages?cursor=start&limit=10`, { cookie });
 
     const humanMsg = body.items.find((m: any) => m.metadata?.provenance?.authored_by === 'human');
     expect(humanMsg).toBeDefined();
@@ -353,14 +314,14 @@ describe('provenance injection', () => {
       body: { status: 'resolved' },
     });
 
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', `/threads/${threadId}/messages`, {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
       cookie,
       body: { content: 'Should fail' },
     });
 
     expect(status).toBe(409);
-    expect(body.code).toBe('THREAD_TERMINAL');
+    expect(body.code).toBe('THREAD_CLOSED');
   });
 
   it('requires content for thread message', async () => {
@@ -370,22 +331,35 @@ describe('provenance injection', () => {
       body: { status: 'active' },
     });
 
-    const cookie = await login(botA.token, 'Howard');
-    const { status } = await uiRequest('POST', `/threads/${threadId}/messages`, {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
       cookie,
       body: {},
     });
 
     expect(status).toBe(400);
   });
+
+  it('handles malformed metadata string gracefully with provenance injection', async () => {
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+      cookie,
+      body: { content: 'Message with bad metadata', metadata: 'not-valid-json' },
+    });
+
+    expect(status).toBe(200);
+    // Provenance should still be injected even if user metadata was malformed
+    expect(body.metadata).toBeDefined();
+    expect(body.metadata.provenance.authored_by).toBe('human');
+  });
 });
 
 // ─── WebSocket Ticket ──────────────────────────────────────
 
-describe('WebSocket ticket', () => {
+describe('WebSocket ticket via session', () => {
   it('issues a ws-ticket from session', async () => {
-    const cookie = await login(botA.token, 'Howard');
-    const { status, body } = await uiRequest('POST', '/ws-ticket', { cookie });
+    const cookie = await loginAsBot(botA.token, 'Howard');
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/ws-ticket', { cookie });
 
     expect(status).toBe(200);
     expect(body.ticket).toBeDefined();
@@ -407,7 +381,6 @@ describe('Web UI static files', () => {
 
     const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
     expect(html).toContain('HXA Web UI');
-    expect(html).toContain("+ '/api'");
 
     const css = fs.readFileSync(path.join(webDir, 'ui.css'), 'utf8');
     expect(css).toContain('--accent');

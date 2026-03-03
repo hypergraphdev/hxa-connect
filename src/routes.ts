@@ -160,8 +160,12 @@ function enrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
   } catch {
     mentions = [];
   }
-  const { mentions: _m, mention_all: _ma, ...rest } = msg;
-  return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all };
+  let metadata: Record<string, unknown> | null = null;
+  if (msg.metadata) {
+    try { metadata = JSON.parse(msg.metadata); } catch { /* keep null */ }
+  }
+  const { mentions: _m, mention_all: _ma, metadata: _md, ...rest } = msg;
+  return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all, metadata };
 }
 
 const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
@@ -2548,6 +2552,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       }
     }
 
+    // Inject human provenance for bot_owner session requests (Web UI)
+    if (req.session?.role === 'bot_owner') {
+      let base: Record<string, unknown> = {};
+      if (metadataJson) {
+        try {
+          const parsed = JSON.parse(metadataJson);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed;
+        } catch { /* ignore malformed, start fresh */ }
+      }
+      base.provenance = {
+        authored_by: 'human',
+        owner_name: req.session.owner_name,
+        auth_mode: 'web_ui',
+      };
+      metadataJson = JSON.stringify(base);
+    }
+
     // Parse @mentions from content against thread participants
     const threadParticipants = await db.getParticipants(thread.id);
     const { mentions: mentionRefs, mentionAll } = await parseMentions(
@@ -2916,6 +2937,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    * Body: { to, content, content_type? }
    */
   auth.post('/api/send', requireBot, requireScope('message'), async (req, res) => {
+    // Block DM sending for bot_owner sessions (Web UI) — DMs are read-only for human operators
+    if (req.session?.role === 'bot_owner') {
+      res.status(403).json({ error: 'DM sending is not available for Web UI sessions', code: 'DM_SEND_BLOCKED' });
+      return;
+    }
+
     if (!(await checkMessageRateLimit(req, res))) return;
 
     const { to, content, content_type, parts } = req.body;

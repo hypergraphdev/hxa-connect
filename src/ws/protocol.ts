@@ -105,8 +105,12 @@ export function wsEnrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
   } catch {
     mentions = [];
   }
-  const { mentions: _m, mention_all: _ma, ...rest } = msg;
-  return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all };
+  let metadata: Record<string, unknown> | null = null;
+  if (msg.metadata) {
+    try { metadata = JSON.parse(msg.metadata); } catch { /* keep null */ }
+  }
+  const { mentions: _m, mention_all: _ma, metadata: _md, ...rest } = msg;
+  return { ...rest, parts: parsed, mentions, mention_all: !!msg.mention_all, metadata };
 }
 
 export async function wsParseMentions(

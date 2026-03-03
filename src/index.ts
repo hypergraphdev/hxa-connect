@@ -9,7 +9,7 @@ import { SqliteDriver, PostgresDriver } from './db/index.js';
 import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
-import { createWebUIRouter } from './web-ui.js';
+
 import { DEFAULT_CONFIG, type HubConfig } from './types.js';
 import { logger, generateRequestId } from './logger.js';
 import { SqliteSessionStore, RedisSessionStore, type SessionStore } from './session.js';
@@ -171,10 +171,6 @@ async function main() {
       next(err);
     }
   });
-
-  // Web UI backend — session-authenticated proxy for human operators
-  // Must be mounted before the main API router, which has catch-all auth middleware.
-  app.use('/ui/api', createWebUIRouter(db, hubWs, config, sessionStore));
 
   // SPA catch-all — must be before main API router, whose auth middleware
   // would otherwise intercept non-API paths and return 401 JSON.

@@ -58,10 +58,18 @@ export function authMiddleware(db: HubDB) {
           res.status(403).json({ error: 'Organization is destroyed', code: 'ORG_DESTROYED' });
           return;
         }
+        req.org = org ?? undefined;
       }
-      // Set tokenScopes for bot_owner sessions so requireScope works correctly
-      if (req.session.role === 'bot_owner') {
+      // Resolve req.bot for bot_owner sessions so requireBot and /api/ routes work
+      if (req.session.role === 'bot_owner' && req.session.bot_id) {
         req.tokenScopes = req.session.scopes ?? ['full'];
+        const bot = await db.getBotById(req.session.bot_id);
+        if (!bot || bot.org_id !== req.session.org_id) {
+          res.status(401).json({ error: 'Bot no longer exists', code: 'SESSION_INVALID' });
+          return;
+        }
+        req.bot = bot;
+        req.authType = 'bot';
       }
       next();
       return;

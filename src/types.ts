@@ -385,10 +385,11 @@ export interface WireMessage extends Omit<Message, 'parts'> {
   parts: MessagePart[];
 }
 
-export interface WireThreadMessage extends Omit<ThreadMessage, 'parts' | 'mentions' | 'mention_all'> {
+export interface WireThreadMessage extends Omit<ThreadMessage, 'parts' | 'mentions' | 'mention_all' | 'metadata'> {
   parts: MessagePart[];
   mentions: MentionRef[];
   mention_all: boolean;
+  metadata: Record<string, unknown> | null;
 }
 
 // ─── WebSocket Events ────────────────────────────────────────

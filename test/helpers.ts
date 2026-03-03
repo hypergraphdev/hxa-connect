@@ -12,7 +12,7 @@ import { SqliteDriver } from '../src/db/index.js';
 import { HubWS } from '../src/ws.js';
 import { WebhookManager } from '../src/webhook.js';
 import { createRouter } from '../src/routes.js';
-import { createWebUIRouter } from '../src/web-ui.js';
+
 import { SqliteSessionStore } from '../src/session.js';
 import { sessionMiddleware, csrfMiddleware } from '../src/session-middleware.js';
 import type { HubConfig } from '../src/types.js';
@@ -88,7 +88,6 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
     });
   });
 
-  app.use('/ui/api', createWebUIRouter(db, hubWs, config, sessionStore));
   app.use(createRouter(db, hubWs, config, sessionStore));
 
   // JSON 404
