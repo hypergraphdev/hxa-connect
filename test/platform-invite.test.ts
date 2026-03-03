@@ -41,7 +41,7 @@ describe('Platform Invite Codes — Admin CRUD', () => {
     expect(status).toBe(201);
     expect(body.id).toBeTypeOf('string');
     expect(body.code).toBeTypeOf('string');
-    expect(body.code.length).toBe(48); // 24 random bytes hex
+    expect(body.code.length).toBe(20); // 'hxa_' + 16 hex chars
     expect(body.label).toBe('general');
     expect(body.max_uses).toBe(0);
     expect(body.use_count).toBe(0);
@@ -98,8 +98,8 @@ describe('Platform Invite Codes — Admin CRUD', () => {
       expect(code).toHaveProperty('exhausted');
       expect(code.expired).toBe(false);
       expect(code.exhausted).toBe(false);
-      // Plaintext code should NOT be returned in listing
-      expect(code).not.toHaveProperty('code');
+      // Plaintext code is returned in listing (for display); code_hash is internal
+      expect(code).toHaveProperty('code');
       expect(code).not.toHaveProperty('code_hash');
     }
   });

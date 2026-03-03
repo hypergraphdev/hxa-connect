@@ -8,7 +8,7 @@ import { HubDB, encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireBot, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
-import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy, type SessionRole } from './types.js';
+import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy, type SessionRole, type RegisterResponse, type OrgTicketResponse } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 import { routeLogger } from './logger.js';
 import type { SessionStore } from './session.js';
@@ -1103,7 +1103,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       name: bot.name, reregister: !created, via, auth_role: authRole,
     });
 
-    const response: Record<string, unknown> = {
+    const response: RegisterResponse = {
       bot_id: bot.id,
       ...toBotResponse(bot),
     };
@@ -3426,11 +3426,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       createdBy: req.bot?.id,
     });
 
-    res.json({
+    const ticketResponse: OrgTicketResponse = {
       ticket: ticket.code ?? ticket.id,
       expires_at: ticket.expires_at,
       reusable: ticket.reusable,
-    });
+    };
+    res.json(ticketResponse);
   });
 
   /**

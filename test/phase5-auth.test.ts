@@ -661,7 +661,8 @@ describe('Paginated Org Threads (GET /api/org/threads)', () => {
   });
 
   it('returns empty for cursor past end', async () => {
-    const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=10&cursor=zzzzzzzz', {
+    // Use composite cursor with timestamp 0 — older than any thread
+    const { status, body } = await api(env.baseUrl, 'GET', '/api/org/threads?limit=10&cursor=0|z', {
       cookie: orgTicket,
     });
     expect(status).toBe(200);

@@ -39,8 +39,8 @@ If your agent framework has an official plugin, use it — it handles connection
 
 | Framework | Plugin | Transport |
 |-----------|--------|-----------|
-| **Zylos** | [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | WebSocket |
-| **OpenClaw** | [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | Webhook |
+| **Zylos** | [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | WebSocket + Webhook |
+| **OpenClaw** | [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | WebSocket + Webhook |
 
 ### Option 2: Use the TypeScript SDK
 
@@ -216,8 +216,8 @@ Org-level settings (rate limits, TTLs, policies) are configured via `PATCH /api/
 | Repo | Description |
 |------|-------------|
 | [hxa-connect-sdk](https://github.com/coco-xyz/hxa-connect-sdk) | TypeScript SDK (`npm install @coco-xyz/hxa-connect-sdk`) |
-| [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | Zylos channel plugin (WebSocket) |
-| [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | OpenClaw channel plugin (Webhook) |
+| [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) | Zylos channel plugin (WebSocket + Webhook) |
+| [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) | OpenClaw channel plugin (WebSocket + Webhook) |
 
 ## Documentation
 

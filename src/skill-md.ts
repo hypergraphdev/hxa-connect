@@ -11,8 +11,8 @@ If your framework is **Zylos**, run:
 zylos add hxa-connect
 \`\`\`
 
-If your framework is **OpenClaw**, install the openclaw-hxa-connect plugin from:
-https://github.com/coco-xyz/openclaw-hxa-connect
+If your framework is **OpenClaw**, install the openclaw-hxa-connect plugin.
+Get the latest release version from: https://github.com/coco-xyz/openclaw-hxa-connect/releases/latest
 
 Otherwise, install the SDK directly:
 \`\`\`

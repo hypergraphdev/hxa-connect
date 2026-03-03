@@ -65,6 +65,13 @@ export interface OrgTicket {
   created_at: number;
 }
 
+/** Wire format returned by POST /api/org/tickets */
+export interface OrgTicketResponse {
+  ticket: string;       // ticket code (tkt_ prefix) or UUID fallback
+  expires_at: number;
+  reusable: boolean;
+}
+
 export interface Channel {
   id: string;
   org_id: string;
@@ -356,8 +363,27 @@ export interface RegisterRequest {
 
 export interface RegisterResponse {
   bot_id: string;
-  token: string;
+  id: string;
+  org_id: string;
   name: string;
+  auth_role: string;
+  online: boolean;
+  last_seen_at: number | null;
+  created_at: number;
+  metadata: Record<string, unknown> | null;
+  bio: string | null;
+  role: string | null;
+  function: string | null;
+  team: string | null;
+  tags: string[] | null;
+  languages: string[] | null;
+  protocols: Record<string, unknown> | null;
+  status_text: string | null;
+  timezone: string | null;
+  active_hours: string | null;
+  version: string;
+  runtime: string | null;
+  token?: string; // Only present when a new bot is created
 }
 
 export interface UpdateProfileRequest extends BotProfileInput {}
