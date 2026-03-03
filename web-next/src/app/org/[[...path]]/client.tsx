@@ -113,6 +113,7 @@ export default function OrgDashboard() {
   const router = useRouter();
   const [authenticated, setAuthenticated] = useState(false);
   const [orgName, setOrgName] = useState('');
+  const [orgId, setOrgId] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Sidebar state
@@ -160,7 +161,7 @@ export default function OrgDashboard() {
         setAuthenticated(true);
         // Fetch org name
         orgAdmin.getOrg()
-          .then(org => setOrgName(org.name))
+          .then(org => { setOrgName(org.name); setOrgId(org.id); })
           .catch(() => {});
       })
       .catch(() => router.replace('/'))
@@ -299,7 +300,7 @@ export default function OrgDashboard() {
       {confirm && <ConfirmDialog {...confirm} />}
       {secretModal && <SecretModal {...secretModal} onClose={() => setSecretModal(null)} />}
       {showTicketModal && (
-        <TicketModal onClose={() => setShowTicketModal(false)} />
+        <TicketModal orgId={orgId} onClose={() => setShowTicketModal(false)} />
       )}
 
       {/* Header — 56px desktop, 48px mobile */}
@@ -1041,7 +1042,8 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
 
 // ─── Ticket Modal ───
 
-function TicketModal({ onClose }: {
+function TicketModal({ orgId, onClose }: {
+  orgId: string;
   onClose: () => void;
 }) {
   const [reusable, setReusable] = useState(false);
@@ -1130,33 +1132,43 @@ function TicketModal({ onClose }: {
             </div>
           </div>
         ) : (
-          /* Result State */
+          /* Result State — copyable prompt */
           <div>
-            <div className="bg-white/[0.03] border border-hxa-border rounded-[10px] p-4 text-center">
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-hxa-text-dim mb-2">Registration Ticket</div>
-              <div className="font-mono text-sm font-semibold text-hxa-accent break-all bg-hxa-accent/[0.06] rounded-md p-2 mb-2.5 select-all">{result.ticket}</div>
-              <button
-                onClick={() => { navigator.clipboard.writeText(result.ticket); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                className="inline-flex items-center gap-1.5 bg-hxa-accent/10 border border-hxa-accent/20 text-hxa-accent py-1 px-3.5 rounded-md text-xs font-semibold hover:bg-hxa-accent/20 transition-colors"
-              >
-                <Copy size={14} /> {copied ? 'Copied!' : 'Copy'}
-              </button>
-            </div>
-            <div className="flex justify-center gap-4 mt-2.5 text-xs text-hxa-text-dim">
-              <span>{result.reusable ? 'Reusable' : 'Single use'}</span>
-              <span>{result.expiresIn === 0 ? 'No expiry' : `Expires in ${formatExpiry(result.expiresIn)}`}</span>
-            </div>
-            <p className="text-xs text-hxa-text-dim mt-3 leading-snug">
-              Share this ticket with the bot. It will use this to call <code className="bg-white/[0.06] px-1 py-0.5 rounded text-[11px] font-mono">POST /api/auth/register</code> with the org_id and ticket to complete registration.
-            </p>
-            <div className="flex gap-3 justify-center mt-5">
-              <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
-                Close
-              </button>
-              <button type="button" onClick={resetForm} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-hxa-accent/15 border border-hxa-accent/30 text-hxa-accent hover:bg-hxa-accent/25 hover:border-hxa-accent/50 transition-colors">
-                Create Another
-              </button>
-            </div>
+            {(() => {
+              const hubUrl = typeof window !== 'undefined' ? `${window.location.origin}${BASE_PATH}` : '';
+              const prompt = `Please join the HXA-Connect organization using the following credentials:\n\n- Hub URL: ${hubUrl}\n- Org ID: ${orgId}\n- Registration Ticket: ${result.ticket}\n\nFollow the instructions at ${hubUrl}/skill.md to complete the registration.`;
+              return (
+                <>
+                  <div className="bg-white/[0.03] border border-hxa-border rounded-[10px] p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-hxa-text-dim mb-2 text-center">Bot Invite Prompt</div>
+                    <pre className="font-mono text-xs text-hxa-text leading-relaxed whitespace-pre-wrap break-words bg-black/20 rounded-md p-3 mb-3 max-h-[200px] overflow-auto select-all">{prompt}</pre>
+                    <div className="flex justify-center">
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                        className="inline-flex items-center gap-1.5 bg-hxa-accent/10 border border-hxa-accent/20 text-hxa-accent py-1.5 px-4 rounded-md text-xs font-semibold hover:bg-hxa-accent/20 transition-colors"
+                      >
+                        <Copy size={14} /> {copied ? 'Copied!' : 'Copy Prompt'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex justify-center gap-4 mt-2.5 text-xs text-hxa-text-dim">
+                    <span>{result.reusable ? 'Reusable' : 'Single use'}</span>
+                    <span>{result.expiresIn === 0 ? 'No expiry' : `Expires in ${formatExpiry(result.expiresIn)}`}</span>
+                  </div>
+                  <p className="text-xs text-hxa-text-dim mt-3 leading-snug">
+                    Copy this prompt and send it to the bot you want to invite.
+                  </p>
+                  <div className="flex gap-3 justify-center mt-5">
+                    <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
+                      Close
+                    </button>
+                    <button type="button" onClick={resetForm} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-hxa-accent/15 border border-hxa-accent/30 text-hxa-accent hover:bg-hxa-accent/25 hover:border-hxa-accent/50 transition-colors">
+                      Create Another
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         )}
       </div>
