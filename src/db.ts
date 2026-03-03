@@ -373,6 +373,23 @@ export class HubDB {
         CREATE INDEX IF NOT EXISTS idx_messages_cursor ON messages(channel_id, created_at DESC, id DESC);
       `);
     });
+
+    // Store plaintext invite codes for display (they're shared, not secrets)
+    await this.runMigration('invite_code_plaintext', async () => {
+      await this.driver.exec(`
+        ALTER TABLE platform_invite_codes ADD COLUMN code TEXT DEFAULT NULL;
+      `);
+    });
+
+    // Store plaintext ticket codes for display (tkt_ prefix)
+    await this.runMigration('org_ticket_code', async () => {
+      await this.driver.exec(`
+        ALTER TABLE org_tickets ADD COLUMN code TEXT DEFAULT NULL;
+      `);
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_org_tickets_code ON org_tickets(code);
+      `);
+    });
   }
 
   /**
@@ -615,6 +632,7 @@ export class HubDB {
   private rowToOrgTicket(row: any): OrgTicket {
     return {
       ...row,
+      code: row.code ?? null,
       reusable: !!row.reusable,
       consumed: !!row.consumed,
       created_by: row.created_by ?? null,
@@ -630,6 +648,7 @@ export class HubDB {
       id: crypto.randomUUID(),
       org_id: orgId,
       secret_hash: secretHash,
+      code: `tkt_${crypto.randomBytes(8).toString('hex')}`,
       reusable: options.reusable ?? false,
       expires_at: options.expiresAt,
       consumed: false,
@@ -637,28 +656,30 @@ export class HubDB {
       created_at: Date.now(),
     };
     await this.driver.run(
-      'INSERT INTO org_tickets (id, org_id, secret_hash, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [ticket.id, ticket.org_id, ticket.secret_hash, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at],
+      'INSERT INTO org_tickets (id, org_id, secret_hash, code, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ticket.id, ticket.org_id, ticket.secret_hash, ticket.code, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at],
     );
     return ticket;
   }
 
   async redeemOrgTicket(ticketId: string): Promise<OrgTicket | undefined> {
+    // Support lookup by code (tkt_xxx) or by UUID id
     const row = await this.driver.get<any>(
-      'SELECT * FROM org_tickets WHERE id = ? AND consumed = 0 AND expires_at > ?',
-      [ticketId, Date.now()],
+      'SELECT * FROM org_tickets WHERE (id = ? OR code = ?) AND consumed = 0 AND (expires_at = 0 OR expires_at > ?)',
+      [ticketId, ticketId, Date.now()],
     );
     if (!row) return undefined;
     const result = await this.driver.run(
       'UPDATE org_tickets SET consumed = 1 WHERE id = ? AND consumed = 0',
-      [ticketId],
+      [row.id],
     );
     if (result.changes === 0) return undefined; // race condition: another consumer got it
     return this.rowToOrgTicket({ ...row, consumed: 1 });
   }
 
   async getOrgTicket(ticketId: string): Promise<OrgTicket | undefined> {
-    const row = await this.driver.get<any>('SELECT * FROM org_tickets WHERE id = ?', [ticketId]);
+    // Support lookup by code (tkt_xxx) or by UUID id
+    const row = await this.driver.get<any>('SELECT * FROM org_tickets WHERE id = ? OR code = ?', [ticketId, ticketId]);
     if (!row) return undefined;
     return this.rowToOrgTicket(row);
   }
@@ -685,6 +706,7 @@ export class HubDB {
     return {
       id: row.id,
       code_hash: row.code_hash,
+      code: row.code ?? null,
       label: row.label ?? null,
       max_uses: row.max_uses,
       use_count: row.use_count,
@@ -693,7 +715,7 @@ export class HubDB {
     };
   }
 
-  async createInviteCode(codeHash: string, options: {
+  async createInviteCode(codeHash: string, plaintextCode: string, options: {
     label?: string;
     maxUses?: number;
     expiresAt: number;
@@ -701,6 +723,7 @@ export class HubDB {
     const code: PlatformInviteCode = {
       id: crypto.randomUUID(),
       code_hash: codeHash,
+      code: plaintextCode,
       label: options.label ?? null,
       max_uses: options.maxUses ?? 0, // 0 = unlimited
       use_count: 0,
@@ -708,8 +731,8 @@ export class HubDB {
       created_at: Date.now(),
     };
     await this.driver.run(
-      'INSERT INTO platform_invite_codes (id, code_hash, label, max_uses, use_count, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [code.id, code.code_hash, code.label, code.max_uses, code.use_count, code.expires_at, code.created_at],
+      'INSERT INTO platform_invite_codes (id, code_hash, code, label, max_uses, use_count, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [code.id, code.code_hash, code.code, code.label, code.max_uses, code.use_count, code.expires_at, code.created_at],
     );
     return code;
   }
@@ -1596,35 +1619,56 @@ export class HubDB {
     return this.rowToThread(row);
   }
 
-  async listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200, offset = 0): Promise<Thread[]> {
-    const base = 'SELECT * FROM threads WHERE org_id = ?';
+  async listThreadsForOrg(orgId: string, status?: ThreadStatus, limit = 200, offset = 0): Promise<(Thread & { participant_count: number })[]> {
+    const base = 'SELECT *, (SELECT COUNT(*) FROM thread_participants tp WHERE tp.thread_id = threads.id) AS _pc FROM threads WHERE org_id = ?';
     const query = status
       ? `${base} AND status = ? ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`
       : `${base} ORDER BY last_activity_at DESC LIMIT ? OFFSET ?`;
     const rows = status
       ? await this.driver.all<any>(query, [orgId, status, limit, offset])
       : await this.driver.all<any>(query, [orgId, limit, offset]);
-    return rows.map(row => this.rowToThread(row));
+    return rows.map((row: any) => {
+      const count = Number(row._pc);
+      delete row._pc;
+      return { ...this.rowToThread(row), participant_count: count };
+    });
   }
 
   /**
-   * Paginated thread list for org. Cursor is a thread id; ordered by id ASC.
-   * Returns limit+1 rows so the caller can detect has_more.
+   * Paginated thread list for org. Cursor is "last_activity_at|id" for stable ordering.
+   * Ordered by last_activity_at DESC, id DESC (tie-breaker). Returns limit+1 rows for has_more.
    */
-  async listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number, search?: string): Promise<Thread[]> {
+  async listThreadsForOrgPaginated(orgId: string, status: ThreadStatus | undefined, cursor: string | undefined, limit: number, search?: string): Promise<(Thread & { participant_count: number })[]> {
     const conditions = ['org_id = ?'];
     const params: any[] = [orgId];
 
     if (status) { conditions.push('status = ?'); params.push(status); }
-    if (cursor) { conditions.push('id > ?'); params.push(cursor); }
+    if (cursor) {
+      const sep = cursor.indexOf('|');
+      if (sep > 0) {
+        // Composite cursor: last_activity_at|id
+        const cursorTime = cursor.slice(0, sep);
+        const cursorId = cursor.slice(sep + 1);
+        conditions.push('(last_activity_at < ? OR (last_activity_at = ? AND id < ?))');
+        params.push(cursorTime, cursorTime, cursorId);
+      } else {
+        // Legacy: timestamp-only cursor
+        conditions.push('last_activity_at < ?');
+        params.push(cursor);
+      }
+    }
     if (search) { conditions.push('topic LIKE ?'); params.push(`%${search}%`); }
 
     params.push(limit + 1);
     const rows = await this.driver.all<any>(
-      `SELECT * FROM threads WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT ?`,
+      `SELECT *, (SELECT COUNT(*) FROM thread_participants tp WHERE tp.thread_id = threads.id) AS _pc FROM threads WHERE ${conditions.join(' AND ')} ORDER BY last_activity_at DESC, id DESC LIMIT ?`,
       params,
     );
-    return rows.map(row => this.rowToThread(row));
+    return rows.map((row: any) => {
+      const count = Number(row._pc);
+      delete row._pc;
+      return { ...this.rowToThread(row), participant_count: count };
+    });
   }
 
   async listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Promise<Thread[]> {

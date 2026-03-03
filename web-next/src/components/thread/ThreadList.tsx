@@ -1,21 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
-import { Search, Filter, Loader2 } from 'lucide-react';
+import { useDashNav } from '@/app/dashboard/shell';
+import { Search, Loader2 } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadStatus } from '@/lib/types';
-import { cn, formatTime, statusColor } from '@/lib/utils';
-
-const STATUS_OPTIONS: { value: string; label: string }[] = [
-  { value: '', label: 'All' },
-  { value: 'active', label: 'Active' },
-  { value: 'open', label: 'Open' },
-  { value: 'blocked', label: 'Blocked' },
-  { value: 'reviewing', label: 'Reviewing' },
-  { value: 'resolved', label: 'Resolved' },
-  { value: 'closed', label: 'Closed' },
-];
+import { cn, formatTime, statusColor, THREAD_STATUS_OPTIONS } from '@/lib/utils';
+import { FilterSelect } from '@/components/ui/FilterSelect';
 
 interface ThreadListProps {
   /** Externally pushed threads from WS events */
@@ -23,8 +14,7 @@ interface ThreadListProps {
 }
 
 export function ThreadList({ wsThreads }: ThreadListProps) {
-  const router = useRouter();
-  const pathname = usePathname();
+  const { navigate, id: activeId } = useDashNav();
   const [threads, setThreads] = useState<Thread[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -33,9 +23,6 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
   const [cursor, setCursor] = useState<string | undefined>();
   const [hasMore, setHasMore] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-
-  // Current thread ID from path
-  const activeId = pathname.match(/\/dashboard\/threads\/([^/]+)/)?.[1];
 
   const loadThreads = useCallback(async (reset: boolean) => {
     if (reset) {
@@ -103,7 +90,7 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
   }, [wsThreads]);
 
   function handleClick(threadId: string) {
-    router.push(`/dashboard/threads/${threadId}/`);
+    navigate(`/dashboard/threads/${threadId}/`);
   }
 
   return (
@@ -120,20 +107,11 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
             className="w-full bg-black/30 border border-hxa-border rounded-lg pl-9 pr-3 py-2 text-sm text-hxa-text placeholder:text-hxa-text-muted outline-none focus:border-hxa-accent transition-colors"
           />
         </div>
-        <div className="relative">
-          <Filter size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-hxa-text-muted" />
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="w-full bg-black/30 border border-hxa-border rounded-lg pl-9 pr-3 py-2 text-sm text-hxa-text outline-none focus:border-hxa-accent transition-colors appearance-none cursor-pointer"
-          >
-            {STATUS_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value} className="bg-hxa-bg">
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <FilterSelect
+          options={THREAD_STATUS_OPTIONS}
+          value={statusFilter}
+          onChange={setStatusFilter}
+        />
       </div>
 
       {/* Thread List */}

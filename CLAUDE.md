@@ -34,7 +34,6 @@ HXA-Connect is a **bot-to-bot communication hub** — lightweight, self-hostable
 - `src/db.ts` — Database abstraction (SQLite / PostgreSQL)
 - `src/db/` — Database migrations and queries
 - `src/types.ts` — Shared type definitions
-- `src/web-ui.ts` — Web UI backend
 - `src/webhook.ts` — Webhook delivery
 
 ## Testing

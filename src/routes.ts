@@ -503,11 +503,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    // Generate a plaintext invite code
-    const plaintextCode = crypto.randomBytes(24).toString('hex');
+    // Generate a plaintext invite code (hxa_ prefix + 16 hex chars)
+    const plaintextCode = `hxa_${crypto.randomBytes(8).toString('hex')}`;
     const codeHash = HubDB.hashToken(plaintextCode);
 
-    const inviteCode = await db.createInviteCode(codeHash, {
+    const inviteCode = await db.createInviteCode(codeHash, plaintextCode, {
       label: label ?? undefined,
       maxUses: max_uses ?? 0,
       expiresAt,
@@ -534,6 +534,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     const codes = (await db.listInviteCodes()).map(c => ({
       id: c.id,
+      code: c.code,
       label: c.label,
       max_uses: c.max_uses,
       use_count: c.use_count,
@@ -1039,7 +1040,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
         return;
       }
-      if (ticket.expires_at <= Date.now()) {
+      // Check not expired (0 = never expires)
+      if (ticket.expires_at !== 0 && ticket.expires_at <= Date.now()) {
         res.status(401).json({ error: 'Ticket expired', code: 'TICKET_EXPIRED' });
         return;
       }
@@ -1638,18 +1640,32 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const offsetParam = getQueryString(req.query.offset);
     const search = getQueryString(req.query.search)?.trim();
 
+    // Helper: enrich threads with participants
+    async function enrichWithParticipants(threads: Array<Thread & { participant_count: number }>) {
+      return Promise.all(threads.map(async (t) => {
+        const parts = await db.getParticipants(t.id);
+        const participants = await Promise.all(parts.map(async (p) => {
+          const bot = await db.getBotById(p.bot_id);
+          return { bot_id: p.bot_id, name: bot?.name, online: bot?.online, label: p.label, joined_at: p.joined_at };
+        }));
+        return { ...t, participants };
+      }));
+    }
+
     // When cursor is present, or search/limit specified, use paginated behavior
     if (cursor || search || (limitParam && !offsetParam)) {
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
       const rows = await db.listThreadsForOrgPaginated(orgId, status, cursor, limit, search);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
+      const enriched = await enrichWithParticipants(items);
       const response: Record<string, unknown> = {
-        items,
+        items: enriched,
         has_more: hasMore,
       };
       if (hasMore) {
-        response.next_cursor = items[items.length - 1].id;
+        const last = items[items.length - 1];
+        response.next_cursor = `${last.last_activity_at}|${last.id}`;
       }
       res.json(response);
       return;
@@ -1659,7 +1675,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const limit = Math.min(Math.max(parseInt(limitParam || '') || 50, 1), 200);
     const offset = Math.max(parseInt(offsetParam || '') || 0, 0);
     const threads = await db.listThreadsForOrg(orgId, status, limit, offset);
-    res.json(threads);
+    res.json(await enrichWithParticipants(threads));
   });
 
   /**
@@ -1688,7 +1704,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     }));
 
     res.setHeader('ETag', `"${thread.revision}"`);
-    res.json({ ...thread, participants });
+    res.json({ ...thread, participant_count: participants.length, participants });
   });
 
   /**
@@ -3377,9 +3393,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    // Calculate expiry
-    const expiresInSec = typeof expires_in === 'number' && expires_in > 0 ? expires_in : 1800;
-    const expiresAt = Date.now() + expiresInSec * 1000;
+    // Calculate expiry (0 = never expires)
+    const expiresAt = (typeof expires_in === 'number' && expires_in === 0)
+      ? 0
+      : Date.now() + ((typeof expires_in === 'number' && expires_in > 0 ? expires_in : 1800) * 1000);
 
     // Use the org's stored org_secret hash as the secret_hash for the ticket
     // This allows rotation invalidation: when org_secret changes, the hash
@@ -3394,7 +3411,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     });
 
     res.json({
-      ticket: ticket.id,
+      ticket: ticket.code ?? ticket.id,
       expires_at: ticket.expires_at,
       reusable: ticket.reusable,
     });

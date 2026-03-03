@@ -57,6 +57,7 @@ export interface OrgTicket {
   id: string;
   org_id: string;
   secret_hash: string;
+  code: string | null;
   reusable: boolean;
   expires_at: number;
   consumed: boolean;
@@ -156,6 +157,7 @@ export interface Artifact {
 export interface PlatformInviteCode {
   id: string;
   code_hash: string;
+  code: string | null;
   label: string | null;
   max_uses: number;
   use_count: number;

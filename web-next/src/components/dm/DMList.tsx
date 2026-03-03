@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { useDashNav } from '@/app/dashboard/shell';
 import { Loader2 } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { DmChannelItem, DmMessage, Channel } from '@/lib/types';
@@ -15,15 +15,12 @@ interface DMListProps {
 }
 
 export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
-  const router = useRouter();
-  const pathname = usePathname();
+  const { navigate, id: activeId } = useDashNav();
   const [channels, setChannels] = useState<DmChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [hasMore, setHasMore] = useState(false);
-
-  const activeId = pathname.match(/\/dashboard\/dms\/([^/]+)/)?.[1];
 
   const loadChannels = useCallback(async (reset: boolean) => {
     if (reset) {
@@ -105,7 +102,7 @@ export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
   }, [wsDmMessages]);
 
   function handleClick(channelId: string) {
-    router.push(`/dashboard/dms/${channelId}/`);
+    navigate(`/dashboard/dms/${channelId}/`);
   }
 
   return (

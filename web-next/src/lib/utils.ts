@@ -37,6 +37,18 @@ export function parseParts(parts: string | null | import('./types').MessagePart[
   return [];
 }
 
+/** Sanitize a URL to only allow safe schemes (http, https, mailto). Returns '#' for unsafe URLs. */
+export function safeHref(url: string | undefined | null): string {
+  if (!url) return '#';
+  try {
+    const parsed = new URL(url, 'https://placeholder');
+    if (['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return url;
+    return '#';
+  } catch {
+    return '#';
+  }
+}
+
 /** Merge class names, filtering falsy values */
 export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(' ');
@@ -45,13 +57,30 @@ export function cn(...classes: (string | false | null | undefined)[]): string {
 /** Thread status → display color class */
 export function statusColor(status: string): string {
   const map: Record<string, string> = {
-    open: 'bg-hxa-blue/20 text-blue-400 border-blue-500/30',
     active: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     blocked: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
     reviewing: 'bg-hxa-purple/20 text-purple-400 border-purple-500/30',
     resolved: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
     closed: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
-    archived: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
   };
   return map[status] ?? 'bg-slate-500/20 text-slate-400 border-slate-500/30';
 }
+
+/** Valid status transitions for threads */
+export const STATUS_TRANSITIONS: Record<string, string[]> = {
+  active: ['blocked', 'reviewing', 'resolved'],
+  blocked: ['active'],
+  reviewing: ['active', 'resolved'],
+  resolved: ['active', 'closed'],
+  closed: [],
+};
+
+/** Thread status filter options — matches B2B protocol */
+export const THREAD_STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'All Statuses' },
+  { value: 'active', label: 'Active' },
+  { value: 'blocked', label: 'Blocked' },
+  { value: 'reviewing', label: 'Reviewing' },
+  { value: 'resolved', label: 'Resolved' },
+  { value: 'closed', label: 'Closed' },
+];

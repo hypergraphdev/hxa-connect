@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Loader2, ChevronUp } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { DmMessage, MessagePart } from '@/lib/types';
-import { cn, formatTime, parseParts } from '@/lib/utils';
+import { cn, formatTime, parseParts, safeHref } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
 import { FileText } from 'lucide-react';
 
@@ -46,8 +46,9 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
     api.getChannelMessages(channelId, { limit: 50 })
       .then((res) => {
         if (cancelled) return;
-        setMessages(res.items.reverse());
-        setCursor(res.next_cursor);
+        const msgs = res.messages;
+        setMessages([...msgs].reverse());
+        setCursor(msgs.length > 0 ? msgs[msgs.length - 1].id : undefined);
         setHasOlder(res.has_more);
       })
       .catch(() => {})
@@ -83,13 +84,13 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
     const prevHeight = el?.scrollHeight ?? 0;
 
     try {
-      const res = await api.getChannelMessages(channelId, { cursor, limit: 50 });
-      const older = res.items.reverse();
+      const res = await api.getChannelMessages(channelId, { before: cursor, limit: 50 });
+      const older = [...res.messages].reverse();
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id));
         return [...older.filter((m) => !ids.has(m.id)), ...prev];
       });
-      setCursor(res.next_cursor);
+      setCursor(res.messages.length > 0 ? res.messages[res.messages.length - 1].id : undefined);
       setHasOlder(res.has_more);
       requestAnimationFrame(() => {
         if (el) el.scrollTop = el.scrollHeight - prevHeight;
@@ -139,7 +140,7 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
           </div>
         ) : (
           messages.map((msg) => (
-            <DmBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot.id} />
+            <DmBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} />
           ))
         )}
 
@@ -188,18 +189,18 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
       return <div className="whitespace-pre-wrap break-words text-hxa-text">{part.content}</div>;
     case 'file':
       return (
-        <a href={part.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-          <FileText size={12} /> {part.filename || 'File'}
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
+          <FileText size={12} /> {part.name || part.filename || 'File'}
         </a>
       );
     case 'image':
       return (
-        <a href={part.url} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.filename || 'Image'}</a>
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || 'Image'}</a>
       );
     case 'link':
       return (
-        <a href={part.url || part.content} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-          {part.content || part.url}
+        <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
+          {part.title || part.content || part.url}
         </a>
       );
     default:

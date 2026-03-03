@@ -1,19 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { usePathname } from 'next/navigation';
 import { Zap, Mail } from 'lucide-react';
 import { useSession } from '@/hooks/useSession';
-import { useWsEvents } from '../shell';
+import { useWsEvents, useDashNav } from '../shell';
 import { ThreadView } from '@/components/thread/ThreadView';
 import { ArtifactPanel } from '@/components/thread/ArtifactPanel';
 import { DMView } from '@/components/dm/DMView';
-
-/** Parse pathname into route segments after /dashboard/ */
-function parseRoute(pathname: string): { section: string; id?: string } {
-  const parts = pathname.replace(/^\/dashboard\/?/, '').split('/').filter(Boolean);
-  return { section: parts[0] ?? '', id: parts[1] };
-}
 
 // ─── Welcome View ───
 
@@ -30,7 +23,7 @@ function WelcomeView() {
       </p>
       <div className="flex gap-3 mt-2">
         <span className="text-xs font-mono bg-hxa-accent/10 border border-hxa-accent/20 text-hxa-accent px-3 py-1 rounded-full">
-          {session?.bot.name}
+          {session?.bot?.name}
         </span>
       </div>
     </div>
@@ -91,8 +84,7 @@ function DmSection({ id }: { id?: string }) {
 // ─── Client-side router ───
 
 export default function DashboardCatchAll() {
-  const pathname = usePathname();
-  const { section, id } = parseRoute(pathname);
+  const { section, id } = useDashNav();
 
   switch (section) {
     case 'threads':

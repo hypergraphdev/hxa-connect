@@ -1,8 +1,8 @@
-import type { SessionData, Thread, ThreadMessage, Channel, DmMessage, DmChannelItem, Bot, Artifact } from './types';
+import type { RawSession, SessionData, Thread, ThreadMessage, Channel, DmMessage, DmChannelItem, Bot, Artifact } from './types';
 
-/** Base path — all API calls go through the hxa-connect Express server.
+/** Base path for the hxa-connect Express server.
  *  NEXT_PUBLIC_BASE_PATH is set when the app is behind a URL prefix (e.g. "/hub"). */
-const BASE = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/ui/api`;
+const BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -29,19 +29,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export async function login(params: {
   token: string;
   owner_name: string;
-}): Promise<SessionData> {
-  return request<SessionData>('/login', {
+}): Promise<{ session: { role: string; org_id: string; bot_id: string; expires_at: number } }> {
+  return request('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify(params),
+    body: JSON.stringify({ type: 'bot', ...params }),
   });
 }
 
-export async function getSession(): Promise<SessionData> {
-  return request<SessionData>('/session');
+export async function getSession(): Promise<RawSession> {
+  return request<RawSession>('/api/auth/session');
 }
 
 export async function logout(): Promise<void> {
-  await fetch(`${BASE}/logout`, { method: 'POST', credentials: 'include' });
+  await fetch(`${BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' });
 }
 
 // ─── Threads ───
@@ -65,11 +65,11 @@ export async function getThreads(params?: {
   if (params?.cursor) sp.set('cursor', params.cursor);
   if (params?.limit) sp.set('limit', String(params.limit));
   const qs = sp.toString();
-  return request<ThreadListResponse>(`/threads${qs ? `?${qs}` : ''}`);
+  return request<ThreadListResponse>(`/api/threads${qs ? `?${qs}` : ''}`);
 }
 
 export async function getThread(id: string): Promise<Thread> {
-  return request<Thread>(`/threads/${id}`);
+  return request<Thread>(`/api/threads/${id}`);
 }
 
 /** Backend response: { items, has_more, next_cursor? } */
@@ -84,17 +84,29 @@ export async function getThreadMessages(threadId: string, params?: {
   limit?: number;
 }): Promise<MessageListResponse> {
   const sp = new URLSearchParams();
-  if (params?.cursor) sp.set('cursor', params.cursor);
+  // Always include cursor param (even empty) to trigger paginated response mode.
+  // Backend returns {items, has_more, next_cursor?} when cursor key is present,
+  // but plain array when absent (legacy mode).
+  sp.set('cursor', params?.cursor ?? '');
   if (params?.limit) sp.set('limit', String(params.limit));
   const qs = sp.toString();
-  return request<MessageListResponse>(`/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
+  return request<MessageListResponse>(`/api/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
 }
 
 /** Backend expects content (string) + optional parts */
 export async function sendThreadMessage(threadId: string, content: string, parts?: Array<{ type: string; content: string }>): Promise<ThreadMessage> {
-  return request<ThreadMessage>(`/threads/${threadId}/messages`, {
+  return request<ThreadMessage>(`/api/threads/${threadId}/messages`, {
     method: 'POST',
     body: JSON.stringify({ content, parts }),
+  });
+}
+
+// ─── Thread Status ───
+
+export async function updateThreadStatus(threadId: string, status: string, closeReason?: string): Promise<Thread> {
+  return request<Thread>(`/api/threads/${threadId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, ...(closeReason ? { close_reason: closeReason } : {}) }),
   });
 }
 
@@ -102,7 +114,7 @@ export async function sendThreadMessage(threadId: string, content: string, parts
 
 /** Backend returns raw Artifact[] */
 export async function getThreadArtifacts(threadId: string): Promise<Artifact[]> {
-  return request<Artifact[]>(`/threads/${threadId}/artifacts`);
+  return request<Artifact[]>(`/api/threads/${threadId}/artifacts`);
 }
 
 // ─── Workspace (DM channels + threads) ───
@@ -129,33 +141,45 @@ export async function getWorkspace(params?: {
   if (params?.dm_cursor) sp.set('dm_cursor', params.dm_cursor);
   if (params?.dm_limit) sp.set('dm_limit', String(params.dm_limit));
   const qs = sp.toString();
-  return request<WorkspaceResponse>(`/workspace${qs ? `?${qs}` : ''}`);
+  return request<WorkspaceResponse>(`/api/me/workspace${qs ? `?${qs}` : ''}`);
 }
 
 // ─── DMs (Channel Messages) ───
 
-/** Backend response: { items, has_more, next_cursor? } */
+/**
+ * Backend returns either:
+ *   cursor-based (before=message_id): { messages: DmMessage[], has_more: boolean } — newest first
+ *   legacy (no before / before=timestamp): DmMessage[] — chronological (oldest first)
+ * We normalise to: { messages: DmMessage[] (newest first), has_more }.
+ * Callers should reverse() to display in chronological order.
+ */
 export interface DmMessageListResponse {
-  items: DmMessage[];
+  messages: DmMessage[];
   has_more: boolean;
-  next_cursor?: string;
 }
 
 export async function getChannelMessages(channelId: string, params?: {
-  cursor?: string;
+  before?: string;
   limit?: number;
 }): Promise<DmMessageListResponse> {
   const sp = new URLSearchParams();
-  if (params?.cursor) sp.set('cursor', params.cursor);
+  if (params?.before) sp.set('before', params.before);
   if (params?.limit) sp.set('limit', String(params.limit));
   const qs = sp.toString();
-  return request<DmMessageListResponse>(`/channels/${channelId}/messages${qs ? `?${qs}` : ''}`);
+  const raw = await request<DmMessage[] | { messages: DmMessage[]; has_more: boolean }>(
+    `/api/channels/${channelId}/messages${qs ? `?${qs}` : ''}`,
+  );
+  if (Array.isArray(raw)) {
+    // Legacy path returns chronological; reverse to newest-first for consistency
+    return { messages: [...raw].reverse(), has_more: raw.length >= (params?.limit ?? 50) };
+  }
+  return raw;
 }
 
 // ─── WS Ticket ───
 
 export async function getWsTicket(): Promise<{ ticket: string; expires_in: number }> {
-  return request<{ ticket: string; expires_in: number }>('/ws-ticket', { method: 'POST' });
+  return request<{ ticket: string; expires_in: number }>('/api/ws-ticket', { method: 'POST' });
 }
 
 export { ApiError };

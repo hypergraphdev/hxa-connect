@@ -1,13 +1,31 @@
+/** Session role from unified /api/auth/session. */
+export type SessionRole = 'bot_owner' | 'org_admin' | 'super_admin';
+
+/** Raw response from GET /api/auth/session. */
+export interface RawSession {
+  role: SessionRole;
+  org_id: string | null;
+  bot_id: string | null;
+  owner_name: string | null;
+  scopes: string[] | null;
+  is_scoped_token: boolean;
+  expires_at: number;
+}
+
 /**
- * Current backend session response from /ui/api/session.
- * Note: org_admin support is a future backend change.
- * For now, all sessions are bot_user sessions.
+ * Frontend session state — raw session enriched with bot details
+ * (fetched from /api/me/workspace for bot_owner sessions).
  */
 export interface SessionData {
-  bot: { id: string; name: string; org_id: string };
-  owner_name: string;
-  scopes: string[];
+  role: SessionRole;
+  org_id: string | null;
+  bot_id: string | null;
+  owner_name: string | null;
+  scopes: string[] | null;
+  is_scoped_token: boolean;
   expires_at: number;
+  /** Bot details — only present for bot_owner sessions, enriched from /api/me/workspace. */
+  bot?: { id: string; name: string; org_id: string; auth_role: 'admin' | 'member' };
 }
 
 export interface Bot {
@@ -17,6 +35,14 @@ export interface Bot {
   auth_role: 'admin' | 'member';
   online: boolean;
   created_at: string;
+}
+
+export interface ThreadParticipant {
+  bot_id: string;
+  name?: string;
+  online?: boolean;
+  label?: string;
+  joined_at?: string;
 }
 
 export interface Thread {
@@ -31,9 +57,10 @@ export interface Thread {
   message_count: number;
   participant_count: number;
   revision: number;
+  participants?: ThreadParticipant[];
 }
 
-export type ThreadStatus = 'open' | 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed' | 'archived';
+export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
 
 export interface ThreadMessage {
   id: string;
@@ -46,11 +73,16 @@ export interface ThreadMessage {
 }
 
 export interface MessagePart {
-  type: 'text' | 'file' | 'image' | 'link';
+  type: 'text' | 'markdown' | 'file' | 'image' | 'link';
   content?: string;
   url?: string;
   filename?: string;
+  // Backend field names: file→name, image→alt, link→title
+  name?: string;
+  alt?: string;
+  title?: string;
   mime_type?: string;
+  size?: number;
 }
 
 export interface Channel {

@@ -172,10 +172,16 @@ async function main() {
     }
   });
 
-  // SPA catch-all — must be before main API router, whose auth middleware
+  // SPA catch-alls — must be before main API router, whose auth middleware
   // would otherwise intercept non-API paths and return 401 JSON.
   app.get('/dashboard/*', (_req, res) => {
     res.sendFile(path.join(webNextDir, 'dashboard', 'index.html'));
+  });
+  app.get('/admin/*', (_req, res) => {
+    res.sendFile(path.join(webNextDir, 'admin', 'index.html'));
+  });
+  app.get('/org/*', (_req, res) => {
+    res.sendFile(path.join(webNextDir, 'org', 'index.html'));
   });
 
   app.use(createRouter(db, hubWs, config, sessionStore));

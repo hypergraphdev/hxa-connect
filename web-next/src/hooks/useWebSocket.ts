@@ -9,6 +9,8 @@ interface UseWebSocketOptions {
   onEvent: (event: WsEvent) => void;
   /** Called when connection state changes */
   onStatusChange?: (connected: boolean) => void;
+  /** Called when session is expired/revoked — should trigger logout + redirect */
+  onSessionExpired?: () => void;
   /** Set false to disable connection (e.g. no session yet) */
   enabled?: boolean;
 }
@@ -17,17 +19,19 @@ interface UseWebSocketOptions {
  * Manages a WebSocket connection to HXA-Connect with auto-reconnect.
  * Obtains a short-lived ticket from the session API, then connects.
  */
-export function useWebSocket({ onEvent, onStatusChange, enabled = true }: UseWebSocketOptions) {
+export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enabled = true }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
   const enabledRef = useRef(enabled);
   const onEventRef = useRef(onEvent);
   const onStatusRef = useRef(onStatusChange);
+  const onSessionExpiredRef = useRef(onSessionExpired);
 
   // Keep refs current without re-triggering effect
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
   useEffect(() => { onEventRef.current = onEvent; }, [onEvent]);
   useEffect(() => { onStatusRef.current = onStatusChange; }, [onStatusChange]);
+  useEffect(() => { onSessionExpiredRef.current = onSessionExpired; }, [onSessionExpired]);
 
   const connect = useCallback(async () => {
     if (!enabledRef.current) return;
@@ -60,8 +64,11 @@ export function useWebSocket({ onEvent, onStatusChange, enabled = true }: UseWeb
         onStatusRef.current?.(false);
         wsRef.current = null;
 
-        // 4001 = auth failure — don't reconnect
-        if (e.code === 4001) return;
+        // 4001 = auth failure, 4002 = session expired/revoked — don't reconnect
+        if (e.code === 4001 || e.code === 4002) {
+          onSessionExpiredRef.current?.();
+          return;
+        }
 
         if (enabledRef.current) {
           // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
@@ -74,8 +81,13 @@ export function useWebSocket({ onEvent, onStatusChange, enabled = true }: UseWeb
       ws.onerror = () => { /* onclose will fire */ };
 
       wsRef.current = ws;
-    } catch {
-      // Ticket fetch failed — retry after delay
+    } catch (err) {
+      // Ticket fetch failed — check if it's a 401 (session expired)
+      if (err instanceof api.ApiError && err.status === 401) {
+        onSessionExpiredRef.current?.();
+        return;
+      }
+      // Other errors — retry after delay
       if (enabledRef.current) {
         const delay = Math.min(1000 * 2 ** retriesRef.current, 30000);
         retriesRef.current++;

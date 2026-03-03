@@ -1,11 +1,14 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ChevronUp, Send, FileText, User, Clock } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Loader2, ChevronUp, Send, FileText } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadMessage, MessagePart, ThreadStatus } from '@/lib/types';
-import { cn, formatTime, statusColor } from '@/lib/utils';
+import { cn, formatTime, safeHref } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
+import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/components/ui/MentionPopup';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 
 interface ThreadViewProps {
   threadId: string;
@@ -28,6 +31,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [hasOlder, setHasOlder] = useState(false);
   const [composerText, setComposerText] = useState('');
   const [sending, setSending] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<{ query: string; startIndex: number } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -152,23 +157,90 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setSending(false);
   }
 
+  // Handle mention selection
+  function handleMentionSelect(name: string) {
+    if (!mentionQuery) return;
+    const before = composerText.slice(0, mentionQuery.startIndex);
+    const after = composerText.slice(textareaRef.current?.selectionStart ?? composerText.length);
+    const newText = `${before}@${name} ${after}`;
+    setComposerText(newText);
+    setMentionQuery(null);
+    setMentionIndex(0);
+    // Restore cursor position after the inserted mention
+    const cursorPos = before.length + 1 + name.length + 1;
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.setSelectionRange(cursorPos, cursorPos);
+      }
+    });
+  }
+
+  // Update mention query on cursor/text change
+  function updateMentionState(text: string, cursorPos: number) {
+    const mq = extractMentionQuery(text, cursorPos);
+    setMentionQuery(mq);
+    if (!mq) setMentionIndex(0);
+  }
+
   // Keyboard handler
   function handleKeyDown(e: React.KeyboardEvent) {
+    // Mention popup keyboard navigation
+    if (mentionQuery && filteredMentions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % filteredMentions.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex((i) => (i - 1 + filteredMentions.length) % filteredMentions.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        handleMentionSelect(filteredMentions[mentionIndex].name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   }
 
-  // Auto-resize textarea
+  // Auto-resize textarea + mention detection
   function handleTextareaInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setComposerText(e.target.value);
     const ta = e.target;
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 150) + 'px';
+    updateMentionState(e.target.value, e.target.selectionStart);
   }
 
-  const canSend = thread && !['resolved', 'closed', 'archived'].includes(thread.status);
+  // Build mention candidates from thread participants
+  const mentionCandidates = useMemo<MentionCandidate[]>(() => {
+    if (!thread?.participants) return [];
+    return thread.participants
+      .filter((p) => !!p.name)
+      .map((p) => ({ id: p.bot_id, name: p.name!, online: p.online }));
+  }, [thread?.participants]);
+
+  // Filtered candidates for current query
+  const filteredMentions = useMemo(() => {
+    if (!mentionQuery) return [];
+    return mentionCandidates.filter((c) =>
+      c.name.toLowerCase().includes(mentionQuery.query.toLowerCase()),
+    );
+  }, [mentionCandidates, mentionQuery]);
+
+  const canSend = thread && !['resolved', 'closed'].includes(thread.status);
 
   if (loading) {
     return (
@@ -188,31 +260,26 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Thread Header */}
-      <div className="shrink-0 px-4 py-3 border-b border-hxa-border bg-[rgba(10,15,26,0.4)] flex items-center gap-3">
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-hxa-text truncate">{thread.topic}</h2>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className={cn('text-[10px] font-semibold px-1.5 py-0.5 rounded border', statusColor(thread.status))}>
-              {thread.status}
-            </span>
-            <span className="text-[11px] text-hxa-text-muted flex items-center gap-1">
-              <User size={10} /> {thread.participant_count}
-            </span>
-            <span className="text-[11px] text-hxa-text-muted flex items-center gap-1">
-              <Clock size={10} /> {formatTime(thread.created_at)}
-            </span>
-          </div>
-        </div>
-        {onOpenArtifacts && (
-          <button
-            onClick={onOpenArtifacts}
-            className="text-xs text-hxa-accent border border-hxa-accent/30 px-2.5 py-1.5 rounded-md hover:bg-hxa-accent/10 transition-colors flex items-center gap-1"
-          >
-            <FileText size={12} /> Artifacts
-          </button>
-        )}
-      </div>
+      <ThreadHeader
+        topic={thread.topic}
+        status={thread.status}
+        participantCount={thread.participant_count}
+        participants={thread.participants?.map((p): ThreadParticipantInfo => ({
+          id: p.bot_id,
+          name: p.name || p.bot_id,
+          online: p.online,
+          label: p.label,
+        }))}
+        createdAt={thread.created_at}
+        canChangeStatus={session?.bot?.auth_role === 'admin'}
+        onStatusChange={async (status, closeReason) => {
+          try {
+            const updated = await api.updateThreadStatus(threadId, status, closeReason);
+            setThread(updated);
+          } catch { /* silent */ }
+        }}
+        onOpenArtifacts={onOpenArtifacts}
+      />
 
       {/* Messages */}
       <div
@@ -235,7 +302,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot.id} />
+          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} />
         ))}
 
         <div ref={messagesEndRef} />
@@ -244,12 +311,27 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       {/* Composer */}
       {canSend && (
         <div className="shrink-0 px-4 py-3 border-t border-hxa-border bg-[rgba(10,15,26,0.4)]">
-          <div className="flex gap-2 items-end">
+          <div className="relative flex gap-2 items-end">
+            {/* @mention popup */}
+            {mentionQuery && filteredMentions.length > 0 && (
+              <MentionPopup
+                candidates={mentionCandidates}
+                query={mentionQuery.query}
+                selectedIndex={mentionIndex}
+                onSelect={handleMentionSelect}
+                onClose={() => setMentionQuery(null)}
+                onHover={(i) => setMentionIndex(i)}
+              />
+            )}
             <textarea
               ref={textareaRef}
               value={composerText}
               onChange={handleTextareaInput}
               onKeyDown={handleKeyDown}
+              onClick={() => {
+                const ta = textareaRef.current;
+                if (ta) updateMentionState(ta.value, ta.selectionStart);
+              }}
               placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
               rows={1}
               className="flex-1 bg-black/30 border border-hxa-border rounded-lg px-3 py-2.5 text-sm text-hxa-text placeholder:text-hxa-text-muted outline-none focus:border-hxa-accent transition-colors resize-none"
@@ -283,7 +365,7 @@ function MessageBubble({ message, isSelf }: { message: ThreadMessage; isSelf: bo
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
 
   return (
-    <div className={cn('group', isSelf && 'pl-8')}>
+    <div className="group">
       {/* Header */}
       <div className="flex items-center gap-2 mb-0.5">
         <span className={cn(
@@ -323,29 +405,26 @@ function MessageBubble({ message, isSelf }: { message: ThreadMessage; isSelf: bo
 function PartRenderer({ part }: { part: MessagePart }) {
   switch (part.type) {
     case 'text':
-      return (
-        <div className="whitespace-pre-wrap break-words text-hxa-text">
-          {part.content}
-        </div>
-      );
+    case 'markdown':
+      return <MarkdownContent content={part.content || ''} />;
     case 'image':
       return (
-        <a href={part.url} target="_blank" rel="noopener noreferrer" className="block mt-1">
-          <span className="text-xs text-hxa-accent hover:underline">{part.filename || 'Image'}</span>
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
+          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || 'Image'}</span>
         </a>
       );
     case 'file':
       return (
-        <a href={part.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
           <FileText size={12} />
-          {part.filename || 'File'}
+          {part.name || part.filename || 'File'}
           {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
         </a>
       );
     case 'link':
       return (
-        <a href={part.url || part.content} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-          {part.content || part.url}
+        <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
+          {part.title || part.content || part.url}
         </a>
       );
     default:

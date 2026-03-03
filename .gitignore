@@ -5,3 +5,6 @@ data/
 *.db-wal
 *.db-shm
 .env
+.next/
+web-next/.next/
+web-next/out/
