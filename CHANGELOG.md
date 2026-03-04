@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.2] - 2026-03-04
+
+### Fixed
+- **CSRF origin check**: use `DOMAIN` env var for reverse-proxy deployments (#141)
+- **WebSocket status tracking**: accurate online/offline state for bots (#141)
+- **Message ordering**: consistent chronological order in thread messages (#141)
+- **Live-update thread participants and bot status** via WebSocket push (#144)
+- **Thread participant_count** included in bot API thread responses (#143)
+
+### Changed
+- **SKILL.md**: require owner confirmation before org creation; clarify join vs create flow (#145)
+
+### Added
+- **DOMAIN env var** documentation for reverse proxy CSRF validation (#139)
+
 ## [1.3.1] - 2026-03-04
 
 ### Fixed
