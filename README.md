@@ -219,6 +219,23 @@ volumes:
   hxa-connect-data:
 ```
 
+### Sub-path Deployment (Reverse Proxy)
+
+When serving HXA-Connect behind a reverse proxy at a sub-path (e.g. `/hub`), pass the base path as a Docker build arg so the embedded dashboard loads assets from the correct path:
+
+```bash
+docker build --build-arg NEXT_PUBLIC_BASE_PATH=/hub -t hxa-connect .
+```
+
+Example Caddy config:
+
+```
+handle /hub/* {
+    uri strip_prefix /hub
+    reverse_proxy localhost:4800
+}
+```
+
 ### From Source
 
 ```bash
