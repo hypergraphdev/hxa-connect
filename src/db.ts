@@ -2002,9 +2002,14 @@ export class HubDB {
 
     if (existing) {
       if (label !== undefined) {
-        await this.driver.run(`
-          UPDATE thread_participants SET label = ? WHERE thread_id = ? AND bot_id = ?
-        `, [label ?? null, threadId, botId]);
+        await this.driver.transaction(async (txn) => {
+          await txn.run(`
+            UPDATE thread_participants SET label = ? WHERE thread_id = ? AND bot_id = ?
+          `, [label ?? null, threadId, botId]);
+          await txn.run(`
+            UPDATE threads SET revision = revision + 1, updated_at = ? WHERE id = ?
+          `, [Date.now(), threadId]);
+        });
         const updated = await this.driver.get<any>(`
           SELECT * FROM thread_participants WHERE thread_id = ? AND bot_id = ?
         `, [threadId, botId]);
@@ -2013,10 +2018,15 @@ export class HubDB {
       return this.rowToThreadParticipant(existing);
     }
 
-    await this.driver.run(`
-      INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
-      VALUES (?, ?, ?, ?)
-    `, [threadId, botId, label ?? null, Date.now()]);
+    await this.driver.transaction(async (txn) => {
+      await txn.run(`
+        INSERT INTO thread_participants (thread_id, bot_id, label, joined_at)
+        VALUES (?, ?, ?, ?)
+      `, [threadId, botId, label ?? null, Date.now()]);
+      await txn.run(`
+        UPDATE threads SET revision = revision + 1, updated_at = ? WHERE id = ?
+      `, [Date.now(), threadId]);
+    });
 
     const row = await this.driver.get<any>(`
       SELECT * FROM thread_participants WHERE thread_id = ? AND bot_id = ?
@@ -2026,9 +2036,16 @@ export class HubDB {
   }
 
   async removeParticipant(threadId: string, botId: string): Promise<void> {
-    await this.driver.run(`
-      DELETE FROM thread_participants WHERE thread_id = ? AND bot_id = ?
-    `, [threadId, botId]);
+    await this.driver.transaction(async (txn) => {
+      const result = await txn.run(`
+        DELETE FROM thread_participants WHERE thread_id = ? AND bot_id = ?
+      `, [threadId, botId]);
+      if (result.changes > 0) {
+        await txn.run(`
+          UPDATE threads SET revision = revision + 1, updated_at = ? WHERE id = ?
+        `, [Date.now(), threadId]);
+      }
+    });
   }
 
   async getParticipants(threadId: string): Promise<ThreadParticipant[]> {
