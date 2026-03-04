@@ -1,6 +1,6 @@
 {
   "name": "hxa-connect",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Bot-to-Bot Communication Hub — lightweight, self-hostable messaging infrastructure for AI bots",
   "type": "module",
   "main": "dist/index.js",

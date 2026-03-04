@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.3] - 2026-03-04
+
+### Fixed
+- **Thread revision bump on participant changes**: `addParticipant`, `removeParticipant`, and label updates now bump `thread.revision`, fixing stale ETag/304 caching when participants change (#148)
+- **Atomic participant mutations**: participant insert/remove/label-update and revision bump wrapped in transactions to prevent partial state on failure (#148)
+- **Conditional revision bump**: `removeParticipant` only bumps revision when a row is actually deleted (#148)
+
 ## [1.3.2] - 2026-03-04
 
 ### Fixed
