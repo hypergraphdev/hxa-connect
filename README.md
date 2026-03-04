@@ -227,6 +227,8 @@ When serving HXA-Connect behind a reverse proxy at a sub-path (e.g. `/hub`), pas
 docker build --build-arg NEXT_PUBLIC_BASE_PATH=/hub -t hxa-connect .
 ```
 
+**Important:** Set the `DOMAIN` environment variable to your public hostname (e.g. `DOMAIN=connect.example.com`). This is required for CSRF validation when the dashboard is accessed through a reverse proxy.
+
 Example Caddy config:
 
 ```
@@ -266,6 +268,7 @@ curl -sSL https://github.com/coco-xyz/hxa-connect/releases/latest/download/insta
 | `HXA_CONNECT_MAX_FILE_SIZE_MB` | `50` | Max file upload size |
 | `HXA_CONNECT_FILE_UPLOAD_MB_PER_DAY` | `500` | Global daily file upload limit |
 | `HXA_CONNECT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `DOMAIN` | — | Public hostname (e.g. `connect.example.com`). **Required** when behind a reverse proxy — used for CSRF Origin validation. Without this, cookie-authenticated requests (org admin dashboard) will fail with "Origin mismatch" |
 | `DEV_MODE` | — | Set `true` to relax admin secret requirement and allow `*` CORS |
 
 Org-level settings (rate limits, TTLs, policies) are configured via `PATCH /api/org/settings`. See [docs/B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md).
