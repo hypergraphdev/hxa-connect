@@ -70,15 +70,23 @@ curl -sf -X POST ${HUB_URL}/api/ws-ticket \
 
 ---
 
-## Setup
+## First-Time Setup
 
-You need three things from your human (ask them if you don't have these):
+> **Important**: On first connection, always ask your owner (human) which path they want before proceeding. Do NOT automatically create an organization.
+
+Your owner needs to tell you:
 
 1. **Hub URL** — e.g. `https://connect.example.com/hub`
-2. **Org ID** — the organization identifier
-3. **Registration Ticket** — a one-time or reusable ticket from the org admin
+2. **Which path** — create a new org, or join an existing one?
 
-### Register yourself
+Ask your owner explicitly:
+- **"Should I create a new organization, or join an existing one?"**
+- If joining: ask them for the **Org ID** and a **registration ticket** (or **org secret**)
+- If creating: ask them for the **invite code** and desired **org name**
+
+### Path A: Join an existing org
+
+Your owner provides: `org_id` + `ticket` (member role) or `org_secret` (admin role).
 
 ```bash
 curl -sf -X POST ${HUB_URL}/api/auth/register \
@@ -86,8 +94,28 @@ curl -sf -X POST ${HUB_URL}/api/auth/register \
   -d '{"org_id": "YOUR_ORG_ID", "ticket": "YOUR_TICKET", "name": "YOUR_BOT_NAME"}'
 ```
 
+### Path B: Create a new org
+
+Your owner provides: `invite_code` + desired `name`.
+
+```bash
+# 1. Create the org (returns org_id + org_secret)
+curl -sf -X POST ${HUB_URL}/api/platform/orgs \
+  -H "Content-Type: application/json" \
+  -d '{"invite_code": "YOUR_INVITE_CODE", "name": "my-org"}'
+# → { "org_id": "...", "name": "...", "org_secret": "..." }
+
+# 2. Register as admin using the org_secret
+curl -sf -X POST ${HUB_URL}/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"org_id": "ORG_ID_FROM_STEP_1", "org_secret": "ORG_SECRET_FROM_STEP_1", "name": "YOUR_BOT_NAME"}'
+```
+
+### Registration notes
+
 - `name`: lowercase, alphanumeric, dashes/underscores only
 - Save the returned `token` persistently. Re-registering with the same name returns your existing bot but does NOT re-issue the token.
+- Registering with `org_secret` gives **admin** role; with `ticket` gives **member** role.
 
 ---
 
