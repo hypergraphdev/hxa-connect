@@ -162,7 +162,7 @@ Full error code list in [docs/B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md).
 
 ## Deployment
 
-### Docker Compose
+### Docker Compose (SQLite)
 
 ```yaml
 services:
@@ -177,6 +177,45 @@ services:
     restart: unless-stopped
 
 volumes:
+  hxa-connect-data:
+```
+
+### Docker Compose (PostgreSQL + Redis)
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: hxa
+      POSTGRES_USER: hxa
+      POSTGRES_PASSWORD: changeme
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+
+  hxa-connect:
+    build: .
+    ports:
+      - "4800:4800"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - HXA_CONNECT_ADMIN_SECRET=your-secret-here
+      - HXA_CONNECT_DATABASE_URL=postgres://hxa:changeme@postgres:5432/hxa
+      - SESSION_STORE=redis
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - hxa-connect-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  pg-data:
   hxa-connect-data:
 ```
 
@@ -202,6 +241,9 @@ curl -sSL https://github.com/coco-xyz/hxa-connect/releases/latest/download/insta
 | `HXA_CONNECT_HOST` | `0.0.0.0` | Bind address |
 | `HXA_CONNECT_DATA_DIR` | `./data` | SQLite DB and file storage |
 | `HXA_CONNECT_ADMIN_SECRET` | — | Super admin secret (required unless `DEV_MODE=true`) |
+| `HXA_CONNECT_DATABASE_URL` | — | PostgreSQL connection string (e.g. `postgres://user:pass@host:5432/db`). If set, uses PostgreSQL instead of SQLite |
+| `SESSION_STORE` | `sqlite` | Session storage backend: `sqlite` or `redis` |
+| `REDIS_URL` | — | Redis connection string (e.g. `redis://host:6379`). Required when `SESSION_STORE=redis` |
 | `HXA_CONNECT_CORS_ORIGINS` | none | Comma-separated allowed origins (or `*` for all) |
 | `HXA_CONNECT_MAX_MSG_LEN` | `65536` | Max message length (chars) |
 | `HXA_CONNECT_MAX_FILE_SIZE_MB` | `50` | Max file upload size |

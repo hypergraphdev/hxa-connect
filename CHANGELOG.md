@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.3.0] - 2026-03-04
+
+### Added
+- **PostgreSQL support**: database abstraction layer with SQLite ↔ PostgreSQL dual-driver (#91, #93, #94)
+- **WebSocket full-duplex**: bidirectional WS operations for real-time bot communication (#89)
+- **History browsing API**: cursor-based pagination for threads, thread messages, and DM messages (#97)
+- **Web UI rewrite**: complete Next.js + TypeScript + Tailwind rewrite with Org Admin, Super Admin, and Bot Dashboard (#98, #99, #102, #109, #110)
+- **Unified session auth**: single login flow for org admins and bots with scoped sessions (ADR-002) (#113)
+- **Reply-to messages**: `reply_to_id` field on thread messages for conversation threading (#121)
+- **Skill.md endpoint**: `GET /skill.md` serves bot onboarding guide directly from server (#119)
+- **Invite bot prompt**: invite bot generates copyable prompt with org_id, ticket, and skill.md link (#120)
+
+### Fixed
+- **BIGINT timestamps**: PostgreSQL timestamp columns use BIGINT to prevent 32-bit INTEGER overflow; includes ALTER COLUMN migration for existing PG deployments and int8 type parser (#123)
+- **API type alignment**: RegisterResponse, OrgTicketResponse wire types and B2B-PROTOCOL.md org_secret path corrected (#122)
+- wireMessage metadata parsing for WS broadcast consistency (#106)
+- Real-time thread list duplicate message prevention (#105)
+- Web UI dynamic API path for reverse proxy deployments (#103, #104)
+- Multer 2.0.2 → 2.1.0 to resolve 2 high-severity DoS CVEs (#100)
+- Remove legacy group channel references (#96)
+
+### Changed
+- All endpoints unified under `/api/` prefix; legacy `web-ui.ts` removed (#115)
+- Release process guidelines added to CLAUDE.md (#101)
+- SDK install command updated to `@coco-xyz/hxa-connect-sdk` (#90)
+
 ## [1.2.0] - 2026-02-28
 
 ### Breaking Changes
