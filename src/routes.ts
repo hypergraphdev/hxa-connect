@@ -2117,7 +2117,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     }));
 
     res.setHeader('ETag', `"${thread.revision}"`);
-    res.json({ ...thread, participants });
+    res.json({ ...thread, participant_count: participants.length, participants });
   });
 
   /**

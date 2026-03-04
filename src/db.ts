@@ -1731,9 +1731,10 @@ export class HubDB {
     });
   }
 
-  async listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Promise<Thread[]> {
+  async listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Promise<(Thread & { participant_count: number })[]> {
     const base = `
-      SELECT t.* FROM threads t
+      SELECT t.*, (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = t.id) AS participant_count
+      FROM threads t
       JOIN thread_participants tp ON t.id = tp.thread_id
       WHERE tp.bot_id = ?
     `;
@@ -1744,7 +1745,11 @@ export class HubDB {
     const rows = status
       ? await this.driver.all<any>(query, [botId, status, limit])
       : await this.driver.all<any>(query, [botId, limit]);
-    return rows.map(row => this.rowToThread(row));
+    return rows.map((row: any) => {
+      const count = Number(row.participant_count);
+      delete row.participant_count;
+      return { ...this.rowToThread(row), participant_count: count };
+    });
   }
 
   /**
