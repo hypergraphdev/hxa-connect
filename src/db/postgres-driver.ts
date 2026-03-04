@@ -12,6 +12,10 @@
 import pg from 'pg';
 import type { DatabaseDriver, RunResult } from './driver.js';
 
+// Parse BIGINT (OID 20) as JavaScript number instead of string.
+// Timestamp values (~1.7e12) are well within Number.MAX_SAFE_INTEGER.
+pg.types.setTypeParser(20, (val: string) => Number(val));
+
 // ─── Placeholder Translation ─────────────────────────────────
 
 /**

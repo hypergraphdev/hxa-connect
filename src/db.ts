@@ -62,6 +62,8 @@ export class HubDB {
     const autoIncrementPK = this.driver.dialect === 'postgres'
       ? 'SERIAL PRIMARY KEY'
       : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+    // Timestamp columns store Date.now() (ms) which exceeds PG's 32-bit INTEGER
+    const ts = this.driver.dialect === 'postgres' ? 'BIGINT' : 'INTEGER';
 
     await this.driver.exec(`
       CREATE TABLE IF NOT EXISTS orgs (
@@ -70,7 +72,7 @@ export class HubDB {
         org_secret TEXT NOT NULL,
         persist_messages INTEGER DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'active',
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS bots (
@@ -95,8 +97,8 @@ export class HubDB {
         runtime TEXT,
         auth_role TEXT NOT NULL DEFAULT 'member' CHECK(auth_role IN ('admin','member')),
         online INTEGER DEFAULT 0,
-        last_seen_at INTEGER,
-        created_at INTEGER NOT NULL,
+        last_seen_at ${ts},
+        created_at ${ts} NOT NULL,
         UNIQUE(org_id, name)
       );
 
@@ -105,13 +107,13 @@ export class HubDB {
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         type TEXT NOT NULL CHECK(type IN ('direct')),
         name TEXT,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS channel_members (
         channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-        joined_at INTEGER NOT NULL,
+        joined_at ${ts} NOT NULL,
         PRIMARY KEY(channel_id, bot_id)
       );
 
@@ -122,7 +124,7 @@ export class HubDB {
         content TEXT NOT NULL,
         content_type TEXT DEFAULT 'text',
         parts TEXT,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS threads (
@@ -139,17 +141,17 @@ export class HubDB {
           CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
         revision INTEGER NOT NULL DEFAULT 1,
         permission_policy TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        last_activity_at INTEGER NOT NULL,
-        resolved_at INTEGER
+        created_at ${ts} NOT NULL,
+        updated_at ${ts} NOT NULL,
+        last_activity_at ${ts} NOT NULL,
+        resolved_at ${ts}
       );
 
       CREATE TABLE IF NOT EXISTS thread_participants (
         thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         label TEXT,
-        joined_at INTEGER NOT NULL,
+        joined_at ${ts} NOT NULL,
         PRIMARY KEY(thread_id, bot_id)
       );
 
@@ -161,7 +163,7 @@ export class HubDB {
         content_type TEXT DEFAULT 'text',
         parts TEXT,
         metadata TEXT,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS artifacts (
@@ -178,8 +180,8 @@ export class HubDB {
         contributor_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
         version INTEGER NOT NULL DEFAULT 1,
         format_warning INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
+        created_at ${ts} NOT NULL,
+        updated_at ${ts} NOT NULL,
         UNIQUE(thread_id, artifact_key, version)
       );
 
@@ -203,7 +205,7 @@ export class HubDB {
         mime_type TEXT,
         size INTEGER NOT NULL,
         path TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_files_org ON files(org_id, created_at);
 
@@ -214,7 +216,7 @@ export class HubDB {
         type TEXT NOT NULL,
         payload TEXT NOT NULL,
         ref_id TEXT,
-        occurred_at INTEGER NOT NULL
+        occurred_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_catchup_target ON catchup_events(target_bot_id, occurred_at);
       CREATE INDEX IF NOT EXISTS idx_catchup_occurred ON catchup_events(occurred_at);
@@ -222,8 +224,8 @@ export class HubDB {
 
       CREATE TABLE IF NOT EXISTS webhook_status (
         bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
-        last_success INTEGER,
-        last_failure INTEGER,
+        last_success ${ts},
+        last_failure ${ts},
         consecutive_failures INTEGER DEFAULT 0,
         degraded INTEGER DEFAULT 0
       );
@@ -237,7 +239,7 @@ export class HubDB {
         thread_auto_close_days INTEGER,
         artifact_retention_days INTEGER,
         default_thread_permission_policy TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at ${ts} NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS rate_limit_events (
@@ -245,7 +247,7 @@ export class HubDB {
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL,
         resource_type TEXT NOT NULL CHECK(resource_type IN ('message', 'thread')),
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_rate_limit ON rate_limit_events(org_id, bot_id, resource_type, created_at);
 
@@ -257,7 +259,7 @@ export class HubDB {
         target_type TEXT NOT NULL,
         target_id TEXT NOT NULL,
         detail TEXT,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(org_id, action, created_at);
@@ -268,9 +270,9 @@ export class HubDB {
         token TEXT UNIQUE NOT NULL,
         scopes TEXT NOT NULL DEFAULT '["full"]',
         label TEXT,
-        expires_at INTEGER,
-        created_at INTEGER NOT NULL,
-        last_used_at INTEGER
+        expires_at ${ts},
+        created_at ${ts} NOT NULL,
+        last_used_at ${ts}
       );
       CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot ON bot_tokens(bot_id);
       CREATE INDEX IF NOT EXISTS idx_bot_tokens_token ON bot_tokens(token);
@@ -280,10 +282,10 @@ export class HubDB {
         org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
         secret_hash TEXT NOT NULL,
         reusable INTEGER NOT NULL DEFAULT 0,
-        expires_at INTEGER NOT NULL,
+        expires_at ${ts} NOT NULL,
         consumed INTEGER NOT NULL DEFAULT 0,
         created_by TEXT,
-        created_at INTEGER NOT NULL
+        created_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_org_tickets_org ON org_tickets(org_id);
       CREATE INDEX IF NOT EXISTS idx_org_tickets_expires ON org_tickets(expires_at);
@@ -294,8 +296,8 @@ export class HubDB {
         label TEXT,
         max_uses INTEGER NOT NULL DEFAULT 0,
         use_count INTEGER NOT NULL DEFAULT 0,
-        expires_at INTEGER NOT NULL,
-        created_at INTEGER NOT NULL
+        expires_at ${ts} NOT NULL,
+        created_at ${ts} NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_invite_codes_hash ON platform_invite_codes(code_hash);
     `);
@@ -304,7 +306,7 @@ export class HubDB {
     await this.driver.exec(`
       CREATE TABLE IF NOT EXISTS schema_versions (
         name TEXT PRIMARY KEY,
-        applied_at INTEGER NOT NULL
+        applied_at ${ts} NOT NULL
       );
     `);
 
@@ -339,6 +341,7 @@ export class HubDB {
 
     // Sessions table (ADR-002: unified session auth)
     await this.runMigration('sessions_table', async () => {
+      const sessTs = this.driver.dialect === 'postgres' ? 'BIGINT' : 'INTEGER';
       await this.driver.exec(`
         CREATE TABLE IF NOT EXISTS sessions (
           id TEXT PRIMARY KEY,
@@ -348,8 +351,8 @@ export class HubDB {
           owner_name TEXT,
           scopes TEXT,
           is_scoped_token INTEGER NOT NULL DEFAULT 0,
-          created_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
+          created_at ${sessTs} NOT NULL,
+          expires_at ${sessTs} NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
         CREATE INDEX IF NOT EXISTS idx_sessions_org_role ON sessions(org_id, role);
@@ -391,6 +394,42 @@ export class HubDB {
       `);
     });
 
+    // Upgrade existing PG INTEGER timestamp columns to BIGINT (PR #123).
+    // Date.now() (~1.7e12) exceeds PG's 32-bit INTEGER max (~2.1e9).
+    // No-op on SQLite (INTEGER is already 64-bit).
+    await this.runMigration('pg_bigint_timestamps', async () => {
+      if (this.driver.dialect !== 'postgres') return;
+      const alterations = [
+        ['orgs', ['created_at']],
+        ['bots', ['last_seen_at', 'created_at']],
+        ['channels', ['created_at']],
+        ['channel_members', ['joined_at']],
+        ['messages', ['created_at']],
+        ['threads', ['created_at', 'updated_at', 'last_activity_at', 'resolved_at']],
+        ['thread_participants', ['joined_at']],
+        ['thread_messages', ['created_at']],
+        ['artifacts', ['created_at', 'updated_at']],
+        ['files', ['created_at']],
+        ['catchup_events', ['occurred_at']],
+        ['webhook_status', ['last_success', 'last_failure']],
+        ['org_settings', ['updated_at']],
+        ['rate_limit_events', ['created_at']],
+        ['audit_log', ['created_at']],
+        ['bot_tokens', ['expires_at', 'created_at', 'last_used_at']],
+        ['org_tickets', ['expires_at', 'created_at']],
+        ['platform_invite_codes', ['expires_at', 'created_at']],
+        ['schema_versions', ['applied_at']],
+        ['sessions', ['created_at', 'expires_at']],
+      ] as const;
+      for (const [table, cols] of alterations) {
+        for (const col of cols) {
+          await this.driver.exec(
+            `ALTER TABLE ${table} ALTER COLUMN ${col} TYPE BIGINT`,
+          );
+        }
+      }
+    });
+
     // Reply-to-message support (Issue #112): add reply_to_id column
     await this.runMigration('thread_messages_reply_to', async () => {
       await this.driver.exec(`
@@ -413,12 +452,23 @@ export class HubDB {
     );
     if (applied) return;
 
-    await fn();
+    // Wrap migration + version record in a transaction so partial failures
+    // are rolled back and the migration can be retried cleanly.
+    await this.driver.transaction(async (txn) => {
+      // Swap driver temporarily for the migration fn
+      const origDriver = this.driver;
+      this.driver = txn;
+      try {
+        await fn();
+      } finally {
+        this.driver = origDriver;
+      }
 
-    await this.driver.run(
-      'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)',
-      [name, Date.now()],
-    );
+      await txn.run(
+        'INSERT INTO schema_versions (name, applied_at) VALUES (?, ?)',
+        [name, Date.now()],
+      );
+    });
   }
 
   private rowToOrg(row: any): Org {
