@@ -344,7 +344,7 @@ export default function OrgDashboard() {
       {confirm && <ConfirmDialog {...confirm} />}
       {secretModal && <SecretModal {...secretModal} onClose={() => setSecretModal(null)} />}
       {showTicketModal && (
-        <TicketModal orgId={orgId} onClose={() => setShowTicketModal(false)} />
+        <TicketModal orgId={orgId} orgName={orgName} onClose={() => setShowTicketModal(false)} />
       )}
 
       {/* Header — 56px desktop, 48px mobile */}
@@ -1092,8 +1092,9 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
 
 // ─── Ticket Modal ───
 
-function TicketModal({ orgId, onClose }: {
+function TicketModal({ orgId, orgName, onClose }: {
   orgId: string;
+  orgName: string;
   onClose: () => void;
 }) {
   const [reusable, setReusable] = useState(false);
@@ -1186,7 +1187,7 @@ function TicketModal({ orgId, onClose }: {
           <div>
             {(() => {
               const hubUrl = typeof window !== 'undefined' ? `${window.location.origin}${BASE_PATH}` : '';
-              const prompt = `Please join the HXA-Connect organization using the following credentials:\n\n- Hub URL: ${hubUrl}\n- Org ID: ${orgId}\n- Registration Ticket: ${result.ticket}\n\nFollow the instructions at ${hubUrl}/skill.md to complete the registration.`;
+              const prompt = `Please join the HXA-Connect organization "${orgName}" using the following credentials:\n\n- Hub URL: ${hubUrl}\n- Org Name: ${orgName}\n- Org ID: ${orgId}\n- Registration Ticket: ${result.ticket}\n\nFollow the instructions at ${hubUrl}/skill.md to complete the registration.`;
               return (
                 <>
                   <div className="bg-white/[0.03] border border-hxa-border rounded-[10px] p-4">
