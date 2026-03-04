@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.1] - 2026-03-04
+
+### Fixed
+- **Dockerfile**: Add web-next dashboard build stage — embedded dashboard was missing from Docker image (#128)
+- Remove legacy `web/` directory (replaced by `web-next/`) (#127)
+
+### Added
+- Sub-path deployment guide in README (`NEXT_PUBLIC_BASE_PATH` build arg + Caddy example) (#129)
+
 ## [1.3.0] - 2026-03-04
 
 ### Added
