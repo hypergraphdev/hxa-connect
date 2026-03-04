@@ -18,10 +18,14 @@ interface ThreadViewProps {
   wsThread?: Thread;
   /** Thread status change from WS (for updating composer state) */
   wsThreadStatusChange?: { thread_id: string; to: ThreadStatus };
+  /** Participant joined/left events from WS (accumulated array) */
+  wsParticipantEvents?: Array<{ thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left' }>;
+  /** Bot online/offline status events from WS (accumulated array) */
+  wsBotStatusEvents?: Array<{ bot_id: string; bot_name: string; online: boolean }>;
   onOpenArtifacts?: () => void;
 }
 
-export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChange, onOpenArtifacts }: ThreadViewProps) {
+export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChange, wsParticipantEvents, wsBotStatusEvents, onOpenArtifacts }: ThreadViewProps) {
   const { session } = useSession();
   const [thread, setThread] = useState<Thread | null>(null);
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
@@ -114,6 +118,54 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       setThread((prev) => prev ? { ...prev, status: wsThreadStatusChange.to } : prev);
     }
   }, [wsThreadStatusChange, threadId]);
+
+  // Handle WS participant join/leave (process all queued events)
+  const participantProcessed = useRef(0);
+  useEffect(() => {
+    if (!wsParticipantEvents?.length) return;
+    const unprocessed = wsParticipantEvents.slice(participantProcessed.current);
+    if (!unprocessed.length) return;
+    participantProcessed.current = wsParticipantEvents.length;
+
+    for (const evt of unprocessed) {
+      if (evt.thread_id !== threadId) continue;
+      setThread((prev) => {
+        if (!prev) return prev;
+        const participants = prev.participants ?? [];
+        if (evt.action === 'joined') {
+          if (participants.some((p) => p.bot_id === evt.bot_id)) return prev;
+          const updated = [...participants, { bot_id: evt.bot_id, name: evt.bot_name }];
+          return { ...prev, participants: updated, participant_count: updated.length };
+        } else {
+          const updated = participants.filter((p) => p.bot_id !== evt.bot_id);
+          return { ...prev, participants: updated, participant_count: updated.length };
+        }
+      });
+    }
+  }, [wsParticipantEvents, threadId]);
+
+  // Handle WS bot online/offline status changes (process all queued events)
+  const botStatusProcessed = useRef(0);
+  useEffect(() => {
+    if (!wsBotStatusEvents?.length) return;
+    const unprocessed = wsBotStatusEvents.slice(botStatusProcessed.current);
+    if (!unprocessed.length) return;
+    botStatusProcessed.current = wsBotStatusEvents.length;
+
+    for (const evt of unprocessed) {
+      setThread((prev) => {
+        if (!prev?.participants) return prev;
+        const hasBot = prev.participants.some((p) => p.bot_id === evt.bot_id);
+        if (!hasBot) return prev;
+        return {
+          ...prev,
+          participants: prev.participants.map((p) =>
+            p.bot_id === evt.bot_id ? { ...p, online: evt.online } : p
+          ),
+        };
+      });
+    }
+  }, [wsBotStatusEvents]);
 
   // Load older messages
   async function loadOlder() {

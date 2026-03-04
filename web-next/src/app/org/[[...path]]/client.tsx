@@ -241,10 +241,49 @@ export default function OrgDashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated]);
 
+  // Helper to update a thread in the list and sync the active view if it matches
+  function updateThread(threadId: string, updater: (t: OrgThread) => OrgThread) {
+    setThreads(prev => prev.map(t => t.id === threadId ? updater(t) : t));
+    setView(prev => {
+      if (prev.type === 'thread' && prev.thread.id === threadId) {
+        return { ...prev, thread: updater(prev.thread) };
+      }
+      return prev;
+    });
+  }
+
   function handleWsEvent(evt: { type: string; [key: string]: unknown }) {
     if (evt.type === 'bot_online' || evt.type === 'bot_offline') {
       const botData = evt.bot as { id: string; name: string };
-      setBots(prev => prev.map(b => b.id === botData.id ? { ...b, online: evt.type === 'bot_online' } : b));
+      const isOnline = evt.type === 'bot_online';
+      setBots(prev => prev.map(b => b.id === botData.id ? { ...b, online: isOnline } : b));
+      // Update participant online status in all threads that include this bot
+      setThreads(prev => prev.map(t => {
+        if (!t.participants?.some(p => p.bot_id === botData.id)) return t;
+        return { ...t, participants: t.participants!.map(p => p.bot_id === botData.id ? { ...p, online: isOnline } : p) };
+      }));
+      // Also update the active thread view
+      setView(prev => {
+        if (prev.type !== 'thread' || !prev.thread.participants?.some(p => p.bot_id === botData.id)) return prev;
+        return { ...prev, thread: { ...prev.thread, participants: prev.thread.participants!.map(p => p.bot_id === botData.id ? { ...p, online: isOnline } : p) } };
+      });
+    }
+    if (evt.type === 'thread_participant') {
+      const tid = evt.thread_id as string;
+      const botId = evt.bot_id as string;
+      const botName = evt.bot_name as string;
+      const action = evt.action as 'joined' | 'left';
+      updateThread(tid, t => {
+        const participants = t.participants ?? [];
+        if (action === 'joined') {
+          if (participants.some(p => p.bot_id === botId)) return t;
+          const updated = [...participants, { bot_id: botId, name: botName, joined_at: new Date().toISOString() }];
+          return { ...t, participants: updated, participant_count: updated.length };
+        } else {
+          const updated = participants.filter(p => p.bot_id !== botId);
+          return { ...t, participants: updated, participant_count: updated.length };
+        }
+      });
     }
     if (evt.type === 'thread_created') {
       const thread = evt.thread as OrgThread;
@@ -253,7 +292,7 @@ export default function OrgDashboard() {
     if (evt.type === 'thread_status_changed') {
       const tid = evt.thread_id as string;
       const to = evt.to as string;
-      setThreads(prev => prev.map(t => t.id === tid ? { ...t, status: to } : t));
+      updateThread(tid, t => ({ ...t, status: to }));
     }
   }
 

@@ -46,6 +46,8 @@ export interface WsEventState {
   wsArtifacts: Artifact[];
   wsThread: Thread | undefined;
   wsThreadStatusChange: { thread_id: string; to: ThreadStatus } | undefined;
+  wsParticipantEvents: Array<{ thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left' }>;
+  wsBotStatusEvents: Array<{ bot_id: string; bot_name: string; online: boolean }>;
   wsDmMessages: DmMessage[];
   wsNewChannels: Channel[];
 }
@@ -57,6 +59,8 @@ const WsEventContext = createContext<WsEventState>({
   wsArtifacts: [],
   wsThread: undefined,
   wsThreadStatusChange: undefined,
+  wsParticipantEvents: [],
+  wsBotStatusEvents: [],
   wsDmMessages: [],
   wsNewChannels: [],
 });
@@ -95,6 +99,8 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   const [wsThread, setWsThread] = useState<Thread | undefined>();
   const [wsDmMessages, setWsDmMessages] = useState<DmMessage[]>([]);
   const [wsThreadStatusChange, setWsThreadStatusChange] = useState<{ thread_id: string; to: ThreadStatus } | undefined>();
+  const [wsParticipantEvents, setWsParticipantEvents] = useState<WsEventState['wsParticipantEvents']>([]);
+  const [wsBotStatusEvents, setWsBotStatusEvents] = useState<WsEventState['wsBotStatusEvents']>([]);
   const [wsNewChannels, setWsNewChannels] = useState<Channel[]>([]);
 
   const handleWsEvent = useCallback((event: WsEvent) => {
@@ -129,7 +135,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         setWsArtifacts((prev) => [...prev, event.artifact]);
         break;
       case 'thread_participant':
-        // Could refresh thread detail, for now just note it
+        setWsParticipantEvents((prev) => [...prev, { thread_id: event.thread_id, bot_id: event.bot_id, bot_name: event.bot_name, action: event.action }]);
         break;
       case 'message':
         setWsDmMessages((prev) => [...prev, event.message]);
@@ -139,7 +145,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         break;
       case 'bot_online':
       case 'bot_offline':
-        // Bot status tracked for future bot list feature
+        setWsBotStatusEvents((prev) => [...prev, { bot_id: event.bot.id, bot_name: event.bot.name, online: event.type === 'bot_online' }]);
         break;
     }
   }, []);
@@ -209,7 +215,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       <DashNavContext value={{ ...navRoute, navigate }}>
         <WsEventContext value={{
           wsConnected, wsThreads, wsMessages, wsArtifacts, wsThread,
-          wsThreadStatusChange, wsDmMessages, wsNewChannels,
+          wsThreadStatusChange, wsParticipantEvents, wsBotStatusEvents, wsDmMessages, wsNewChannels,
         }}>
           <div className="fixed inset-0 flex flex-col animate-fade-in">
             <Header onMenuToggle={() => setSidebarOpen((o) => !o)} wsConnected={wsConnected} />

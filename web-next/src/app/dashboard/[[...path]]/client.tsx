@@ -34,7 +34,7 @@ function WelcomeView() {
 
 function ThreadSection({ id }: { id?: string }) {
   const [artifactsOpen, setArtifactsOpen] = useState(false);
-  const { wsMessages, wsArtifacts, wsThread, wsThreadStatusChange } = useWsEvents();
+  const { wsMessages, wsArtifacts, wsThread, wsThreadStatusChange, wsParticipantEvents, wsBotStatusEvents } = useWsEvents();
 
   if (!id) {
     return (
@@ -52,6 +52,8 @@ function ThreadSection({ id }: { id?: string }) {
         wsMessages={wsMessages}
         wsThread={wsThread}
         wsThreadStatusChange={wsThreadStatusChange}
+        wsParticipantEvents={wsParticipantEvents}
+        wsBotStatusEvents={wsBotStatusEvents}
         onOpenArtifacts={() => setArtifactsOpen((o) => !o)}
       />
       <ArtifactPanel
