@@ -26,6 +26,8 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
   const onEventRef = useRef(onEvent);
   const onStatusRef = useRef(onStatusChange);
   const onSessionExpiredRef = useRef(onSessionExpired);
+  // Generation counter to prevent stale async connect() from overwriting a newer connection
+  const generationRef = useRef(0);
 
   // Keep refs current without re-triggering effect
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
@@ -35,20 +37,28 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
 
   const connect = useCallback(async () => {
     if (!enabledRef.current) return;
+    // Increment generation so any in-flight connect() becomes stale
+    const gen = ++generationRef.current;
+
     // Close any existing connection
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.close();
+      wsRef.current = null;
     }
 
     try {
       const { ticket } = await api.getWsTicket();
+      // Abort if a newer connect() was started while we were fetching the ticket
+      if (gen !== generationRef.current) return;
+
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       // WS endpoint is at /ws (not /ui/ws). Prepend base path for proxy-prefix deployments.
       const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
       const ws = new WebSocket(`${proto}//${location.host}${basePath}/ws?ticket=${ticket}`);
 
       ws.onopen = () => {
+        if (gen !== generationRef.current) { ws.close(); return; }
         retriesRef.current = 0;
         onStatusRef.current?.(true);
       };
@@ -61,20 +71,23 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
       };
 
       ws.onclose = (e) => {
-        onStatusRef.current?.(false);
-        wsRef.current = null;
+        // Only update status if this is still the active connection
+        if (gen === generationRef.current) {
+          onStatusRef.current?.(false);
+          wsRef.current = null;
 
-        // 4001 = auth failure, 4002 = session expired/revoked — don't reconnect
-        if (e.code === 4001 || e.code === 4002) {
-          onSessionExpiredRef.current?.();
-          return;
-        }
+          // 4001 = auth failure, 4002 = session expired/revoked — don't reconnect
+          if (e.code === 4001 || e.code === 4002) {
+            onSessionExpiredRef.current?.();
+            return;
+          }
 
-        if (enabledRef.current) {
-          // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-          const delay = Math.min(1000 * 2 ** retriesRef.current, 30000);
-          retriesRef.current++;
-          setTimeout(connect, delay);
+          if (enabledRef.current) {
+            // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+            const delay = Math.min(1000 * 2 ** retriesRef.current, 30000);
+            retriesRef.current++;
+            setTimeout(connect, delay);
+          }
         }
       };
 
@@ -82,6 +95,8 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
 
       wsRef.current = ws;
     } catch (err) {
+      // Abort if stale
+      if (gen !== generationRef.current) return;
       // Ticket fetch failed — check if it's a 401 (session expired)
       if (err instanceof api.ApiError && err.status === 401) {
         onSessionExpiredRef.current?.();
@@ -102,11 +117,14 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
     }
     return () => {
       enabledRef.current = false;
+      // Increment generation to invalidate any in-flight connect()
+      generationRef.current++;
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;
       }
+      onStatusRef.current?.(false);
     };
   }, [enabled, connect]);
 }

@@ -106,6 +106,10 @@ export class HubWS implements WsHub {
           subscriptions: new Set(),
         };
         this.clients.add(client);
+        // Track session-based bot connections so close handler can decrement correctly
+        if (client.botId) {
+          incrementBotConnections(client.botId);
+        }
         this.setupHandlers(client);
         return;
       }
@@ -374,8 +378,8 @@ export class HubWS implements WsHub {
         if (client.sessionId) {
           const session = await this.sessionStore.get(client.sessionId);
           if (!session) {
+            // Let the close event handler clean up (decrement bot connections, etc.)
             client.ws.close(4002, 'Session expired');
-            this.clients.delete(client);
           }
         }
       }
@@ -388,8 +392,8 @@ export class HubWS implements WsHub {
   disconnectBySessionId(sessionId: string): void {
     for (const client of [...this.clients]) {
       if (client.sessionId === sessionId) {
+        // Let the close event handler clean up (decrement bot connections, etc.)
         client.ws.close(4002, 'Session revoked');
-        this.clients.delete(client);
       }
     }
   }
@@ -398,8 +402,8 @@ export class HubWS implements WsHub {
   disconnectByRole(role: SessionRole, orgId?: string): void {
     for (const client of [...this.clients]) {
       if (client.role === role && (!orgId || client.orgId === orgId)) {
+        // Let the close event handler clean up (decrement bot connections, etc.)
         client.ws.close(4002, 'Credential rotated');
-        this.clients.delete(client);
       }
     }
   }
@@ -408,8 +412,8 @@ export class HubWS implements WsHub {
   disconnectByBotId(botId: string): void {
     for (const client of [...this.clients]) {
       if (client.botId === botId) {
+        // Let the close event handler clean up (decrement bot connections, etc.)
         client.ws.close(4002, 'Token regenerated');
-        this.clients.delete(client);
       }
     }
   }
@@ -418,8 +422,8 @@ export class HubWS implements WsHub {
   disconnectSessionClientsByBotId(botId: string): void {
     for (const client of [...this.clients]) {
       if (client.botId === botId && client.sessionId) {
+        // Let the close event handler clean up (decrement bot connections, etc.)
         client.ws.close(4002, 'Session evicted');
-        this.clients.delete(client);
       }
     }
   }

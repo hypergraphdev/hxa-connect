@@ -231,7 +231,12 @@ export default function OrgDashboard() {
     connect();
     return () => {
       clearTimeout(reconnectTimer);
-      if (ws) ws.close();
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+      wsRef.current = null;
+      setWsConnected(false);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authenticated]);
@@ -736,10 +741,13 @@ function ChannelView({ channelId, label, onBack }: {
       const items = isLegacy ? raw : (raw.items || (raw as unknown as { messages: OrgChannelMessage[] }).messages || []);
       // Plain array (legacy path) — assume more exist if we got exactly limit items
       const more = isLegacy ? items.length >= 50 : (raw.has_more ?? false);
+      // Legacy path returns chronological (oldest first) — use as-is.
+      // Paginated path returns newest first — reverse to chronological.
+      const chronological = isLegacy ? items : [...items].reverse();
       if (before) {
-        setMessages(prev => [...[...items].reverse(), ...prev]);
+        setMessages(prev => [...chronological, ...prev]);
       } else {
-        setMessages([...items].reverse());
+        setMessages(chronological);
       }
       setHasMore(more);
       // Cursor = oldest message ID for "before" pagination
@@ -825,10 +833,13 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
       const items = isLegacy ? raw : (raw.items || (raw as unknown as { messages: OrgThreadMessage[] }).messages || []);
       // Plain array (legacy path) — assume more exist if we got exactly limit items
       const more = isLegacy ? items.length >= 50 : (raw.has_more ?? false);
+      // Legacy path returns chronological (oldest first) — use as-is.
+      // Paginated path returns newest first — reverse to chronological.
+      const chronological = isLegacy ? items : [...items].reverse();
       if (before) {
-        setMessages(prev => [...[...items].reverse(), ...prev]);
+        setMessages(prev => [...chronological, ...prev]);
       } else {
-        setMessages([...items].reverse());
+        setMessages(chronological);
       }
       setHasMore(more);
       // Cursor = oldest message ID for "before" pagination

@@ -41,7 +41,12 @@ export async function getSession(): Promise<RawSession> {
 }
 
 export async function logout(): Promise<void> {
-  await fetch(`${BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' });
+  try {
+    await request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
+  } catch {
+    // Server-side logout failed — still clear client state.
+    // The cookie will eventually expire on its own.
+  }
 }
 
 // ─── Threads ───

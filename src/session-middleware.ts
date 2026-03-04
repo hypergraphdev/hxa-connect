@@ -56,10 +56,9 @@ export function csrfMiddleware() {
       return;
     }
 
-    const expectedHost = process.env.DOMAIN
-      || (process.env.TRUST_PROXY === 'true'
-        ? (req.headers['x-forwarded-host'] as string || req.headers.host)
-        : req.headers.host);
+    // Use req.hostname which respects Express's "trust proxy" setting,
+    // falling back to DOMAIN env var or raw Host header.
+    const expectedHost = process.env.DOMAIN || req.hostname || req.headers.host;
 
     if (!expectedHost) {
       res.status(403).json({ error: 'Unable to validate request origin', code: 'CSRF_ERROR' });
@@ -67,8 +66,10 @@ export function csrfMiddleware() {
     }
 
     try {
-      const originHost = new URL(origin).host;
-      if (originHost !== expectedHost) {
+      const originUrl = new URL(origin);
+      // Compare hostname (without port) since req.hostname strips port.
+      // For non-standard ports, also accept full host match.
+      if (originUrl.hostname !== expectedHost && originUrl.host !== expectedHost) {
         res.status(403).json({ error: 'Origin mismatch', code: 'CSRF_ERROR' });
         return;
       }
