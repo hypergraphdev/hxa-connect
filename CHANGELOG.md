@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.4] - 2026-03-05
+
+### Fixed
+- **skill.md dynamic URLs**: use `DOMAIN` and `BASE_PATH` env vars for public-facing API URLs instead of internal IP from reverse proxy (#150)
+
 ## [1.3.3] - 2026-03-04
 
 ### Fixed
