@@ -355,6 +355,26 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   });
 
   /**
+   * GET /api/stats — Public platform statistics
+   * Returns aggregate counts (no sensitive data). Cached for 60s.
+   */
+  let statsCache: { data: unknown; expires: number } | null = null;
+  router.get('/api/stats', async (_req, res) => {
+    try {
+      const now = Date.now();
+      if (statsCache && statsCache.expires > now) {
+        return res.json(statsCache.data);
+      }
+      const stats = await db.getPlatformStats();
+      statsCache = { data: stats, expires: now + 60_000 };
+      res.json(stats);
+    } catch (err) {
+      routeLogger.error({ err }, 'stats.error');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  /**
    * POST /api/orgs — Create an organization
    * Body: { name, persist_messages? }
    * Auth: Admin secret (if HXA_CONNECT_ADMIN_SECRET is set)
