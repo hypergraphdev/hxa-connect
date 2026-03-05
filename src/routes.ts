@@ -1798,7 +1798,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const messages = await db.getThreadMessages(thread.id, limit, before, since);
     const enriched = await Promise.all(messages.map(async (m) => {
       const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+      const reply_to_message = await buildReplyContext(db, m);
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown', ...(reply_to_message && { reply_to_message }) };
     }));
 
     res.json(enriched.reverse());
@@ -2733,7 +2734,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const messages = await db.getThreadMessages(thread.id, limit, before, since);
     const enriched = await Promise.all(messages.map(async (m) => {
       const sender = m.sender_id ? await db.getBotById(m.sender_id) : undefined;
-      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown' };
+      const reply_to_message = await buildReplyContext(db, m);
+      return { ...enrichThreadMessage(m), sender_name: sender?.name || 'unknown', ...(reply_to_message && { reply_to_message }) };
     }));
 
     res.json(enriched.reverse());
