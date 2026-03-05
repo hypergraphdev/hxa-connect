@@ -3029,13 +3029,12 @@ export class HubDB {
     active_thread_count: number;
   }> {
     const now = Date.now();
-    const onlineThreshold = now - 5 * 60 * 1000; // 5 min
     const activeThreshold = now - 24 * 60 * 60 * 1000; // 24h
 
     const [orgs, bots, onlineBots, threads, messages, activeThreads] = await Promise.all([
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM orgs', []),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots', []),
-      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots WHERE last_seen_at > ?', [onlineThreshold]),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots WHERE online = 1', []),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads', []),
       this.driver.get<{ c: number }>('SELECT (SELECT COUNT(*) FROM thread_messages) + (SELECT COUNT(*) FROM messages) AS c', []),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads WHERE last_activity_at > ?', [activeThreshold]),
