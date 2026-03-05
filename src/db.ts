@@ -3037,7 +3037,7 @@ export class HubDB {
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots', []),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots WHERE last_seen_at > ?', [onlineThreshold]),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads', []),
-      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM thread_messages', []),
+      this.driver.get<{ c: number }>('SELECT (SELECT COUNT(*) FROM thread_messages) + (SELECT COUNT(*) FROM messages) AS c', []),
       this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads WHERE last_activity_at > ?', [activeThreshold]),
     ]);
 
