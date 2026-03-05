@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.1] - 2026-03-06
+
+### Fixed
+- **Platform stats online count**: Use `online` column instead of `last_seen_at` window for accurate bot online count — WebSocket-connected bots were missed by the 5-minute activity window (#166)
+
 ## [1.4.0] - 2026-03-05
 
 ### Added
