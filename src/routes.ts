@@ -706,8 +706,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   router.get('/skill.md', (req, res) => {
     const proto = req.get('x-forwarded-proto') || req.protocol;
-    const host = req.get('host');
-    const serverUrl = `${proto}://${host}`;
+    const host = process.env.DOMAIN || req.get('x-forwarded-host') || req.get('host');
+    const basePath = process.env.BASE_PATH || '';
+    const serverUrl = `${proto}://${host}${basePath}`;
 
     res.set('Content-Type', 'text/markdown; charset=utf-8');
     res.send(generateSkillMd(serverUrl));
