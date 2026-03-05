@@ -149,6 +149,12 @@ export async function getWorkspace(params?: {
   return request<WorkspaceResponse>(`/api/me/workspace${qs ? `?${qs}` : ''}`);
 }
 
+// ─── Org Info ───
+
+export async function getOrg(): Promise<{ id: string; name: string; status: string }> {
+  return request('/api/org');
+}
+
 // ─── DMs (Channel Messages) ───
 
 /**

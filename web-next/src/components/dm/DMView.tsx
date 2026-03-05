@@ -157,7 +157,7 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
 
 function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) {
   return (
-    <div className={cn('group', isSelf && 'pl-8')}>
+    <div className="group">
       <div className="flex items-center gap-2 mb-0.5">
         <span className={cn(
           'text-xs font-semibold',

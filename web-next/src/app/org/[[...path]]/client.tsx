@@ -75,12 +75,12 @@ function SecretModal({ title, secret, onClose }: { title: string; secret: string
 
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
-    active: 'bg-hxa-green/20 text-hxa-green border-hxa-green/30',
+    active: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     open: 'bg-hxa-blue/20 text-hxa-blue border-hxa-blue/30',
-    blocked: 'bg-hxa-red/20 text-hxa-red border-hxa-red/30',
-    reviewing: 'bg-hxa-purple/20 text-hxa-purple border-hxa-purple/30',
-    resolved: 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/30',
-    closed: 'bg-hxa-text-dim/20 text-hxa-text-dim border-hxa-text-dim/30',
+    blocked: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+    reviewing: 'bg-hxa-purple/20 text-purple-400 border-purple-500/30',
+    resolved: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+    closed: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
     archived: 'bg-hxa-text-dim/20 text-hxa-text-dim border-hxa-text-dim/30',
   };
   return (
@@ -1025,17 +1025,17 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
             const isHuman = provenance?.authored_by === 'human';
             const ownerName = (msg.metadata?.provenance as { owner_name?: string } | undefined)?.owner_name;
             return (
-              <div key={msg.id} className="group max-w-[80%] max-md:max-w-[90%]">
-                <div className="flex items-baseline gap-2 text-xs mb-0.5">
-                  <span className="font-semibold text-hxa-accent">{msg.sender_name}</span>
+              <div key={msg.id} className="group">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-xs font-semibold text-hxa-text-dim">{msg.sender_name}</span>
                   {isHuman && (
-                    <span className="px-1 py-0.5 text-[9px] bg-hxa-amber/20 text-hxa-amber rounded border border-hxa-amber/30">
-                      {ownerName || 'human'}
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-hxa-amber/20 text-amber-400 border border-amber-500/30">
+                      {ownerName || 'Human'}
                     </span>
                   )}
-                  <span className="text-hxa-text-muted">{timeAgo(msg.created_at)}</span>
+                  <span className="text-[10px] text-hxa-text-muted">{timeAgo(msg.created_at)}</span>
                 </div>
-                <div className="text-sm text-hxa-text whitespace-pre-wrap">{renderParts(msg)}</div>
+                <div className="rounded-lg px-3 py-2 text-sm leading-relaxed bg-white/[0.03] border border-white/[0.06]">{renderParts(msg)}</div>
               </div>
             );
           })}
@@ -1045,7 +1045,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
 
       {/* Artifacts side panel */}
       {artifactsOpen && (
-        <div className="w-[340px] shrink-0 border-l border-hxa-border bg-[rgba(10,15,26,0.6)] flex flex-col max-md:fixed max-md:inset-0 max-md:w-full max-md:z-[1000]">
+        <div className="w-[340px] shrink-0 border-l border-hxa-border bg-[rgba(10,15,26,0.6)] flex flex-col max-md:fixed max-md:inset-0 max-md:w-full max-md:z-[1000] max-md:bg-[#0a0f1a]">
           <div className="flex items-center justify-between px-4 py-3 border-b border-hxa-border shrink-0">
             <h3 className="text-sm font-semibold text-hxa-text flex items-center gap-1.5">
               <FileCode size={14} className="text-hxa-accent" />
@@ -1074,10 +1074,14 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
                     </div>
                   </summary>
                   {art.content && (
-                    <div className="border-t border-hxa-border px-3 py-2">
-                      <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto max-h-96 whitespace-pre-wrap">
-                        {art.content}
-                      </pre>
+                    <div className="border-t border-hxa-border px-3 py-2 max-h-96 overflow-y-auto">
+                      {art.type === 'markdown' ? (
+                        <div className="text-xs"><MarkdownContent content={art.content} /></div>
+                      ) : (
+                        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+                          {art.content}
+                        </pre>
+                      )}
                     </div>
                   )}
                 </details>

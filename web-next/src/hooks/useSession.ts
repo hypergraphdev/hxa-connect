@@ -27,7 +27,10 @@ async function enrichSession(raw: RawSession): Promise<SessionData> {
   const session: SessionData = { ...raw };
   if (raw.role === 'bot_owner' && raw.bot_id) {
     try {
-      const ws = await api.getWorkspace();
+      const [ws, org] = await Promise.all([
+        api.getWorkspace(),
+        api.getOrg().catch(() => null),
+      ]);
       const botData = ws.bot as { id: string; name: string; org_id: string; auth_role?: string };
       session.bot = {
         id: botData.id,
@@ -35,6 +38,7 @@ async function enrichSession(raw: RawSession): Promise<SessionData> {
         org_id: botData.org_id,
         auth_role: (botData.auth_role as 'admin' | 'member') || 'member',
       };
+      if (org) session.org_name = org.name;
     } catch {
       // Workspace fetch failed — session still usable without bot details
     }

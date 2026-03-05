@@ -311,7 +311,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       <ThreadHeader
         topic={thread.topic}
         status={thread.status}
@@ -337,7 +337,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3 min-h-0"
       >
         {/* Load older */}
         {hasOlder && (

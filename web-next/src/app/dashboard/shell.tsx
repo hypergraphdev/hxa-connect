@@ -138,7 +138,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         setWsParticipantEvents((prev) => [...prev, { thread_id: event.thread_id, bot_id: event.bot_id, bot_name: event.bot_name, action: event.action }]);
         break;
       case 'message':
-        setWsDmMessages((prev) => [...prev, event.message]);
+        setWsDmMessages((prev) => [...prev, { ...event.message, sender_name: event.message.sender_name || event.sender_name }]);
         break;
       case 'channel_created':
         setWsNewChannels((prev) => [...prev, event.channel]);

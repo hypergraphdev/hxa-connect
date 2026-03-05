@@ -21,52 +21,43 @@ export function Header({ onMenuToggle, wsConnected }: HeaderProps) {
   }
 
   return (
-    <header className="glass bg-[rgba(10,15,26,0.8)] border-b border-hxa-border flex items-center px-5 gap-4 h-14 shrink-0 z-10">
+    <header className="glass bg-[rgba(10,15,26,0.8)] border-b border-hxa-border flex items-center px-5 max-md:px-3 gap-4 max-md:gap-2 h-14 max-md:h-12 shrink-0 z-10">
       {/* Mobile menu button */}
       <button
         onClick={onMenuToggle}
-        className="md:hidden border border-hxa-border text-hxa-text p-1.5 rounded-lg hover:bg-white/5"
+        className="md:hidden text-hxa-text-dim hover:text-hxa-text p-1"
       >
-        <Menu size={18} />
+        <Menu size={20} />
       </button>
 
       {/* Brand */}
       <div className="flex items-center gap-2 text-hxa-text font-semibold">
         <img src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/images/logo.png`} alt="HXA-Connect" className="h-5" />
-        <span>HXA-Connect</span>
+        <span className="font-semibold text-[15px] max-md:max-w-[100px] max-md:truncate">{session?.org_name || 'HXA-Connect'}</span>
       </div>
-
-      {/* WS status */}
-      {wsConnected !== undefined && (
-        <span className="flex items-center gap-1 text-[10px] text-hxa-text-muted">
-          {wsConnected ? (
-            <>
-              <span className="w-1.5 h-1.5 rounded-full bg-hxa-green shadow-[0_0_4px_currentColor] text-hxa-green" />
-              <span className="hidden sm:inline">Live</span>
-            </>
-          ) : (
-            <>
-              <span className="w-1.5 h-1.5 rounded-full bg-hxa-red shadow-[0_0_4px_currentColor] text-hxa-red" />
-              <span className="hidden sm:inline">Offline</span>
-            </>
-          )}
-        </span>
-      )}
 
       {/* Spacer */}
       <div className="flex-1" />
 
+      {/* WS status — hidden on mobile */}
+      {wsConnected !== undefined && (
+        <span className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-hxa-border text-xs font-mono">
+          <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-hxa-green animate-pulse' : 'bg-hxa-red'}`} />
+          <span className="text-hxa-text-dim">{wsConnected ? 'Connected' : 'Disconnected'}</span>
+        </span>
+      )}
+
       {/* Session info */}
       {session && (
-        <div className="flex items-center gap-3">
-          <div className="text-sm font-mono flex items-center gap-2 text-hxa-text-dim bg-black/30 px-3 py-1.5 rounded-full border border-hxa-border">
-            <span className="w-2 h-2 rounded-full inline-block shadow-[0_0_6px_currentColor] bg-hxa-green text-hxa-green" />
-            <span className="hidden sm:inline">{session.owner_name}</span>
-            <span className="text-xs text-hxa-text-muted">{session.bot?.name ?? ''}</span>
+        <div className="flex items-center gap-2 max-md:gap-1.5">
+          <div className="text-xs font-mono flex items-center gap-1.5 text-hxa-text-dim bg-black/30 px-2.5 py-1.5 rounded-full border border-hxa-border">
+            <span className="w-2 h-2 rounded-full inline-block shadow-[0_0_6px_currentColor] bg-hxa-green text-hxa-green shrink-0" />
+            <span className="truncate max-w-[60px] sm:max-w-none">{session.owner_name}</span>
+            <span className="text-hxa-text-muted truncate max-w-[80px] sm:max-w-none">{session.bot?.name ?? ''}</span>
           </div>
           <button
             onClick={() => setShowLogoutConfirm(true)}
-            className="border border-white/15 text-hxa-text-dim text-xs px-2.5 py-1.5 rounded-md hover:border-hxa-red hover:text-hxa-red transition-colors inline-flex items-center gap-1.5"
+            className="text-hxa-text-dim hover:text-hxa-red transition-colors inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"
           >
             <LogOut size={14} />
             <span className="hidden sm:inline">Logout</span>

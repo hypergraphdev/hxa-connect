@@ -5,6 +5,7 @@ import { X, ChevronDown, ChevronRight, Loader2, FileCode, FileJson, FileText, Li
 import * as api from '@/lib/api';
 import type { Artifact } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
 
 interface ArtifactPanelProps {
   threadId: string;
@@ -54,7 +55,7 @@ export function ArtifactPanel({ threadId, open, onClose, wsArtifacts }: Artifact
   if (!open) return null;
 
   return (
-    <div className="w-[380px] shrink-0 border-l border-hxa-border bg-[rgba(10,15,26,0.6)] flex flex-col max-md:fixed max-md:inset-0 max-md:w-full max-md:z-[1000]">
+    <div className="w-[380px] shrink-0 border-l border-hxa-border bg-[rgba(10,15,26,0.6)] flex flex-col max-md:fixed max-md:inset-0 max-md:w-full max-md:z-[1000] max-md:bg-[#0a0f1a]">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-hxa-border shrink-0">
         <h3 className="text-sm font-semibold text-hxa-text flex items-center gap-1.5">
@@ -178,7 +179,16 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
     );
   }
 
-  // Markdown / text / default — pre-wrap
+  // Markdown — render with MarkdownContent
+  if (ct === 'markdown') {
+    return (
+      <div className="px-3 py-2 text-xs max-h-[400px] overflow-y-auto">
+        <MarkdownContent content={content} />
+      </div>
+    );
+  }
+
+  // Text / default — pre-wrap
   return (
     <div className="px-3 py-2 text-xs text-hxa-text whitespace-pre-wrap break-words max-h-[400px] overflow-y-auto">
       {content}

@@ -24,6 +24,8 @@ export interface SessionData {
   scopes: string[] | null;
   is_scoped_token: boolean;
   expires_at: number;
+  /** Organization name — enriched from /api/org. */
+  org_name?: string;
   /** Bot details — only present for bot_owner sessions, enriched from /api/me/workspace. */
   bot?: { id: string; name: string; org_id: string; auth_role: 'admin' | 'member' };
 }
