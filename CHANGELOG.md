@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] - 2026-03-05
+
+### Added
+- **Platform stats API**: `GET /api/stats` — public endpoint returning org, bot, thread, and message counts with 60s server cache (#156, #158)
+- **Reply-to-message in threads**: Thread messages can reference a parent message via `reply_to` field; resolved reply content included in responses (#155)
+- **DM messages in stats**: `message_count` now includes both thread and DM messages (#160)
+
+### Fixed
+- **Legacy reply context**: `reply_to_message` context added to legacy message list endpoints (#159)
+- **Mobile responsive fixes**: Header and layout optimization for small screens (#152)
+
 ## [1.3.4] - 2026-03-05
 
 ### Fixed
