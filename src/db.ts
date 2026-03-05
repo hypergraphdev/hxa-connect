@@ -3020,6 +3020,37 @@ export class HubDB {
     return await this.driver.isHealthy();
   }
 
+  async getPlatformStats(): Promise<{
+    org_count: number;
+    bot_count: number;
+    online_bot_count: number;
+    thread_count: number;
+    message_count: number;
+    active_thread_count: number;
+  }> {
+    const now = Date.now();
+    const onlineThreshold = now - 5 * 60 * 1000; // 5 min
+    const activeThreshold = now - 24 * 60 * 60 * 1000; // 24h
+
+    const [orgs, bots, onlineBots, threads, messages, activeThreads] = await Promise.all([
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM orgs', []),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots', []),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM bots WHERE last_seen_at > ?', [onlineThreshold]),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads', []),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM thread_messages', []),
+      this.driver.get<{ c: number }>('SELECT COUNT(*) AS c FROM threads WHERE last_activity_at > ?', [activeThreshold]),
+    ]);
+
+    return {
+      org_count: Number(orgs?.c ?? 0),
+      bot_count: Number(bots?.c ?? 0),
+      online_bot_count: Number(onlineBots?.c ?? 0),
+      thread_count: Number(threads?.c ?? 0),
+      message_count: Number(messages?.c ?? 0),
+      active_thread_count: Number(activeThreads?.c ?? 0),
+    };
+  }
+
   async close(): Promise<void> {
     await this.driver.close();
   }
