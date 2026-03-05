@@ -1,5 +1,6 @@
 import { validateParts } from '../types.js';
 import type { ThreadStatus, CloseReason, ArtifactType } from '../types.js';
+import { buildReplyContext } from '../routes.js';
 import type { WsClient, WsHub } from './protocol.js';
 import {
   contentFromParts,
@@ -188,7 +189,7 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
     return;
   }
 
-  const { thread_id, content_type, parts, metadata } = data;
+  const { thread_id, content_type, parts, metadata, reply_to } = data;
 
   if (!thread_id || typeof thread_id !== 'string') {
     hub.sendError(client, 'thread_id is required', { ref });
@@ -259,6 +260,19 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
     }
   }
 
+  // Validate reply_to if provided
+  if (reply_to !== undefined && reply_to !== null) {
+    if (typeof reply_to !== 'string') {
+      hub.sendError(client, 'reply_to must be a string (message ID)', { ref });
+      return;
+    }
+    const parentMsg = await hub.db.getThreadMessageById(reply_to);
+    if (!parentMsg || parentMsg.thread_id !== thread.id) {
+      hub.sendError(client, 'reply_to message not found in this thread', { ref, code: 'NOT_FOUND' });
+      return;
+    }
+  }
+
   const threadParticipants = await hub.db.getParticipants(thread.id);
   const { mentions: mentionRefs, mentionAll } = await wsParseMentions(
     resolvedContent,
@@ -275,10 +289,12 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
     partsJson,
     mentionRefs ? JSON.stringify(mentionRefs) : null,
     mentionAll ? 1 : 0,
+    reply_to || null,
   );
 
   const bot = await hub.db.getBotById(client.botId!);
-  const enriched = { ...wsEnrichThreadMessage(message), sender_name: bot?.name || 'unknown' };
+  const replyContext = await buildReplyContext(hub.db, message);
+  const enriched = { ...wsEnrichThreadMessage(message), sender_name: bot?.name || 'unknown', ...(replyContext && { reply_to_message: replyContext }) };
 
   await hub.db.recordAudit(thread.org_id, client.botId!, 'message.send', 'thread_message', message.id, { thread_id: thread.id, via: 'ws' });
 

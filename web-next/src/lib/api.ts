@@ -98,11 +98,11 @@ export async function getThreadMessages(threadId: string, params?: {
   return request<MessageListResponse>(`/api/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
 }
 
-/** Backend expects content (string) + optional parts */
-export async function sendThreadMessage(threadId: string, content: string, parts?: Array<{ type: string; content: string }>): Promise<ThreadMessage> {
+/** Backend expects content (string) + optional parts + optional reply_to */
+export async function sendThreadMessage(threadId: string, content: string, opts?: { parts?: Array<{ type: string; content: string }>; reply_to?: string }): Promise<ThreadMessage> {
   return request<ThreadMessage>(`/api/threads/${threadId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ content, parts }),
+    body: JSON.stringify({ content, parts: opts?.parts, reply_to: opts?.reply_to }),
   });
 }
 

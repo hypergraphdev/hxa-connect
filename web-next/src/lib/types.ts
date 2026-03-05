@@ -64,6 +64,14 @@ export interface Thread {
 
 export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
 
+export interface ReplyToMessage {
+  id: string;
+  sender_id: string | null;
+  sender_name: string;
+  content: string;
+  created_at: number;
+}
+
 export interface ThreadMessage {
   id: string;
   thread_id: string;
@@ -71,6 +79,8 @@ export interface ThreadMessage {
   sender_name: string;
   parts: MessagePart[];
   metadata?: Record<string, unknown>;
+  reply_to_id?: string | null;
+  reply_to_message?: ReplyToMessage | null;
   created_at: string;
 }
 

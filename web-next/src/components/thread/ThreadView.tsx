@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Loader2, ChevronUp, Send, FileText } from 'lucide-react';
+import { Loader2, ChevronUp, Send, FileText, Reply, X } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadMessage, MessagePart, ThreadStatus } from '@/lib/types';
 import { cn, formatTime, safeHref } from '@/lib/utils';
@@ -37,6 +37,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [sending, setSending] = useState(false);
   const [mentionQuery, setMentionQuery] = useState<{ query: string; startIndex: number } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [replyTo, setReplyTo] = useState<ThreadMessage | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -61,6 +62,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setMessages([]);
     setCursor(undefined);
     setHasOlder(false);
+    setReplyTo(null);
     userScrolledUp.current = false;
 
     (async () => {
@@ -197,12 +199,13 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     if (!text || sending) return;
     setSending(true);
     try {
-      const msg = await api.sendThreadMessage(threadId, text);
+      const msg = await api.sendThreadMessage(threadId, text, replyTo ? { reply_to: replyTo.id } : undefined);
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
       });
       setComposerText('');
+      setReplyTo(null);
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
       requestAnimationFrame(() => scrollToBottom());
     } catch { /* toast in future */ }
@@ -354,7 +357,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} />
+          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => { setReplyTo(msg); textareaRef.current?.focus(); } : undefined} />
         ))}
 
         <div ref={messagesEndRef} />
@@ -362,8 +365,22 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
       {/* Composer */}
       {canSend && (
-        <div className="shrink-0 px-4 py-3 border-t border-hxa-border bg-[rgba(10,15,26,0.4)]">
-          <div className="relative flex gap-2 items-end">
+        <div className="shrink-0 border-t border-hxa-border bg-[rgba(10,15,26,0.4)]">
+          {/* Reply bar */}
+          {replyTo && (
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-hxa-border bg-white/[0.02]">
+              <Reply size={14} className="text-hxa-accent shrink-0" />
+              <div className="flex-1 min-w-0 text-xs text-hxa-text-dim truncate">
+                <span className="font-semibold text-hxa-text">{replyTo.sender_name}</span>
+                {': '}
+                {replyTo.parts?.[0]?.content?.slice(0, 100) || '...'}
+              </div>
+              <button onClick={() => setReplyTo(null)} className="text-hxa-text-muted hover:text-hxa-text shrink-0">
+                <X size={14} />
+              </button>
+            </div>
+          )}
+          <div className="relative flex gap-2 items-end px-4 py-3">
             {/* @mention popup */}
             {mentionQuery && filteredMentions.length > 0 && (
               <MentionPopup
@@ -411,13 +428,23 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
 // ─── Message Bubble ───
 
-function MessageBubble({ message, isSelf }: { message: ThreadMessage; isSelf: boolean }) {
+function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; isSelf: boolean; onReply?: () => void }) {
   const provenance = message.metadata?.provenance as Record<string, unknown> | undefined;
   const isHuman = provenance?.authored_by === 'human';
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
+  const reply = message.reply_to_message;
 
   return (
     <div className="group">
+      {/* Reply quote */}
+      {reply && (
+        <div className="flex items-center gap-1.5 mb-1 pl-2 border-l-2 border-hxa-accent/40">
+          <Reply size={10} className="text-hxa-text-muted shrink-0" />
+          <span className="text-[11px] font-semibold text-hxa-text-dim">{reply.sender_name}</span>
+          <span className="text-[11px] text-hxa-text-muted truncate">{reply.content.slice(0, 80)}{reply.content.length > 80 ? '...' : ''}</span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-2 mb-0.5">
         <span className={cn(
@@ -434,6 +461,12 @@ function MessageBubble({ message, isSelf }: { message: ThreadMessage; isSelf: bo
         <span className="text-[10px] text-hxa-text-muted">
           {formatTime(message.created_at)}
         </span>
+        {/* Reply button */}
+        {onReply && (
+          <button onClick={onReply} className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-muted hover:text-hxa-accent ml-auto" title="Reply">
+            <Reply size={12} />
+          </button>
+        )}
       </div>
 
       {/* Body */}
