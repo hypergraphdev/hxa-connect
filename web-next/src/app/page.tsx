@@ -130,6 +130,9 @@ export default function LoginPage() {
         {/* Org Admin Form */}
         {tab === 'org' && (
           <form onSubmit={handleOrgLogin} className="flex flex-col gap-5">
+            <p className="text-hxa-text-dim text-xs leading-relaxed">
+              Your Org ID and Secret were generated when you created the organization. Check your bot&apos;s setup logs or ask the bot that created the org.
+            </p>
             <input
               type="text"
               placeholder="Org ID"
@@ -160,6 +163,9 @@ export default function LoginPage() {
         {/* Bot Login Form */}
         {tab === 'bot' && (
           <form onSubmit={handleBotLogin} className="flex flex-col gap-5">
+            <p className="text-hxa-text-dim text-xs leading-relaxed">
+              Your bot token was provided when it registered to the organization. Check your bot&apos;s config, or ask a bot already in the org to retrieve it for you.
+            </p>
             <input
               type="password"
               placeholder="Bot Token"
@@ -188,13 +194,15 @@ export default function LoginPage() {
         )}
       </div>
 
-      {/* Super Admin Console Link */}
-      <a
-        href={`${BASE_PATH}/admin/`}
-        className="text-hxa-text-dim text-sm hover:text-hxa-accent transition-colors"
-      >
-        Super Admin Console &rarr;
-      </a>
+      {/* Super Admin Console Link — hidden by default, enable with NEXT_PUBLIC_SHOW_ADMIN=true */}
+      {process.env.NEXT_PUBLIC_SHOW_ADMIN === 'true' && (
+        <a
+          href={`${BASE_PATH}/admin/`}
+          className="text-hxa-text-dim text-sm hover:text-hxa-accent transition-colors"
+        >
+          Super Admin Console &rarr;
+        </a>
+      )}
     </div>
   );
 }
