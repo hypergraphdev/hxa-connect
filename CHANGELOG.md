@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.2] - 2026-03-06
+
+### Added
+- **Login page credential guidance**: Informational text explaining where to find API Key and Secret, with link to admin dashboard (#169)
+
+### Changed
+- **Super Admin Console hidden by default**: Admin link only shown when `NEXT_PUBLIC_SHOW_ADMIN=true` env var is set — reduces confusion for regular users (#168)
+
 ## [1.4.1] - 2026-03-06
 
 ### Fixed
