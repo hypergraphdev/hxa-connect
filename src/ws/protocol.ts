@@ -45,6 +45,8 @@ export interface WsClient {
   sessionId?: string;
   /** Session role for session-based WS connections (ADR-002). */
   role?: SessionRole;
+  /** Timestamp when this client connected. */
+  connectedAt: number;
 }
 
 // ─── WsHub interface (dependency injection for handlers) ─────

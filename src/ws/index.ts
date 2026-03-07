@@ -43,6 +43,18 @@ export class HubWS implements WsHub {
   private sessionHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private sessionStore: SessionStore | null = null;
   private startedAt = Date.now();
+  private recentConnections: number[] = [];
+
+  /** Track a new connection and prune entries older than 5 minutes. */
+  private trackConnection(): void {
+    const now = Date.now();
+    this.recentConnections.push(now);
+    // Prune on every insert to bound memory
+    if (this.recentConnections.length > 100) {
+      const fiveMinAgo = now - 300_000;
+      this.recentConnections = this.recentConnections.filter(t => t > fiveMinAgo);
+    }
+  }
 
   constructor(server: Server, db: HubDB, webhookManager: WebhookManager, config: HubConfig) {
     this.db = db;
@@ -104,8 +116,10 @@ export class HubWS implements WsHub {
           scopes: redeemedTicket.scopes ?? null,
           alive: true,
           subscriptions: new Set(),
+          connectedAt: Date.now(),
         };
         this.clients.add(client);
+        this.trackConnection();
         // Track session-based bot connections so close handler can decrement correctly
         if (client.botId) {
           incrementBotConnections(client.botId);
@@ -144,8 +158,10 @@ export class HubWS implements WsHub {
           scopes: null, // primary token = full access
           alive: true,
           subscriptions: new Set(),
+          connectedAt: Date.now(),
         };
         this.clients.add(client);
+        this.trackConnection();
         const connCount = incrementBotConnections(bot.id);
         await db.setBotOnline(bot.id, true);
 
@@ -195,8 +211,10 @@ export class HubWS implements WsHub {
             scopes: scopedToken.scopes, // scoped token = restricted access
             alive: true,
             subscriptions: new Set(),
+            connectedAt: Date.now(),
           };
           this.clients.add(client);
+          this.trackConnection();
           const scopedConnCount = incrementBotConnections(scopedBot.id);
           await db.setBotOnline(scopedBot.id, true);
           await db.touchBotToken(scopedToken.id);
@@ -429,16 +447,67 @@ export class HubWS implements WsHub {
   }
 
   /** O1: Return health stats for the /health endpoint */
-  getHealthStats(): { uptime_ms: number; connected_clients: number; connected_bots: number; ws_metrics: import('./metrics.js').WsMetrics } {
+  getHealthStats(): {
+    uptime_ms: number;
+    connected_clients: number;
+    connected_bots: number;
+    ws_metrics: import('./metrics.js').WsMetrics;
+    client_breakdown: {
+      by_type: { bot_token: number; session: number };
+      by_bot: Array<{ bot_id: string; count: number }>;
+      by_age: { under_1m: number; under_10m: number; under_1h: number; over_1h: number };
+      not_alive: number;
+      reconnect_rate_5m: number;
+    };
+  } {
+    const now = Date.now();
     const botIds = new Set<string>();
     for (const client of this.clients) {
       if (client.botId) botIds.add(client.botId);
     }
+
+    // Prune stale entries for accurate rate
+    const fiveMinAgo = now - 300_000;
+    this.recentConnections = this.recentConnections.filter(t => t > fiveMinAgo);
+
+    // Diagnostic breakdown
+    let botTokenCount = 0;
+    let sessionCount = 0;
+    let notAlive = 0;
+    const botConnCounts = new Map<string, number>();
+    let ageUnder1m = 0, ageUnder10m = 0, ageUnder1h = 0, ageOver1h = 0;
+
+    for (const client of this.clients) {
+      if (client.sessionId) sessionCount++;
+      else botTokenCount++;
+      if (!client.alive) notAlive++;
+      if (client.botId) {
+        botConnCounts.set(client.botId, (botConnCounts.get(client.botId) ?? 0) + 1);
+      }
+      const age = now - client.connectedAt;
+      if (age < 60_000) ageUnder1m++;
+      else if (age < 600_000) ageUnder10m++;
+      else if (age < 3_600_000) ageUnder1h++;
+      else ageOver1h++;
+    }
+
+    const topBots = [...botConnCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([bot_id, count]) => ({ bot_id, count }));
+
     return {
       uptime_ms: Date.now() - this.startedAt,
       connected_clients: this.clients.size,
       connected_bots: botIds.size,
       ws_metrics: getMetrics(),
+      client_breakdown: {
+        by_type: { bot_token: botTokenCount, session: sessionCount },
+        by_bot: topBots,
+        by_age: { under_1m: ageUnder1m, under_10m: ageUnder10m, under_1h: ageUnder1h, over_1h: ageOver1h },
+        not_alive: notAlive,
+        reconnect_rate_5m: this.recentConnections.length,
+      },
     };
   }
 

@@ -154,19 +154,33 @@ async function main() {
   // Wire session store to WS for session heartbeat validation (ADR-002)
   hubWs.setSessionStore(sessionStore);
 
-  // O1: Health endpoint (no auth, before router so it's always accessible)
-  app.get('/health', async (_req, res, next) => {
+  // O1: Health endpoint (before router so it's always accessible)
+  // Public: basic status only. Diagnostics (client_breakdown) require admin secret.
+  app.get('/health', async (req, res, next) => {
     try {
       const wsStats = hubWs.getHealthStats();
       const dbOk = await db.isHealthy();
       const status = dbOk ? 'ok' : 'degraded';
-      res.status(dbOk ? 200 : 503).json({
+
+      const authHeader = req.headers.authorization;
+      const isAdmin = config.admin_secret && authHeader === `Bearer ${config.admin_secret}`;
+
+      const response: Record<string, unknown> = {
         status,
         uptime_ms: wsStats.uptime_ms,
         connected_clients: wsStats.connected_clients,
         connected_bots: wsStats.connected_bots,
         db: dbOk ? 'ok' : 'error',
-      });
+      };
+
+      if (isAdmin) {
+        response.ws = {
+          ...wsStats.client_breakdown,
+          ws_metrics: wsStats.ws_metrics,
+        };
+      }
+
+      res.status(dbOk ? 200 : 503).json(response);
     } catch (err) {
       next(err);
     }
