@@ -282,9 +282,10 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   // Build mention candidates from thread participants
   const mentionCandidates = useMemo<MentionCandidate[]>(() => {
     if (!thread?.participants) return [];
-    return thread.participants
+    const participants = thread.participants
       .filter((p) => !!p.name)
       .map((p) => ({ id: p.bot_id, name: p.name!, online: p.online }));
+    return [{ id: '_all', name: 'all', isAll: true }, ...participants];
   }, [thread?.participants]);
 
   // Filtered candidates for current query

@@ -7,6 +7,7 @@ export interface MentionCandidate {
   id: string;
   name: string;
   online?: boolean;
+  isAll?: boolean;
 }
 
 interface MentionPopupProps {
@@ -51,11 +52,15 @@ export function MentionPopup({ candidates, query, selectedIndex, onSelect, onClo
             i === selectedIndex ? 'bg-hxa-accent/15 text-hxa-text' : 'text-hxa-text-dim hover:bg-white/[0.04]',
           )}
         >
-          <span className={cn(
-            'w-2 h-2 rounded-full shrink-0',
-            c.online ? 'bg-hxa-green shadow-[0_0_4px] text-hxa-green' : 'bg-hxa-text-muted/40',
-          )} />
-          <span className="truncate">{c.name}</span>
+          {c.isAll ? (
+            <span className="w-4 h-4 shrink-0 text-hxa-accent text-xs flex items-center justify-center">@</span>
+          ) : (
+            <span className={cn(
+              'w-2 h-2 rounded-full shrink-0',
+              c.online ? 'bg-hxa-green shadow-[0_0_4px] text-hxa-green' : 'bg-hxa-text-muted/40',
+            )} />
+          )}
+          <span className="truncate">{c.isAll ? 'all — notify everyone' : c.name}</span>
         </button>
       ))}
     </div>
