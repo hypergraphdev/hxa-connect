@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.5] - 2026-03-09
+
+### Added
+- **Reserved bot names**: Prevent registration of reserved names (`all`, `所有人`) and add `@所有人` as server-side alias for `@all` mention (#183)
+
+### Fixed
+- **Markdown in DM and admin channel views**: Render Markdown content in DM view and org admin channel view using shared `MarkdownContent` component (#182)
+- **Thread message ordering**: Fix messages appearing out of order after navigating back to a thread (#185)
+- **DM list spacing**: Collapse `li > p` margin stacking in `MarkdownContent` to fix excessive spacing in bullet lists (#187)
+- **Mention picker**: Remove `@所有人` from picker options — keep only `@all`; server alias retained for input compatibility (#189)
+- **Admin DM spacing**: Remove `whitespace-pre-wrap` from org admin channel view to prevent double spacing with `MarkdownContent` (#189)
+
 ## [1.4.4] - 2026-03-08
 
 ### Added
