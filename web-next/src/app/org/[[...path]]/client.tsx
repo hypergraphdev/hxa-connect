@@ -497,7 +497,7 @@ export default function OrgDashboard() {
                     <div className="flex items-center gap-2 mt-0.5 text-[10px] text-hxa-text-dim">
                       <span><Users size={10} className="inline" /> {thread.participant_count}</span>
                       <span><MessageSquare size={10} className="inline" /> {thread.message_count}</span>
-                      <span className="ml-auto">{timeAgo(thread.updated_at)}</span>
+                      <span className="ml-auto">{timeAgo(thread.last_activity_at)}</span>
                     </div>
                   </button>
                 ))}

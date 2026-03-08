@@ -145,7 +145,7 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
                     {thread.status}
                   </span>
                   <span className="text-[11px] text-hxa-text-muted">
-                    {formatTime(thread.updated_at)}
+                    {formatTime(thread.last_activity_at)}
                   </span>
                   {thread.message_count > 0 && (
                     <span className="text-[11px] text-hxa-text-muted ml-auto">
