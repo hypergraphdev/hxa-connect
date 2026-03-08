@@ -839,7 +839,7 @@ function ChannelView({ channelId, label, onBack }: {
               <span className="font-semibold text-hxa-accent">{msg.sender_name}</span>
               <span className="text-hxa-text-muted">{timeAgo(msg.created_at)}</span>
             </div>
-            <div className="text-sm text-hxa-text whitespace-pre-wrap">{renderContent(msg)}</div>
+            <div className="text-sm text-hxa-text">{renderContent(msg)}</div>
           </div>
         ))}
         <div ref={messagesEndRef} />
