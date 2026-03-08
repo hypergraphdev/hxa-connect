@@ -429,58 +429,137 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
 // ─── Message Bubble ───
 
+const SWIPE_THRESHOLD = 60;
+const LONG_PRESS_MS = 500;
+
 function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; isSelf: boolean; onReply?: () => void }) {
   const provenance = message.metadata?.provenance as Record<string, unknown> | undefined;
   const isHuman = provenance?.authored_by === 'human';
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
   const reply = message.reply_to_message;
 
+  // Swipe & long-press state for mobile reply
+  const touchRef = useRef<{ startX: number; startY: number; ts: number } | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const swipeXRef = useRef(0);
+  const isSwiping = useRef(false);
+  const [swipeX, setSwipeX] = useState(0);
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+  }, []);
+
+  // Clean up long-press timer on unmount
+  useEffect(() => () => clearLongPress(), [clearLongPress]);
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    clearLongPress(); // Always clear existing timer (including on multi-touch)
+    if (!onReply || e.touches.length !== 1) {
+      // Multi-touch: cancel any active swipe gesture
+      touchRef.current = null;
+      isSwiping.current = false;
+      swipeXRef.current = 0;
+      setSwipeX(0);
+      return;
+    }
+    const t = e.touches[0];
+    touchRef.current = { startX: t.clientX, startY: t.clientY, ts: Date.now() };
+    isSwiping.current = true;
+    longPressTimer.current = setTimeout(() => {
+      onReply();
+      touchRef.current = null;
+      isSwiping.current = false;
+      swipeXRef.current = 0;
+      setSwipeX(0);
+    }, LONG_PRESS_MS);
+  }, [onReply]);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!touchRef.current) return;
+    const t = e.touches[0];
+    const dx = touchRef.current.startX - t.clientX;
+    const dy = Math.abs(t.clientY - touchRef.current.startY);
+    // Cancel long-press if finger moved
+    if (dx > 10 || dy > 10) clearLongPress();
+    // Only track left swipe, ignore vertical scrolling
+    if (dy > 30) { touchRef.current = null; swipeXRef.current = 0; setSwipeX(0); return; }
+    const clamped = Math.max(0, Math.min(dx, 100));
+    swipeXRef.current = clamped;
+    setSwipeX(clamped);
+  }, [clearLongPress]);
+
+  const handleTouchEnd = useCallback(() => {
+    clearLongPress();
+    if (touchRef.current && swipeXRef.current >= SWIPE_THRESHOLD && onReply) {
+      onReply();
+    }
+    touchRef.current = null;
+    isSwiping.current = false;
+    swipeXRef.current = 0;
+    setSwipeX(0);
+  }, [clearLongPress, onReply]);
+
   return (
-    <div className="group">
-      {/* Reply quote */}
-      {reply && (
-        <div className="flex items-center gap-1.5 mb-1 pl-2 border-l-2 border-hxa-accent/40">
-          <Reply size={10} className="text-hxa-text-muted shrink-0" />
-          <span className="text-[11px] font-semibold text-hxa-text-dim">{reply.sender_name}</span>
-          <span className="text-[11px] text-hxa-text-muted truncate">{reply.content.slice(0, 80)}{reply.content.length > 80 ? '...' : ''}</span>
+    <div
+      className="group relative overflow-hidden"
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
+    >
+      {/* Swipe reply indicator (revealed behind message) */}
+      {swipeX > 0 && (
+        <div className="absolute right-0 top-0 bottom-0 flex items-center pr-3 pointer-events-none">
+          <Reply size={18} className={cn('transition-opacity', swipeX >= SWIPE_THRESHOLD ? 'text-hxa-accent opacity-100' : 'text-hxa-text-muted opacity-60')} />
         </div>
       )}
 
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-0.5">
-        <span className={cn(
-          'text-xs font-semibold',
-          isSelf ? 'text-hxa-accent' : 'text-hxa-text-dim',
-        )}>
-          {message.sender_name}
-        </span>
-        {isHuman && (
-          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-hxa-amber/20 text-amber-400 border border-amber-500/30">
-            {ownerName || 'Human'}
-          </span>
+      <div style={{ transform: swipeX > 0 ? `translateX(-${swipeX}px)` : undefined, transition: isSwiping.current ? 'none' : 'transform 0.2s ease-out' }}>
+        {/* Reply quote */}
+        {reply && (
+          <div className="flex items-center gap-1.5 mb-1 pl-2 border-l-2 border-hxa-accent/40">
+            <Reply size={10} className="text-hxa-text-muted shrink-0" />
+            <span className="text-[11px] font-semibold text-hxa-text-dim">{reply.sender_name}</span>
+            <span className="text-[11px] text-hxa-text-muted truncate">{reply.content.slice(0, 80)}{reply.content.length > 80 ? '...' : ''}</span>
+          </div>
         )}
-        <span className="text-[10px] text-hxa-text-muted">
-          {formatTime(message.created_at)}
-        </span>
-        {/* Reply button */}
-        {onReply && (
-          <button onClick={onReply} className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-muted hover:text-hxa-accent ml-auto" title="Reply">
-            <Reply size={12} />
-          </button>
-        )}
-      </div>
 
-      {/* Body */}
-      <div className={cn(
-        'rounded-lg px-3 py-2 text-sm leading-relaxed',
-        isSelf
-          ? 'bg-hxa-accent/10 border border-hxa-accent/15'
-          : 'bg-white/[0.03] border border-white/[0.06]',
-        isHuman && 'border-amber-500/20',
-      )}>
-        {message.parts.map((part, i) => (
-          <PartRenderer key={i} part={part} />
-        ))}
+        {/* Header */}
+        <div className="flex items-center gap-2 mb-0.5">
+          <span className={cn(
+            'text-xs font-semibold',
+            isSelf ? 'text-hxa-accent' : 'text-hxa-text-dim',
+          )}>
+            {message.sender_name}
+          </span>
+          {isHuman && (
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-hxa-amber/20 text-amber-400 border border-amber-500/30">
+              {ownerName || 'Human'}
+            </span>
+          )}
+          <span className="text-[10px] text-hxa-text-muted">
+            {formatTime(message.created_at)}
+          </span>
+          {/* Reply button — visible on hover (desktop) and always on mobile via touch */}
+          {onReply && (
+            <button onClick={onReply} className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-muted hover:text-hxa-accent ml-auto" title="Reply">
+              <Reply size={12} />
+            </button>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className={cn(
+          'rounded-lg px-3 py-2 text-sm leading-relaxed',
+          isSelf
+            ? 'bg-hxa-accent/10 border border-hxa-accent/15'
+            : 'bg-white/[0.03] border border-white/[0.06]',
+          isHuman && 'border-amber-500/20',
+        )}>
+          {message.parts.map((part, i) => (
+            <PartRenderer key={i} part={part} />
+          ))}
+        </div>
       </div>
     </div>
   );
