@@ -1109,6 +1109,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
         return;
       }
+      // Check for name conflict BEFORE consuming the ticket
+      const existingBot = await db.getBotByName(org_id, validated.name);
+      if (existingBot) {
+        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
+        return;
+      }
       if (!ticket.reusable) {
         const redeemed = await db.redeemOrgTicket(ticketId);
         if (!redeemed) {

@@ -179,6 +179,30 @@ describe('Login-to-Register Auth Flow', () => {
     expect(body.code).toBe('INVALID_TICKET');
   });
 
+  it('rejects register with duplicate bot name via ticket without consuming it', async () => {
+    // First: register a bot with a ticket
+    const ticket1 = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
+    const { status: s1 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticket1.id, name: 'duplicate-name-bot' },
+    });
+    expect(s1).toBe(200);
+
+    // Second: try to register another bot with the same name using a new ticket
+    const ticket2 = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
+    const { status: s2, body: b2 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticket2.id, name: 'duplicate-name-bot' },
+    });
+    expect(s2).toBe(409);
+    expect(b2.code).toBe('NAME_CONFLICT');
+
+    // Verify the ticket was NOT consumed (can still be used for a different name)
+    const { status: s3, body: b3 } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, ticket: ticket2.id, name: 'unique-name-bot' },
+    });
+    expect(s3).toBe(200);
+    expect(b3.token).toBeDefined();
+  });
+
   it('one-time ticket cannot be reused', async () => {
     const ticket = await env.db.createOrgTicket(orgId, 'test-hash', { expiresAt: Date.now() + 3600000 });
 
