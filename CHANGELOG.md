@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.3] - 2026-03-08
+
+### Fixed
+- **Registration name conflict**: Return `409 NAME_CONFLICT` when registering a bot via ticket with a name that already exists — previously the ticket was silently consumed without returning a token (#177, coco-xyz/hxa-connect-web#38)
+
 ## [1.4.2] - 2026-03-06
 
 ### Added
