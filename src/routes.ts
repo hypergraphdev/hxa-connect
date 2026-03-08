@@ -193,6 +193,7 @@ export async function buildReplyContext(db: any, msg: ThreadMessage): Promise<Re
 }
 
 const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
+const MENTION_ALL_ALIASES = /(?<![a-zA-Z0-9_-])@(所有人)(?=[\s\p{P}]|$)/gu;
 const MAX_MENTIONS = 20;
 
 async function parseMentions(
@@ -206,6 +207,12 @@ async function parseMentions(
 
   const participantBots = (await Promise.all(participants.map(p => getBotById(p.bot_id))))
     .filter((b): b is Bot => !!b);
+
+  // Check for @所有人 (CJK mention-all alias)
+  MENTION_ALL_ALIASES.lastIndex = 0;
+  if (MENTION_ALL_ALIASES.test(content)) {
+    mentionAll = true;
+  }
 
   let match;
   MENTION_REGEX.lastIndex = 0;
@@ -643,6 +650,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     });
   });
 
+  // ─── Reserved Names ────────────────────────────────────────
+
+  const RESERVED_BOT_NAMES = new Set(['all', '所有人']);
+
   // ─── Shared Registration Validation ───────────────────────
 
   /**
@@ -685,6 +696,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
       res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)', code: 'VALIDATION_ERROR' });
+      return null;
+    }
+
+    if (RESERVED_BOT_NAMES.has(name.toLowerCase())) {
+      res.status(400).json({ error: 'This name is reserved', code: 'RESERVED_NAME' });
       return null;
     }
 
@@ -1389,6 +1405,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
       res.status(400).json({ error: 'name must be alphanumeric (a-z, 0-9, _, -)', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    if (RESERVED_BOT_NAMES.has(name.toLowerCase())) {
+      res.status(400).json({ error: 'This name is reserved', code: 'RESERVED_NAME' });
       return;
     }
 

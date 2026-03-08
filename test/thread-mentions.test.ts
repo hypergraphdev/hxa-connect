@@ -12,6 +12,7 @@ describe('Thread Mentions', () => {
   let botToken1: string;
   let botToken2: string;
   let botToken3: string;
+  let orgSecret: string;
   let orgTicket: string;
   let threadId: string;
   let bot1Id: string;
@@ -22,6 +23,7 @@ describe('Thread Mentions', () => {
     env = await createTestEnv();
     const org = await env.createOrg();
 
+    orgSecret = org.org_secret;
     const r1 = await env.registerBot(org.org_secret, 'alice');
     const r2 = await env.registerBot(org.org_secret, 'bob');
     const r3 = await env.registerBot(org.org_secret, 'charlie');
@@ -163,6 +165,54 @@ describe('Thread Mentions', () => {
     const msg = msgs[msgs.length - 1];
     expect(msg.mentions).toBeDefined();
     expect(typeof msg.mention_all).toBe('boolean');
+  });
+
+  it('resolves @所有人 as mention_all', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+      token: botToken1,
+      body: { content: '@所有人 注意' },
+    });
+
+    expect(status).toBe(200);
+    expect(body.mention_all).toBe(true);
+  });
+
+  it('@所有人 requires word boundary (no match in @所有人abc)', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+      token: botToken1,
+      body: { content: '@所有人abc should not match' },
+    });
+
+    expect(status).toBe(200);
+    expect(body.mention_all).toBe(false);
+  });
+
+  it('@所有人 matches before punctuation', async () => {
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+      token: botToken1,
+      body: { content: '@所有人，请查看' },
+    });
+
+    expect(status).toBe(200);
+    expect(body.mention_all).toBe(true);
+  });
+
+  it('rejects reserved bot name "all" on registration', async () => {
+    try {
+      await env.registerBot(orgSecret, 'all');
+      expect.fail('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/Register failed: 400/);
+    }
+  });
+
+  it('rejects reserved bot name "All" (case-insensitive)', async () => {
+    try {
+      await env.registerBot(orgSecret, 'All');
+      expect.fail('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/Register failed: 400/);
+    }
   });
 
   it('old messages without mentions serialize as empty', async () => {

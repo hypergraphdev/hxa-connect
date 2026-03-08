@@ -20,6 +20,7 @@ import type { WebhookManager } from '../webhook.js';
 // ─── Constants ───────────────────────────────────────────────
 
 export const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
+export const MENTION_ALL_ALIASES = /(?<![a-zA-Z0-9_-])@(所有人)(?=[\s\p{P}]|$)/gu;
 export const MAX_MENTIONS = 20;
 export const MAX_THREAD_TAGS = 10;
 export const WS_FIELD_LIMITS = { content_type: 128, metadata: 16384 } as const;
@@ -124,6 +125,11 @@ export async function wsParseMentions(
   const mentions: MentionRef[] = [];
   let mentionAll = false;
   const participantBots = (await Promise.all(participants.map(p => getBotById(p.bot_id)))).filter((b): b is Bot => !!b);
+  // Check for @所有人 (CJK mention-all alias)
+  MENTION_ALL_ALIASES.lastIndex = 0;
+  if (MENTION_ALL_ALIASES.test(content)) {
+    mentionAll = true;
+  }
   let match;
   MENTION_REGEX.lastIndex = 0;
   while ((match = MENTION_REGEX.exec(content)) !== null) {

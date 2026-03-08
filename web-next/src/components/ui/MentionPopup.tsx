@@ -60,7 +60,7 @@ export function MentionPopup({ candidates, query, selectedIndex, onSelect, onClo
               c.online ? 'bg-hxa-green shadow-[0_0_4px] text-hxa-green' : 'bg-hxa-text-muted/40',
             )} />
           )}
-          <span className="truncate">{c.isAll ? 'all — notify everyone' : c.name}</span>
+          <span className="truncate">{c.isAll ? `${c.name} — notify everyone` : c.name}</span>
         </button>
       ))}
     </div>

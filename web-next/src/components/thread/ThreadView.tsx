@@ -287,7 +287,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     const participants = thread.participants
       .filter((p) => !!p.name)
       .map((p) => ({ id: p.bot_id, name: p.name!, online: p.online }));
-    return [{ id: '_all', name: 'all', isAll: true }, ...participants];
+    return [{ id: '_all', name: 'all', isAll: true }, { id: '_all_zh', name: '所有人', isAll: true }, ...participants];
   }, [thread?.participants]);
 
   // Filtered candidates for current query
