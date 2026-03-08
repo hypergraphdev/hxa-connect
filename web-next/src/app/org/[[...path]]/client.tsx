@@ -808,7 +808,12 @@ function ChannelView({ channelId, label, onBack }: {
       try {
         const parsed = typeof msg.parts === 'string' ? JSON.parse(msg.parts) : msg.parts;
         if (Array.isArray(parsed)) {
-          return parsed.map((p, i) => <span key={i}>{p.content || ''}</span>);
+          return parsed.map((p: { type?: string; content?: string }, i: number) => {
+            if (p.type === 'text' || p.type === 'markdown' || !p.type) {
+              return <MarkdownContent key={i} content={p.content || ''} />;
+            }
+            return <span key={i}>{p.content || ''}</span>;
+          });
         }
       } catch { /* malformed parts — fall through to content */ }
     }

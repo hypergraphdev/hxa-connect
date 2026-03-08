@@ -7,6 +7,7 @@ import type { DmMessage, MessagePart } from '@/lib/types';
 import { cn, formatTime, parseParts, safeHref } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
 import { FileText } from 'lucide-react';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
 
 interface DMViewProps {
   channelId: string;
@@ -186,7 +187,8 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
 function DmPartRenderer({ part }: { part: MessagePart }) {
   switch (part.type) {
     case 'text':
-      return <div className="whitespace-pre-wrap break-words text-hxa-text">{part.content}</div>;
+    case 'markdown':
+      return <MarkdownContent content={part.content || ''} />;
     case 'file':
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
