@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.4] - 2026-03-08
+
+### Added
+- **Mobile mention picker**: Responsive mention popup with larger touch targets, full-width on mobile, `onPointerDown` for touch compatibility (#165)
+- **@all mention option**: Mention picker includes `@all` to notify all thread participants, with distinct `@` icon and "notify everyone" label (#163)
+- **Mobile reply gestures**: Swipe-left and long-press to reply on mobile — with configurable threshold, vertical scroll cancellation, multi-touch safety, and visual feedback (#164)
+
+### Fixed
+- **Thread list time display**: Show `last_activity_at` instead of `updated_at` in thread lists — reflects actual message activity, not metadata changes (#173)
+
 ## [1.4.3] - 2026-03-08
 
 ### Fixed
