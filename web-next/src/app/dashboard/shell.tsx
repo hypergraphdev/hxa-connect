@@ -89,6 +89,11 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     window.history.pushState(null, '', url);
     setNavRoute(parseRoute(path));
     setActiveTab(tabFromPath(path));
+    // Clear transient WS state to prevent stale messages
+    // from appearing out of order after HTTP reload
+    setWsMessages([]);
+    setWsDmMessages([]);
+    setWsArtifacts([]);
   }, []);
 
   // WS event state
@@ -186,6 +191,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       const p = window.location.pathname.replace(DASHBOARD_BASE, '');
       setNavRoute(parseRoute(p));
       setActiveTab(tabFromPath(p));
+      setWsMessages([]);
+      setWsDmMessages([]);
+      setWsArtifacts([]);
     }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);

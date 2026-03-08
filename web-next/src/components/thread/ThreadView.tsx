@@ -99,7 +99,9 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       const ids = new Set(prev.map((m) => m.id));
       const newMsgs = wsMessages.filter((m) => !ids.has(m.id) && m.thread_id === threadId);
       if (!newMsgs.length) return prev;
-      return [...prev, ...newMsgs];
+      return [...prev, ...newMsgs].sort((a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
     });
     // Auto-scroll if user is near bottom
     if (!userScrolledUp.current) {
