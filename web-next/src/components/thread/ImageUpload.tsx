@@ -16,6 +16,7 @@ export interface PendingImage {
 }
 
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+export const MAX_IMAGES_PER_MESSAGE = 10;
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const ACCEPT_STRING = ACCEPTED_TYPES.join(',');
 

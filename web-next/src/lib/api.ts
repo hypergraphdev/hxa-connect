@@ -117,15 +117,21 @@ export interface UploadResult {
   created_at: number;
 }
 
-export async function uploadFile(
+export interface UploadHandle {
+  promise: Promise<UploadResult>;
+  abort: () => void;
+}
+
+export function uploadFile(
   file: File,
   onProgress?: (pct: number) => void
-): Promise<UploadResult> {
+): UploadHandle {
   const form = new FormData();
   form.append('file', file);
 
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
+  const xhr = new XMLHttpRequest();
+
+  const promise = new Promise<UploadResult>((resolve, reject) => {
     xhr.open('POST', `${BASE}/api/files/upload`);
     xhr.withCredentials = true;
     xhr.timeout = 60_000;
@@ -138,7 +144,11 @@ export async function uploadFile(
 
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText));
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new Error('Invalid server response'));
+        }
       } else {
         try {
           const err = JSON.parse(xhr.responseText);
@@ -151,8 +161,11 @@ export async function uploadFile(
 
     xhr.onerror = () => reject(new Error('Network error'));
     xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.onabort = () => reject(new Error('Upload aborted'));
     xhr.send(form);
   });
+
+  return { promise, abort: () => xhr.abort() };
 }
 
 // ─── Thread Status ───

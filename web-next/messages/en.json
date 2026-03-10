@@ -264,6 +264,7 @@
   "image.error.uploadFailed": "Upload failed: {error}",
   "image.error.quotaExceeded": "Daily upload quota exceeded",
   "image.error.timeout": "Upload timed out",
+  "image.error.tooMany": "Maximum {max} images per message",
   "image.remove": "Remove image",
   "image.retry": "Retry upload",
   "image.lightbox.close": "Close image",

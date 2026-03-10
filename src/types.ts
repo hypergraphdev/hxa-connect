@@ -231,6 +231,8 @@ export const SCOPE_REQUIREMENTS: Record<string, TokenScope[]> = {
   thread: ['full', 'thread'],
   // Channel messaging
   message: ['full', 'message'],
+  // File upload — shared utility used by both thread and DM contexts
+  upload: ['full', 'thread', 'message'],
   // Profile update
   profile: ['full', 'profile'],
 };

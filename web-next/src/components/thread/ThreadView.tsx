@@ -10,8 +10,24 @@ import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/comp
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { useTranslations } from '@/i18n/context';
-import { ImageUploadButton, PendingImagePreview, validateImage, type PendingImage } from './ImageUpload';
+import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
 import { ImageLightbox } from './ImageLightbox';
+
+const MAX_CONCURRENT_UPLOADS = 3;
+
+/** Run async tasks with a concurrency limit (worker-pool pattern). */
+async function withConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const idx = next++;
+      results[idx] = await tasks[idx]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
 
 interface ThreadViewProps {
   threadId: string;
@@ -45,6 +61,9 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uploadAborts = useRef<Map<string, () => void>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -70,12 +89,17 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setCursor(undefined);
     setHasOlder(false);
     setReplyTo(null);
+    // Abort any in-flight uploads and clear timers
+    uploadAborts.current.forEach((abort) => abort());
+    uploadAborts.current.clear();
+    if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null; }
     setPendingImages((prev) => {
       prev.forEach((img) => URL.revokeObjectURL(img.preview));
       return [];
     });
     setDragOver(false);
     setLightboxSrc(null);
+    setToast(null);
     userScrolledUp.current = false;
 
     (async () => {
@@ -94,7 +118,15 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       if (!cancelled) setLoading(false);
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null; }
+      // Revoke any remaining blob URLs on unmount to prevent memory leaks
+      setPendingImages((prev) => {
+        prev.forEach((img) => URL.revokeObjectURL(img.preview));
+        return [];
+      });
+    };
   }, [threadId]);
 
   // Scroll to bottom on initial load
@@ -208,28 +240,47 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setLoadingOlder(false);
   }
 
-  // ─── Image handling ───
+  // ─── Toast helper ───
 
-  function addPendingImage(file: File) {
-    const error = validateImage(file, t);
-    if (error) {
-      // TODO: toast notification; for now just skip
-      return;
-    }
-    setPendingImages((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        file,
-        preview: URL.createObjectURL(file),
-        status: 'pending',
-        progress: 0,
-      },
-    ]);
+  function showToast(msg: string) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
   }
 
+  // ─── Image handling ───
+
   function addPendingFiles(files: File[]) {
-    files.forEach(addPendingImage);
+    // Validate files first (size, type checks that don't depend on queue state)
+    const validated: File[] = [];
+    for (const file of files) {
+      const error = validateImage(file, t);
+      if (error) { showToast(error); continue; }
+      validated.push(file);
+    }
+    if (validated.length === 0) return;
+
+    // Use functional updater so remaining count is always accurate
+    // (prevents race if two paste/drop events fire before React re-renders)
+    let wasTruncated = false;
+    setPendingImages((prev) => {
+      const remaining = MAX_IMAGES_PER_MESSAGE - prev.length;
+      const toAdd = validated.slice(0, Math.max(0, remaining));
+      wasTruncated = toAdd.length < validated.length;
+      return [
+        ...prev,
+        ...toAdd.map((file) => ({
+          id: crypto.randomUUID(),
+          file,
+          preview: URL.createObjectURL(file),
+          status: 'pending' as const,
+          progress: 0,
+        })),
+      ];
+    });
+    if (wasTruncated) {
+      showToast(t('image.error.tooMany', { max: MAX_IMAGES_PER_MESSAGE }));
+    }
   }
 
   function removePendingImage(id: string) {
@@ -255,22 +306,28 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   function handlePaste(e: React.ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    let hasImages = false;
+    const imageFiles: File[] = [];
+    let hasText = false;
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
-        if (file) { addPendingImage(file); hasImages = true; }
+        if (file) imageFiles.push(file);
+      } else if (item.kind === 'string') {
+        hasText = true;
       }
     }
-    if (hasImages) e.preventDefault();
+    if (imageFiles.length > 0) {
+      addPendingFiles(imageFiles);
+      // Only block default paste if clipboard has ONLY images (no text)
+      if (!hasText) e.preventDefault();
+    }
   }
 
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    Array.from(e.dataTransfer.files)
-      .filter((f) => f.type.startsWith('image/'))
-      .forEach(addPendingImage);
+    const imageFiles = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    if (imageFiles.length > 0) addPendingFiles(imageFiles);
   }
 
   // Send message
@@ -282,43 +339,87 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setSending(true);
 
     try {
-      // 1. Upload pending images (skip already-done ones)
-      const uploadedImages: api.UploadResult[] = [];
-      for (const img of imagesToSend) {
-        if (img.status === 'done' && img.uploadResult) {
-          uploadedImages.push(img.uploadResult as api.UploadResult);
-          continue;
-        }
+      // 1. Upload pending images concurrently (skip already-done ones)
+      const needUpload = imagesToSend.filter((i) => !(i.status === 'done' && i.uploadResult));
+      const alreadyDone = imagesToSend
+        .filter((i) => i.status === 'done' && i.uploadResult)
+        .map((i) => i.uploadResult as api.UploadResult);
+
+      // Upload with concurrency limit (max 3 simultaneous uploads)
+      const uploadTasks = needUpload.map((img) => () => {
         updatePendingImage(img.id, { status: 'uploading', progress: 0 });
-        try {
-          const result = await api.uploadFile(img.file, (pct) => {
+        let lastReportedPct = 0;
+        const handle = api.uploadFile(img.file, (pct) => {
+          // Throttle progress updates: only re-render when progress jumps ≥5% or hits 100%
+          if (pct - lastReportedPct >= 5 || pct === 100) {
+            lastReportedPct = pct;
             updatePendingImage(img.id, { progress: pct });
+          }
+        });
+        uploadAborts.current.set(img.id, handle.abort);
+        return handle.promise
+          .then((result) => {
+            updatePendingImage(img.id, { status: 'done', uploadResult: result, progress: 100 });
+            uploadAborts.current.delete(img.id);
+            return { ok: true as const, id: img.id, result };
+          })
+          .catch((err) => {
+            updatePendingImage(img.id, { status: 'error', error: (err as Error).message });
+            uploadAborts.current.delete(img.id);
+            return { ok: false as const, id: img.id };
           });
-          updatePendingImage(img.id, { status: 'done', uploadResult: result, progress: 100 });
-          uploadedImages.push(result);
-        } catch (err) {
-          updatePendingImage(img.id, { status: 'error', error: (err as Error).message });
-          setSending(false);
-          return; // Stop on first failure
-        }
+      });
+
+      const results = await withConcurrency(uploadTasks, MAX_CONCURRENT_UPLOADS);
+      const newlyUploaded = results.filter((r) => r.ok).map((r) => (r as { ok: true; result: api.UploadResult }).result);
+      const failedCount = results.filter((r) => !r.ok).length;
+      const uploadedImages = [...alreadyDone, ...newlyUploaded];
+
+      // If some uploads failed but we have text or successful images, send what we can
+      if (uploadedImages.length === 0 && !text) {
+        if (failedCount > 0) showToast(t('image.error.uploadFailed', { error: `${failedCount} failed` }));
+        return; // finally block handles setSending(false)
       }
 
-      // 2. Build parts
-      const parts: MessagePart[] = [];
-      if (text) parts.push({ type: 'text', content: text });
-      for (const up of uploadedImages) {
-        parts.push({ type: 'image', url: up.url, alt: up.name });
+      // 2. Build parts — only when images are present (avoids text duplication in content + parts)
+      const parts: MessagePart[] | undefined = uploadedImages.length > 0
+        ? [
+            ...(text ? [{ type: 'text' as const, content: text }] : []),
+            ...uploadedImages.map((up) => ({ type: 'image' as const, url: up.url, alt: up.name })),
+          ]
+        : undefined;
+
+      // 3. Build content — include summary for bots that only read content field
+      let content = text;
+      if (!content && uploadedImages.length > 0) {
+        content = uploadedImages.length === 1 ? '[image]' : `[${uploadedImages.length} images]`;
       }
 
-      // 3. Send
-      const msg = await api.sendThreadMessage(threadId, text || '', {
-        parts: parts.length > 0 ? parts : undefined,
+      // 4. Send
+      const msg = await api.sendThreadMessage(threadId, content, {
+        parts,
         reply_to: replyTo?.id,
       });
 
-      // 4. Cleanup
-      pendingImages.forEach((img) => URL.revokeObjectURL(img.preview));
-      setPendingImages([]);
+      // 5. Cleanup — only remove successfully sent images (match by ID, not filename)
+      const alreadyDoneIds = new Set(
+        imagesToSend.filter((i) => i.status === 'done' && i.uploadResult).map((i) => i.id),
+      );
+      const successIds = new Set([
+        ...alreadyDoneIds,
+        ...results.filter((r) => r.ok).map((r) => r.id),
+      ]);
+      setPendingImages((prev) => {
+        const remaining: PendingImage[] = [];
+        for (const img of prev) {
+          if (successIds.has(img.id)) {
+            URL.revokeObjectURL(img.preview);
+          } else {
+            remaining.push(img);
+          }
+        }
+        return remaining;
+      });
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
@@ -327,8 +428,13 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       setReplyTo(null);
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
       requestAnimationFrame(() => scrollToBottom());
-    } catch {
+
+      if (failedCount > 0) {
+        showToast(t('image.error.uploadFailed', { error: `${failedCount} failed, message sent with ${uploadedImages.length} images` }));
+      }
+    } catch (err) {
       // Don't clear on message send error — preserve pending images and text
+      showToast(t('image.error.uploadFailed', { error: (err as Error).message || 'Send failed' }));
     } finally {
       setSending(false);
     }
@@ -437,7 +543,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <ThreadHeader
         topic={thread.topic}
         status={thread.status}
@@ -489,11 +595,17 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       {/* Composer */}
       {canSend && (
         <div
-          className={cn('shrink-0 border-t border-hxa-border bg-[rgba(10,15,26,0.4)]', dragOver && 'border-hxa-accent bg-hxa-accent/5')}
+          className={cn('shrink-0 border-t border-hxa-border bg-[rgba(10,15,26,0.4)] relative', dragOver && 'border-hxa-accent bg-hxa-accent/5')}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={handleDrop}
         >
+          {/* Drag-drop overlay */}
+          {dragOver && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-hxa-accent/10 border-2 border-dashed border-hxa-accent rounded-lg pointer-events-none">
+              <span className="text-sm font-medium text-hxa-accent">{t('image.dragDrop')}</span>
+            </div>
+          )}
           {/* Reply bar */}
           {replyTo && (
             <div className="flex items-center gap-2 px-4 py-2 border-b border-hxa-border bg-white/[0.02]">
@@ -545,6 +657,13 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
               {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div role="alert" className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-red-900/90 text-white text-xs rounded-lg shadow-lg border border-red-700/50 max-w-[80%] text-center animate-in fade-in slide-in-from-bottom-2">
+          {toast}
         </div>
       )}
 

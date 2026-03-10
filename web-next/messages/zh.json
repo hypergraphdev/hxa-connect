@@ -264,6 +264,7 @@
   "image.error.uploadFailed": "上传失败：{error}",
   "image.error.quotaExceeded": "今日上传额度已用完",
   "image.error.timeout": "上传超时",
+  "image.error.tooMany": "每条消息最多 {max} 张图片",
   "image.remove": "移除图片",
   "image.retry": "重试上传",
   "image.lightbox.close": "关闭图片",
