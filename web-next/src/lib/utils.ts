@@ -1,5 +1,8 @@
-/** Format a timestamp for display */
-export function formatTime(ts: string | number): string {
+/** Translation function type — pass `t` from useTranslations() for locale-aware output */
+type TFunc = (key: string, params?: Record<string, string | number>) => string;
+
+/** Format a timestamp for display. Pass `t` for i18n support. */
+export function formatTime(ts: string | number, t?: TFunc): string {
   const d = new Date(typeof ts === 'number' ? ts : ts);
   const now = new Date();
   const diff = now.getTime() - d.getTime();
@@ -13,7 +16,9 @@ export function formatTime(ts: string | number): string {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (d.toDateString() === yesterday.toDateString()) {
-    return `Yesterday ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const label = t ? t('time.yesterday') : 'Yesterday';
+    return `${label} ${time}`;
   }
 
   // Within a week
@@ -75,12 +80,13 @@ export const STATUS_TRANSITIONS: Record<string, string[]> = {
   closed: [],
 };
 
-/** Thread status filter options — matches B2B protocol */
+/** Thread status filter options — matches B2B protocol.
+ *  `label` is an i18n key; translate with `t(opt.label)` before rendering. */
 export const THREAD_STATUS_OPTIONS: { value: string; label: string }[] = [
-  { value: '', label: 'All Statuses' },
-  { value: 'active', label: 'Active' },
-  { value: 'blocked', label: 'Blocked' },
-  { value: 'reviewing', label: 'Reviewing' },
-  { value: 'resolved', label: 'Resolved' },
-  { value: 'closed', label: 'Closed' },
+  { value: '', label: 'thread.status.all' },
+  { value: 'active', label: 'thread.status.active' },
+  { value: 'blocked', label: 'thread.status.blocked' },
+  { value: 'reviewing', label: 'thread.status.reviewing' },
+  { value: 'resolved', label: 'thread.status.resolved' },
+  { value: 'closed', label: 'thread.status.closed' },
 ];

@@ -6,6 +6,7 @@ import { Loader2 } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { DmChannelItem, DmMessage, Channel } from '@/lib/types';
 import { cn, formatTime, parseParts } from '@/lib/utils';
+import { useTranslations } from '@/i18n/context';
 
 interface DMListProps {
   /** New DM messages from WS for sidebar preview update */
@@ -16,6 +17,7 @@ interface DMListProps {
 
 export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
   const { navigate, id: activeId } = useDashNav();
+  const { t } = useTranslations();
   const [channels, setChannels] = useState<DmChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -65,7 +67,7 @@ export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
         .filter((ch) => !ids.has(ch.id))
         .map((ch) => ({
           channel: ch,
-          counterpart_bot: { id: '', name: 'New channel', online: false, bio: null, role: null },
+          counterpart_bot: { id: '', name: t('dm.newChannel'), online: false, bio: null, role: null },
           last_message_preview: null,
           last_activity_at: new Date(ch.created_at).getTime(),
         }));
@@ -114,7 +116,7 @@ export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
           </div>
         ) : channels.length === 0 ? (
           <div className="text-center text-hxa-text-muted text-sm py-8">
-            No conversations yet
+            {t('dm.empty')}
           </div>
         ) : (
           <div className="space-y-0.5 p-1">
@@ -146,7 +148,7 @@ export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
                       {item.last_message_preview.sender_name}: {item.last_message_preview.content}
                     </span>
                     <span className="text-[10px] text-hxa-text-muted shrink-0">
-                      {formatTime(item.last_activity_at)}
+                      {formatTime(item.last_activity_at, t)}
                     </span>
                   </div>
                 )}
@@ -159,7 +161,7 @@ export function DMList({ wsDmMessages, wsNewChannels }: DMListProps) {
                 disabled={loadingMore}
                 className="w-full py-2 text-xs text-hxa-accent hover:text-hxa-accent-hover transition-colors disabled:opacity-50"
               >
-                {loadingMore ? <Loader2 size={14} className="animate-spin mx-auto" /> : 'Load more'}
+                {loadingMore ? <Loader2 size={14} className="animate-spin mx-auto" /> : t('dm.loadMore')}
               </button>
             )}
           </div>

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { superAdmin, type Org, type InviteCode, AdminApiError } from '@/lib/admin-api';
 import * as api from '@/lib/api';
+import { useTranslations } from '@/i18n/context';
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
@@ -28,6 +29,7 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
   title: string; message: string; confirmLabel: string; danger?: boolean;
   onConfirm: () => void; onCancel: () => void; typeTo?: string;
 }) {
+  const { t } = useTranslations();
   const [typed, setTyped] = useState('');
   const canConfirm = !typeTo || typed === typeTo;
 
@@ -39,7 +41,7 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
         {typeTo && (
           <input
             type="text"
-            placeholder={`Type "${typeTo}" to confirm`}
+            placeholder={t('admin.confirm.typeTo', { value: typeTo })}
             value={typed}
             onChange={e => setTyped(e.target.value)}
             className="w-full bg-black/30 border border-hxa-border rounded-lg px-3 py-2 text-sm font-mono mb-4 outline-none focus:border-hxa-accent"
@@ -47,7 +49,7 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
         )}
         <div className="flex justify-end gap-3">
           <button onClick={onCancel} className="px-4 py-2 text-sm text-hxa-text-dim hover:text-hxa-text transition-colors">
-            Cancel
+            {t('admin.confirm.cancel')}
           </button>
           <button
             onClick={onConfirm}
@@ -67,6 +69,7 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
 function SecretModal({ title, subtitle, orgId, secret, hint, onClose }: {
   title: string; subtitle?: string; orgId?: string; secret: string; hint?: string; onClose: () => void;
 }) {
+  const { t } = useTranslations();
   const [copied, setCopied] = useState(false);
   const [revealed, setRevealed] = useState(!orgId); // auto-reveal for simple secret modals (rotate)
 
@@ -82,14 +85,14 @@ function SecretModal({ title, subtitle, orgId, secret, hint, onClose }: {
         {subtitle && <p className="text-hxa-text-dim text-sm mb-4">{subtitle}</p>}
         {orgId && (
           <div className="mb-3">
-            <label className="text-xs text-hxa-text-dim mb-1 block">Org ID</label>
+            <label className="text-xs text-hxa-text-dim mb-1 block">{t('admin.secret.orgId')}</label>
             <div className="bg-black/30 border border-hxa-border rounded-lg px-3 py-2 font-mono text-sm text-hxa-accent break-all select-all">
               {orgId}
             </div>
           </div>
         )}
         <div className="mb-1">
-          <label className="text-xs text-hxa-text-dim mb-1 block">{orgId ? 'Org Secret' : 'Secret'}</label>
+          <label className="text-xs text-hxa-text-dim mb-1 block">{orgId ? t('admin.secret.orgSecret') : t('admin.secret.secret')}</label>
           <div className="flex items-center gap-2 bg-[rgba(239,68,68,0.06)] border border-[rgba(239,68,68,0.15)] rounded-lg px-3 py-2">
             <span className="flex-1 font-mono text-sm break-all text-red-400 select-all">
               {revealed ? secret : '\u2022'.repeat(secret.length)}
@@ -98,20 +101,20 @@ function SecretModal({ title, subtitle, orgId, secret, hint, onClose }: {
               onClick={() => setRevealed(!revealed)}
               className="text-xs text-hxa-text-dim hover:text-hxa-text whitespace-nowrap transition-colors"
             >
-              {revealed ? 'Hide' : 'Show'}
+              {revealed ? t('admin.secret.hide') : t('admin.secret.show')}
             </button>
           </div>
         </div>
         {hint && <p className="text-hxa-text-dim text-[11px] mb-4">{hint}</p>}
         <div className="flex gap-3">
           <button onClick={onClose} className="flex-1 px-4 py-2.5 text-sm text-hxa-text-dim hover:text-hxa-text border border-hxa-border rounded-lg transition-colors">
-            Done
+            {t('admin.secret.done')}
           </button>
           <button
             onClick={() => { navigator.clipboard.writeText(copyText); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
             className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-hxa-accent/20 text-hxa-accent rounded-lg hover:bg-hxa-accent/30 transition-colors text-sm font-medium border border-hxa-accent/30"
           >
-            <Copy size={14} /> {copied ? 'Copied!' : orgId ? 'Copy Credentials' : 'Copy to Clipboard'}
+            <Copy size={14} /> {copied ? t('admin.secret.copied') : orgId ? t('admin.secret.copyCredentials') : t('admin.secret.copyClipboard')}
           </button>
         </div>
       </div>
@@ -123,15 +126,16 @@ function SecretModal({ title, subtitle, orgId, secret, hint, onClose }: {
 
 function CopyableCode({ value, display }: { value: string; display?: string }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useTranslations();
   return (
     <span className="group inline-flex items-center gap-1.5 font-mono text-xs text-hxa-accent">
       <span className="select-all">{display ?? value}</span>
       <button
         onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
         className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-dim hover:text-hxa-accent"
-        title="Copy"
+        title={t('common.copy')}
       >
-        {copied ? <span className="text-hxa-green text-[10px]">Copied</span> : <Copy size={12} />}
+        {copied ? <span className="text-hxa-green text-[10px]">{t('common.copied')}</span> : <Copy size={12} />}
       </button>
     </span>
   );
@@ -140,6 +144,7 @@ function CopyableCode({ value, display }: { value: string; display?: string }) {
 // ─── Status Badge ───
 
 function StatusBadge({ status }: { status: string }) {
+  const { t } = useTranslations();
   const colors: Record<string, string> = {
     active: 'bg-hxa-green/20 text-hxa-green border-hxa-green/30',
     suspended: 'bg-hxa-amber/20 text-hxa-amber border-hxa-amber/30',
@@ -147,7 +152,7 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span className={`px-2 py-0.5 text-xs font-medium rounded border ${colors[status] ?? 'bg-hxa-text-dim/20 text-hxa-text-dim border-hxa-text-dim/30'}`}>
-      {status}
+      {t(`admin.orgStatus.${status}`)}
     </span>
   );
 }
@@ -156,6 +161,7 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function AdminPage() {
   const router = useRouter();
+  const { t } = useTranslations();
   const [inputSecret, setInputSecret] = useState('');
   const [authed, setAuthed] = useState(false);
   const [loginError, setLoginError] = useState('');
@@ -233,7 +239,7 @@ export default function AdminPage() {
       setOrgs(data);
       setAuthed(true);
     } catch (err) {
-      setLoginError(err instanceof AdminApiError ? err.message : 'Login failed');
+      setLoginError(err instanceof AdminApiError ? err.message : t('login.error.failed'));
     } finally {
       setSubmitting(false);
     }
@@ -261,24 +267,24 @@ export default function AdminPage() {
       <div className="fixed inset-0 flex flex-col items-center justify-center gap-5 p-4">
         <div className="flex flex-col items-center gap-3 mb-2">
           <img src={`${BASE_PATH}/images/logo.png`} alt="HXA-Connect" className="h-12 animate-pulse-glow" style={{ filter: 'drop-shadow(0 0 12px rgba(45,212,191,0.6))' }} />
-          <h1 className="text-2xl font-bold gradient-text">Admin Console</h1>
-          <p className="text-hxa-text-dim text-sm">HXA-Connect Platform Administration</p>
+          <h1 className="text-2xl font-bold gradient-text">{t('admin.title')}</h1>
+          <p className="text-hxa-text-dim text-sm">{t('admin.subtitle')}</p>
         </div>
         <form onSubmit={handleLogin} className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-8 w-full max-w-[400px] flex flex-col gap-4 shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
           <input
             type="password"
-            placeholder="Admin Secret"
+            placeholder={t('admin.placeholder.secret')}
             value={inputSecret}
             onChange={e => setInputSecret(e.target.value)}
             className="bg-black/30 border border-hxa-border rounded-lg px-4 py-3 text-hxa-text font-mono text-sm outline-none focus:border-hxa-accent w-full"
           />
           {loginError && <p className="text-hxa-red text-sm text-center">{loginError}</p>}
           <button type="submit" disabled={submitting} className="gradient-btn rounded-lg py-3 text-sm font-bold cursor-pointer disabled:opacity-50">
-            {submitting ? 'Connecting...' : 'Sign In'}
+            {submitting ? t('admin.button.connecting') : t('admin.button.signIn')}
           </button>
         </form>
         <button onClick={() => router.push('/')} className="text-hxa-text-dim text-sm hover:text-hxa-accent transition-colors flex items-center gap-1">
-          <ArrowLeft size={14} /> Back to Login
+          <ArrowLeft size={14} /> {t('admin.backToLogin')}
         </button>
       </div>
     );
@@ -292,7 +298,7 @@ export default function AdminPage() {
         {secretModal && <SecretModal {...secretModal} onClose={() => setSecretModal(null)} />}
         <div className="max-w-4xl mx-auto">
           <button onClick={() => setSelectedOrg(null)} className="flex items-center gap-1.5 text-hxa-text-dim hover:text-hxa-accent text-sm mb-6 transition-colors">
-            <ArrowLeft size={16} /> Back to Organizations
+            <ArrowLeft size={16} /> {t('admin.backToOrgs')}
           </button>
           <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-6">
             <div className="flex items-center gap-3 mb-6">
@@ -301,14 +307,14 @@ export default function AdminPage() {
               <StatusBadge status={selectedOrg.status} />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              <div><span className="text-hxa-text-dim">ID:</span> <span className="font-mono text-hxa-accent">{selectedOrg.id}</span></div>
-              <div><span className="text-hxa-text-dim">Status:</span> {selectedOrg.status}</div>
-              <div><span className="text-hxa-text-dim">Bots:</span> {selectedOrg.bot_count}</div>
-              <div><span className="text-hxa-text-dim">Created:</span> {new Date(selectedOrg.created_at).toLocaleDateString()}</div>
+              <div><span className="text-hxa-text-dim">{t('admin.orgDetail.id')}</span> <span className="font-mono text-hxa-accent">{selectedOrg.id}</span></div>
+              <div><span className="text-hxa-text-dim">{t('admin.orgDetail.status')}</span> {selectedOrg.status}</div>
+              <div><span className="text-hxa-text-dim">{t('admin.orgDetail.bots')}</span> {selectedOrg.bot_count}</div>
+              <div><span className="text-hxa-text-dim">{t('admin.orgDetail.created')}</span> {new Date(selectedOrg.created_at).toLocaleDateString()}</div>
             </div>
             {selectedOrg.org_secret && (
               <div className="mt-4 p-3 bg-black/30 border border-hxa-border rounded-lg">
-                <span className="text-hxa-text-dim text-xs">Secret:</span>
+                <span className="text-hxa-text-dim text-xs">{t('admin.orgDetail.secret')}</span>
                 <span className="font-mono text-sm ml-2 text-hxa-accent">{selectedOrg.org_secret.slice(0, 8)}...</span>
               </div>
             )}
@@ -329,12 +335,12 @@ export default function AdminPage() {
       {showCreateOrg && <CreateOrgModal onClose={() => setShowCreateOrg(false)} onCreated={(name, orgId, orgSecret) => {
         setShowCreateOrg(false);
         loadData();
-        setSecretModal({ title: 'Organization Created', subtitle: `"${name}" is ready`, orgId, secret: orgSecret, hint: 'Save this secret now — it cannot be retrieved later.' });
+        setSecretModal({ title: t('admin.orgCreated.title'), subtitle: t('admin.orgCreated.subtitle', { name }), orgId, secret: orgSecret, hint: t('admin.secretHint') });
       }} />}
       {showCreateCode && <CreateCodeModal onClose={() => setShowCreateCode(false)} onCreated={(code) => {
         setShowCreateCode(false);
         loadData();
-        setSecretModal({ title: 'Invite Code Created', secret: code, hint: 'You can also find this code in the Invite Codes list.' });
+        setSecretModal({ title: t('admin.codeCreated.title'), secret: code, hint: t('admin.codeHint') });
       }} />}
 
       {/* Header */}
@@ -344,18 +350,18 @@ export default function AdminPage() {
             <img src={`${BASE_PATH}/images/logo.png`} alt="HXA-Connect" className="h-6" />
             <span className="font-semibold">HXA-Connect</span>
             <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-hxa-accent/20 text-hxa-accent rounded border border-hxa-accent/30">
-              Super Admin
+              {t('admin.badge.superAdmin')}
             </span>
           </div>
           <button onClick={() => setConfirm({
-            title: 'Log Out',
-            message: 'Are you sure you want to log out of the Admin Console?',
-            confirmLabel: 'Log Out',
+            title: t('admin.logoutTitle'),
+            message: t('admin.logoutMessage'),
+            confirmLabel: t('admin.logoutConfirm'),
             danger: true,
             onConfirm: () => { setConfirm(null); handleLogout(); },
             onCancel: () => setConfirm(null),
           })} className="flex items-center gap-1.5 text-hxa-text-dim hover:text-hxa-red text-sm transition-colors">
-            <LogOut size={14} /> Logout
+            <LogOut size={14} /> {t('admin.logout')}
           </button>
         </div>
       </header>
@@ -364,11 +370,11 @@ export default function AdminPage() {
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           {[
-            { label: 'Organizations', value: orgs.length, icon: Building2 },
-            { label: 'Active', value: orgs.filter(o => o.status === 'active').length, icon: Play },
-            { label: 'Suspended', value: orgs.filter(o => o.status === 'suspended').length, icon: Pause },
-            { label: 'Total Bots', value: totalBots, icon: Bot },
-            { label: 'Invite Codes', value: inviteCodes.length, icon: KeyRound },
+            { label: t('admin.stat.organizations'), value: orgs.length, icon: Building2 },
+            { label: t('admin.stat.active'), value: orgs.filter(o => o.status === 'active').length, icon: Play },
+            { label: t('admin.stat.suspended'), value: orgs.filter(o => o.status === 'suspended').length, icon: Pause },
+            { label: t('admin.stat.totalBots'), value: totalBots, icon: Bot },
+            { label: t('admin.stat.inviteCodes'), value: inviteCodes.length, icon: KeyRound },
           ].map(({ label, value, icon: Icon }) => (
             <div key={label} className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4 text-center">
               <Icon size={16} className="text-hxa-accent mx-auto mb-1.5" />
@@ -381,9 +387,9 @@ export default function AdminPage() {
         {/* Organizations */}
         <section>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Organizations</h2>
+            <h2 className="text-lg font-semibold">{t('admin.section.organizations')}</h2>
             <button onClick={() => setShowCreateOrg(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-hxa-accent/20 text-hxa-accent rounded-lg hover:bg-hxa-accent/30 border border-hxa-accent/30 transition-colors">
-              <Plus size={14} /> Create Org
+              <Plus size={14} /> {t('admin.createOrg')}
             </button>
           </div>
           <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl overflow-hidden">
@@ -391,12 +397,12 @@ export default function AdminPage() {
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-[#0a0f1a] z-[1]">
                 <tr className="border-b border-hxa-border text-hxa-text-dim text-xs uppercase tracking-wider">
-                  <th className="text-left px-4 py-3">Name</th>
-                  <th className="text-left px-4 py-3">ID</th>
-                  <th className="text-left px-4 py-3">Status</th>
-                  <th className="text-left px-4 py-3">Bots</th>
-                  <th className="text-left px-4 py-3">Created</th>
-                  <th className="text-right px-4 py-3">Actions</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.name')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.id')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.status')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.bots')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.created')}</th>
+                  <th className="text-right px-4 py-3">{t('admin.table.actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -415,13 +421,13 @@ export default function AdminPage() {
                         {org.status === 'active' && (
                           <button
                             onClick={() => setConfirm({
-                              title: 'Suspend Organization',
-                              message: `Suspend "${org.name}"? Bots will not be able to connect.`,
-                              confirmLabel: 'Suspend',
+                              title: t('admin.suspend.title'),
+                              message: t('admin.suspend.message', { name: org.name }),
+                              confirmLabel: t('admin.suspend.confirm'),
                               danger: true,
                               onConfirm: async () => {
                                 setConfirm(null);
-                                try { await superAdmin.updateOrgStatus(org.id, 'suspended'); loadData(); showToast('Organization suspended'); } catch { showToast('Failed to suspend', 'error'); }
+                                try { await superAdmin.updateOrgStatus(org.id, 'suspended'); loadData(); showToast(t('admin.suspend.success')); } catch { showToast(t('admin.suspend.error'), 'error'); }
                               },
                               onCancel: () => setConfirm(null),
                             })}
@@ -433,7 +439,7 @@ export default function AdminPage() {
                         {org.status === 'suspended' && (
                           <button
                             onClick={async () => {
-                              try { await superAdmin.updateOrgStatus(org.id, 'active'); loadData(); showToast('Organization activated'); } catch { showToast('Failed to activate', 'error'); }
+                              try { await superAdmin.updateOrgStatus(org.id, 'active'); loadData(); showToast(t('admin.activate.success')); } catch { showToast(t('admin.activate.error'), 'error'); }
                             }}
                             className="px-2 py-1 text-xs bg-hxa-green/20 text-hxa-green rounded hover:bg-hxa-green/30 border border-hxa-green/30"
                           >
@@ -442,15 +448,15 @@ export default function AdminPage() {
                         )}
                         <button
                           onClick={() => setConfirm({
-                            title: 'Rotate Secret',
-                            message: `Generate a new secret for "${org.name}"? The old secret will stop working immediately.`,
-                            confirmLabel: 'Rotate',
+                            title: t('admin.rotate.title'),
+                            message: t('admin.rotate.message', { name: org.name }),
+                            confirmLabel: t('admin.rotate.confirm'),
                             onConfirm: async () => {
                               setConfirm(null);
                               try {
                                 const result = await superAdmin.rotateSecret(org.id);
-                                setSecretModal({ title: `New Secret for "${org.name}"`, secret: result.org_secret, hint: 'Save this secret now — it cannot be retrieved later.' });
-                              } catch { showToast('Failed to rotate secret', 'error'); }
+                                setSecretModal({ title: t('admin.rotate.secretTitle', { name: org.name }), secret: result.org_secret, hint: t('admin.secretHint') });
+                              } catch { showToast(t('admin.rotate.error'), 'error'); }
                             },
                             onCancel: () => setConfirm(null),
                           })}
@@ -461,14 +467,14 @@ export default function AdminPage() {
                         {org.status !== 'destroyed' && (
                           <button
                             onClick={() => setConfirm({
-                              title: 'Destroy Organization',
-                              message: `This will permanently destroy "${org.name}" and all its data. This action cannot be undone.`,
-                              confirmLabel: 'Destroy',
+                              title: t('admin.destroy.title'),
+                              message: t('admin.destroy.message', { name: org.name }),
+                              confirmLabel: t('admin.destroy.confirm'),
                               danger: true,
                               typeTo: org.name,
                               onConfirm: async () => {
                                 setConfirm(null);
-                                try { await superAdmin.destroyOrg(org.id); loadData(); showToast('Organization destroyed'); } catch { showToast('Failed to destroy', 'error'); }
+                                try { await superAdmin.destroyOrg(org.id); loadData(); showToast(t('admin.destroy.success')); } catch { showToast(t('admin.destroy.error'), 'error'); }
                               },
                               onCancel: () => setConfirm(null),
                             })}
@@ -482,7 +488,7 @@ export default function AdminPage() {
                   </tr>
                 ))}
                 {orgs.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-hxa-text-dim">No organizations yet.</td></tr>
+                  <tr><td colSpan={6} className="px-4 py-8 text-center text-hxa-text-dim">{t('admin.noOrgs')}</td></tr>
                 )}
               </tbody>
             </table>
@@ -493,9 +499,9 @@ export default function AdminPage() {
         {/* Invite Codes */}
         <section>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Invite Codes</h2>
+            <h2 className="text-lg font-semibold">{t('admin.section.inviteCodes')}</h2>
             <button onClick={() => setShowCreateCode(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-hxa-accent/20 text-hxa-accent rounded-lg hover:bg-hxa-accent/30 border border-hxa-accent/30 transition-colors">
-              <Plus size={14} /> Create Code
+              <Plus size={14} /> {t('admin.createCode')}
             </button>
           </div>
           <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl overflow-hidden">
@@ -503,12 +509,12 @@ export default function AdminPage() {
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-[#0a0f1a] z-[1]">
                 <tr className="border-b border-hxa-border text-hxa-text-dim text-xs uppercase tracking-wider">
-                  <th className="text-left px-4 py-3">Label</th>
-                  <th className="text-left px-4 py-3">Code</th>
-                  <th className="text-left px-4 py-3">Uses</th>
-                  <th className="text-left px-4 py-3">Expires</th>
-                  <th className="text-left px-4 py-3">Status</th>
-                  <th className="text-right px-4 py-3">Actions</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.label')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.code')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.uses')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.expires')}</th>
+                  <th className="text-left px-4 py-3">{t('admin.table.status')}</th>
+                  <th className="text-right px-4 py-3">{t('admin.table.actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -522,22 +528,22 @@ export default function AdminPage() {
                         <CopyableCode value={code.code || code.id} />
                       </td>
                       <td className="px-4 py-3">{code.use_count}{code.max_uses > 0 ? ` / ${code.max_uses}` : ' / ∞'}</td>
-                      <td className="px-4 py-3 text-hxa-text-dim">{code.expires_at ? new Date(code.expires_at).toLocaleDateString() : 'Never'}</td>
+                      <td className="px-4 py-3 text-hxa-text-dim">{code.expires_at ? new Date(code.expires_at).toLocaleDateString() : t('admin.expires.never')}</td>
                       <td className="px-4 py-3">
-                        {expired ? <span className="text-xs text-hxa-red">Expired</span>
-                          : exhausted ? <span className="text-xs text-hxa-amber">Exhausted</span>
-                          : <span className="text-xs text-hxa-green">Active</span>}
+                        {expired ? <span className="text-xs text-hxa-red">{t('admin.status.expired')}</span>
+                          : exhausted ? <span className="text-xs text-hxa-amber">{t('admin.status.exhausted')}</span>
+                          : <span className="text-xs text-hxa-green">{t('admin.status.active')}</span>}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
                           onClick={() => setConfirm({
-                            title: 'Revoke Invite Code',
-                            message: `Revoke code "${code.label || code.id.slice(0, 12)}"? It will no longer be usable.`,
-                            confirmLabel: 'Revoke',
+                            title: t('admin.revoke.title'),
+                            message: t('admin.revoke.message', { name: code.label || code.id.slice(0, 12) }),
+                            confirmLabel: t('admin.revoke.confirm'),
                             danger: true,
                             onConfirm: async () => {
                               setConfirm(null);
-                              try { await superAdmin.revokeInviteCode(code.id); loadData(); showToast('Code revoked'); } catch { showToast('Failed to revoke', 'error'); }
+                              try { await superAdmin.revokeInviteCode(code.id); loadData(); showToast(t('admin.revoke.success')); } catch { showToast(t('admin.revoke.error'), 'error'); }
                             },
                             onCancel: () => setConfirm(null),
                           })}
@@ -550,7 +556,7 @@ export default function AdminPage() {
                   );
                 })}
                 {inviteCodes.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-hxa-text-dim">No invite codes yet. Click &quot;Create Code&quot; to generate one.</td></tr>
+                  <tr><td colSpan={6} className="px-4 py-8 text-center text-hxa-text-dim">{t('admin.noInviteCodes')}</td></tr>
                 )}
               </tbody>
             </table>
@@ -567,20 +573,21 @@ export default function AdminPage() {
 function CreateOrgModal({ onClose, onCreated }: {
   onClose: () => void; onCreated: (name: string, orgId: string, secret: string) => void;
 }) {
+  const { t } = useTranslations();
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) { setError('Name is required'); return; }
+    if (!name.trim()) { setError(t('admin.createOrg.nameRequired')); return; }
     setError('');
     setLoading(true);
     try {
       const result = await superAdmin.createOrg(name.trim());
       onCreated(result.name, result.id, result.org_secret);
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : 'Failed to create');
+      setError(err instanceof AdminApiError ? err.message : t('admin.createOrg.error'));
     } finally {
       setLoading(false);
     }
@@ -590,12 +597,12 @@ function CreateOrgModal({ onClose, onCreated }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <form onSubmit={handleSubmit} className="bg-[#0d1a2d] border border-hxa-border rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
-          <h3 className="text-lg font-semibold">Create Organization</h3>
+          <h3 className="text-lg font-semibold">{t('admin.createOrg.title')}</h3>
           <button type="button" onClick={onClose} className="text-hxa-text-dim hover:text-hxa-text"><X size={18} /></button>
         </div>
         <input
           type="text"
-          placeholder="Organization name"
+          placeholder={t('admin.createOrg.placeholder')}
           value={name}
           onChange={e => setName(e.target.value)}
           className="w-full bg-black/30 border border-hxa-border rounded-lg px-4 py-3 text-sm outline-none focus:border-hxa-accent mb-3"
@@ -603,7 +610,7 @@ function CreateOrgModal({ onClose, onCreated }: {
         />
         {error && <p className="text-hxa-red text-sm mb-3">{error}</p>}
         <button type="submit" disabled={loading} className="w-full gradient-btn rounded-lg py-2.5 text-sm font-bold disabled:opacity-50">
-          {loading ? 'Creating...' : 'Create'}
+          {loading ? t('admin.createOrg.creating') : t('admin.createOrg.create')}
         </button>
       </form>
     </div>
@@ -615,6 +622,7 @@ function CreateOrgModal({ onClose, onCreated }: {
 function CreateCodeModal({ onClose, onCreated }: {
   onClose: () => void; onCreated: (code: string) => void;
 }) {
+  const { t } = useTranslations();
   const [label, setLabel] = useState('');
   const [maxUses, setMaxUses] = useState('0');
   const [expiresIn, setExpiresIn] = useState('0');
@@ -633,7 +641,7 @@ function CreateCodeModal({ onClose, onCreated }: {
       });
       onCreated(result.code || result.id);
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : 'Failed to create');
+      setError(err instanceof AdminApiError ? err.message : t('admin.createCode.error'));
     } finally {
       setLoading(false);
     }
@@ -643,20 +651,20 @@ function CreateCodeModal({ onClose, onCreated }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <form onSubmit={handleSubmit} className="bg-[#0d1a2d] border border-hxa-border rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
-          <h3 className="text-lg font-semibold">Create Invite Code</h3>
+          <h3 className="text-lg font-semibold">{t('admin.createCode.title')}</h3>
           <button type="button" onClick={onClose} className="text-hxa-text-dim hover:text-hxa-text"><X size={18} /></button>
         </div>
         <div className="flex flex-col gap-3 mb-4">
           <input
             type="text"
-            placeholder="Label (optional)"
+            placeholder={t('admin.createCode.labelPlaceholder')}
             value={label}
             onChange={e => setLabel(e.target.value)}
             className="bg-black/30 border border-hxa-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-hxa-accent"
           />
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs text-hxa-text-dim mb-1 block">Max Uses (0=unlimited)</label>
+              <label className="text-xs text-hxa-text-dim mb-1 block">{t('admin.createCode.maxUses')}</label>
               <input
                 type="number"
                 value={maxUses}
@@ -665,7 +673,7 @@ function CreateCodeModal({ onClose, onCreated }: {
               />
             </div>
             <div>
-              <label className="text-xs text-hxa-text-dim mb-1 block">Expires in (sec, 0=never)</label>
+              <label className="text-xs text-hxa-text-dim mb-1 block">{t('admin.createCode.expiresIn')}</label>
               <input
                 type="number"
                 value={expiresIn}
@@ -677,7 +685,7 @@ function CreateCodeModal({ onClose, onCreated }: {
         </div>
         {error && <p className="text-hxa-red text-sm mb-3">{error}</p>}
         <button type="submit" disabled={loading} className="w-full gradient-btn rounded-lg py-2.5 text-sm font-bold disabled:opacity-50">
-          {loading ? 'Creating...' : 'Create Code'}
+          {loading ? t('admin.createCode.creating') : t('admin.createCode.create')}
         </button>
       </form>
     </div>

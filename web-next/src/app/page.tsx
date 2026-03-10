@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import * as api from '@/lib/api';
 import { AdminApiError, orgAdmin } from '@/lib/admin-api';
+import { useTranslations } from '@/i18n/context';
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
@@ -11,6 +12,7 @@ type LoginTab = 'org' | 'bot';
 
 export default function LoginPage() {
   const router = useRouter();
+  const { t } = useTranslations();
   const [tab, setTab] = useState<LoginTab>('org');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -45,13 +47,13 @@ export default function LoginPage() {
 
     try {
       if (!token.trim() || !ownerName.trim()) {
-        setError('Bot token and display name are required');
+        setError(t('login.error.botRequired'));
         return;
       }
       await api.login({ token: token.trim(), owner_name: ownerName.trim() });
       router.replace('/dashboard/');
     } catch (err) {
-      setError(err instanceof api.ApiError ? err.message : 'Login failed');
+      setError(err instanceof api.ApiError ? err.message : t('login.error.failed'));
     } finally {
       setSubmitting(false);
     }
@@ -64,14 +66,14 @@ export default function LoginPage() {
 
     try {
       if (!orgId.trim() || !orgSecret.trim()) {
-        setError('Org ID and org secret are required');
+        setError(t('login.error.orgRequired'));
         return;
       }
 
       await orgAdmin.login(orgId.trim(), orgSecret.trim());
       router.replace('/org/');
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof AdminApiError ? err.message : err instanceof Error ? err.message : t('login.error.failed'));
     } finally {
       setSubmitting(false);
     }
@@ -93,9 +95,9 @@ export default function LoginPage() {
       {/* Logo */}
       <div className="flex flex-col items-center gap-4 mb-2">
         <img src={`${BASE_PATH}/images/logo.png`} alt="HXA-Connect" className="h-12 animate-pulse-glow" style={{ filter: 'drop-shadow(0 0 12px rgba(45,212,191,0.6))' }} />
-        <h1 className="text-3xl font-bold gradient-text">HXA-Connect</h1>
+        <h1 className="text-3xl font-bold gradient-text">{t('login.title')}</h1>
         <p className="text-hxa-text-dim text-sm tracking-wider uppercase font-medium">
-          Communication Hub
+          {t('login.subtitle')}
         </p>
       </div>
 
@@ -112,7 +114,7 @@ export default function LoginPage() {
                 : 'text-hxa-text-dim hover:text-hxa-text'
             }`}
           >
-            Org Admin
+            {t('login.tab.orgAdmin')}
           </button>
           <button
             type="button"
@@ -123,7 +125,7 @@ export default function LoginPage() {
                 : 'text-hxa-text-dim hover:text-hxa-text'
             }`}
           >
-            Bot Login
+            {t('login.tab.botLogin')}
           </button>
         </div>
 
@@ -131,18 +133,18 @@ export default function LoginPage() {
         {tab === 'org' && (
           <form onSubmit={handleOrgLogin} className="flex flex-col gap-5">
             <p className="text-hxa-text-dim text-xs leading-relaxed">
-              Your Org ID and Secret were generated when you created the organization. Check your bot&apos;s setup logs or ask the bot that created the org.
+              {t('login.hint.org')}
             </p>
             <input
               type="text"
-              placeholder="Org ID"
+              placeholder={t('login.placeholder.orgId')}
               value={orgId}
               onChange={(e) => setOrgId(e.target.value)}
               className={inputClass}
             />
             <input
               type="password"
-              placeholder="Org Secret"
+              placeholder={t('login.placeholder.orgSecret')}
               value={orgSecret}
               onChange={(e) => setOrgSecret(e.target.value)}
               className={inputClass}
@@ -155,7 +157,7 @@ export default function LoginPage() {
               disabled={submitting}
               className="gradient-btn rounded-lg py-3.5 text-[15px] font-bold cursor-pointer transition-all mt-2 shadow-[0_4px_12px_rgba(45,212,191,0.2)] hover:-translate-y-0.5 hover:shadow-[0_0_15px_rgba(45,212,191,0.4)] active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {submitting ? 'Connecting...' : 'Connect'}
+              {submitting ? t('login.button.connecting') : t('login.button.connect')}
             </button>
           </form>
         )}
@@ -164,18 +166,18 @@ export default function LoginPage() {
         {tab === 'bot' && (
           <form onSubmit={handleBotLogin} className="flex flex-col gap-5">
             <p className="text-hxa-text-dim text-xs leading-relaxed">
-              Your bot token was provided when it registered to the organization. Check your bot&apos;s config, or ask a bot already in the org to retrieve it for you.
+              {t('login.hint.bot')}
             </p>
             <input
               type="password"
-              placeholder="Bot Token"
+              placeholder={t('login.placeholder.botToken')}
               value={token}
               onChange={(e) => setToken(e.target.value)}
               className={inputClass}
             />
             <input
               type="text"
-              placeholder="Display Name"
+              placeholder={t('login.placeholder.displayName')}
               value={ownerName}
               onChange={(e) => setOwnerName(e.target.value)}
               className={inputClass}
@@ -188,7 +190,7 @@ export default function LoginPage() {
               disabled={submitting}
               className="gradient-btn rounded-lg py-3.5 text-[15px] font-bold cursor-pointer transition-all mt-2 shadow-[0_4px_12px_rgba(45,212,191,0.2)] hover:-translate-y-0.5 hover:shadow-[0_0_15px_rgba(45,212,191,0.4)] active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {submitting ? 'Connecting...' : 'Connect'}
+              {submitting ? t('login.button.connecting') : t('login.button.connect')}
             </button>
           </form>
         )}
@@ -200,7 +202,7 @@ export default function LoginPage() {
           href={`${BASE_PATH}/admin/`}
           className="text-hxa-text-dim text-sm hover:text-hxa-accent transition-colors"
         >
-          Super Admin Console &rarr;
+          {t('login.superAdminLink')}
         </a>
       )}
     </div>

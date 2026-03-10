@@ -9,6 +9,7 @@ import { useSession } from '@/hooks/useSession';
 import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/components/ui/MentionPopup';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { useTranslations } from '@/i18n/context';
 
 interface ThreadViewProps {
   threadId: string;
@@ -27,6 +28,7 @@ interface ThreadViewProps {
 
 export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChange, wsParticipantEvents, wsBotStatusEvents, onOpenArtifacts }: ThreadViewProps) {
   const { session } = useSession();
+  const { t } = useTranslations();
   const [thread, setThread] = useState<Thread | null>(null);
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -311,7 +313,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   if (!thread) {
     return (
       <div className="flex-1 flex items-center justify-center text-hxa-text-dim text-sm">
-        Thread not found
+        {t('thread.notFound')}
       </div>
     );
   }
@@ -354,7 +356,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
               className="text-xs text-hxa-accent hover:text-hxa-accent-hover transition-colors disabled:opacity-50 inline-flex items-center gap-1"
             >
               {loadingOlder ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
-              Load older messages
+              {t('thread.loadOlder')}
             </button>
           </div>
         )}
@@ -404,7 +406,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
                 const ta = textareaRef.current;
                 if (ta) updateMentionState(ta.value, ta.selectionStart);
               }}
-              placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+              placeholder={t('thread.composerPlaceholder')}
               rows={1}
               className="flex-1 bg-black/30 border border-hxa-border rounded-lg px-3 py-2.5 text-sm text-hxa-text placeholder:text-hxa-text-muted outline-none focus:border-hxa-accent transition-colors resize-none"
             />
@@ -422,7 +424,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       {/* Closed thread banner */}
       {!canSend && (
         <div className="shrink-0 px-4 py-2.5 border-t border-hxa-border bg-hxa-bg-tertiary text-center text-xs text-hxa-text-muted">
-          This thread is {thread.status} — messages are read-only
+          {t('thread.readOnly', { status: t(`thread.status.${thread.status}`) })}
         </div>
       )}
     </div>
@@ -439,6 +441,7 @@ function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; i
   const isHuman = provenance?.authored_by === 'human';
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
   const reply = message.reply_to_message;
+  const { t } = useTranslations();
 
   // Swipe & long-press state for mobile reply
   const touchRef = useRef<{ startX: number; startY: number; ts: number } | null>(null);
@@ -536,15 +539,15 @@ function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; i
           </span>
           {isHuman && (
             <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-hxa-amber/20 text-amber-400 border border-amber-500/30">
-              {ownerName || 'Human'}
+              {ownerName || t('thread.human')}
             </span>
           )}
           <span className="text-[10px] text-hxa-text-muted">
-            {formatTime(message.created_at)}
+            {formatTime(message.created_at, t)}
           </span>
           {/* Reply button — visible on hover (desktop) and always on mobile via touch */}
           {onReply && (
-            <button onClick={onReply} className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-muted hover:text-hxa-accent ml-auto" title="Reply">
+            <button onClick={onReply} className="opacity-0 group-hover:opacity-100 transition-opacity text-hxa-text-muted hover:text-hxa-accent ml-auto" title={t('thread.reply')}>
               <Reply size={12} />
             </button>
           )}
@@ -570,6 +573,7 @@ function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; i
 // ─── Part Renderer ───
 
 function PartRenderer({ part }: { part: MessagePart }) {
+  const { t } = useTranslations();
   switch (part.type) {
     case 'text':
     case 'markdown':
@@ -577,14 +581,14 @@ function PartRenderer({ part }: { part: MessagePart }) {
     case 'image':
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || 'Image'}</span>
+          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('thread.image')}</span>
         </a>
       );
     case 'file':
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
           <FileText size={12} />
-          {part.name || part.filename || 'File'}
+          {part.name || part.filename || t('thread.file')}
           {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
         </a>
       );

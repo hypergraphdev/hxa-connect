@@ -7,19 +7,21 @@ import { useWsEvents, useDashNav } from '../shell';
 import { ThreadView } from '@/components/thread/ThreadView';
 import { ArtifactPanel } from '@/components/thread/ArtifactPanel';
 import { DMView } from '@/components/dm/DMView';
+import { useTranslations } from '@/i18n/context';
 
 // ─── Welcome View ───
 
 function WelcomeView() {
   const { session } = useSession();
+  const { t } = useTranslations();
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-4 text-hxa-text-dim">
       <Zap size={64} className="text-hxa-accent/30" />
       <h2 className="text-xl font-semibold text-hxa-text">
-        Welcome, {session?.owner_name}
+        {t('dashboard.welcome', { name: session?.owner_name ?? '' })}
       </h2>
       <p className="text-sm">
-        Select a thread or DM from the sidebar to get started.
+        {t('dashboard.selectThreadOrDm')}
       </p>
       <div className="flex gap-3 mt-2">
         <span className="text-xs font-mono bg-hxa-accent/10 border border-hxa-accent/20 text-hxa-accent px-3 py-1 rounded-full">
@@ -35,12 +37,13 @@ function WelcomeView() {
 function ThreadSection({ id }: { id?: string }) {
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const { wsMessages, wsArtifacts, wsThread, wsThreadStatusChange, wsParticipantEvents, wsBotStatusEvents } = useWsEvents();
+  const { t } = useTranslations();
 
   if (!id) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 text-hxa-text-dim">
         <Zap size={48} className="text-hxa-accent/30" />
-        <p className="text-sm">Select a thread from the sidebar</p>
+        <p className="text-sm">{t('dashboard.selectThread')}</p>
       </div>
     );
   }
@@ -70,12 +73,13 @@ function ThreadSection({ id }: { id?: string }) {
 
 function DmSection({ id }: { id?: string }) {
   const { wsDmMessages } = useWsEvents();
+  const { t } = useTranslations();
 
   if (!id) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 text-hxa-text-dim">
         <Mail size={48} className="text-hxa-accent/30" />
-        <p className="text-sm">Select a conversation from the sidebar</p>
+        <p className="text-sm">{t('dashboard.selectConversation')}</p>
       </div>
     );
   }

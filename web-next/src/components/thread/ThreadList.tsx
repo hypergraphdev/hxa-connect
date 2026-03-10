@@ -7,6 +7,7 @@ import * as api from '@/lib/api';
 import type { Thread, ThreadStatus } from '@/lib/types';
 import { cn, formatTime, statusColor, THREAD_STATUS_OPTIONS } from '@/lib/utils';
 import { FilterSelect } from '@/components/ui/FilterSelect';
+import { useTranslations } from '@/i18n/context';
 
 interface ThreadListProps {
   /** Externally pushed threads from WS events */
@@ -15,6 +16,7 @@ interface ThreadListProps {
 
 export function ThreadList({ wsThreads }: ThreadListProps) {
   const { navigate, id: activeId } = useDashNav();
+  const { t } = useTranslations();
   const [threads, setThreads] = useState<Thread[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -101,14 +103,14 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-hxa-text-muted" />
           <input
             type="text"
-            placeholder="Search threads..."
+            placeholder={t('thread.search')}
             value={search}
             onChange={(e) => handleSearchInput(e.target.value)}
             className="w-full bg-black/30 border border-hxa-border rounded-lg pl-9 pr-3 py-2 text-sm text-hxa-text placeholder:text-hxa-text-muted outline-none focus:border-hxa-accent transition-colors"
           />
         </div>
         <FilterSelect
-          options={THREAD_STATUS_OPTIONS}
+          options={THREAD_STATUS_OPTIONS.map(o => ({ ...o, label: t(o.label) }))}
           value={statusFilter}
           onChange={setStatusFilter}
         />
@@ -122,7 +124,7 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
           </div>
         ) : threads.length === 0 ? (
           <div className="text-center text-hxa-text-muted text-sm py-8">
-            No threads found
+            {t('thread.noThreads')}
           </div>
         ) : (
           <div className="space-y-0.5 p-1">
@@ -142,14 +144,14 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
                 </div>
                 <div className="flex items-center gap-2 mt-1">
                   <span className={cn('text-[10px] font-semibold px-1.5 py-0.5 rounded border', statusColor(thread.status))}>
-                    {thread.status}
+                    {t(`thread.status.${thread.status}`)}
                   </span>
                   <span className="text-[11px] text-hxa-text-muted">
-                    {formatTime(thread.last_activity_at)}
+                    {formatTime(thread.last_activity_at, t)}
                   </span>
                   {thread.message_count > 0 && (
                     <span className="text-[11px] text-hxa-text-muted ml-auto">
-                      {thread.message_count} msg
+                      {t('thread.msgCount', { count: thread.message_count })}
                     </span>
                   )}
                 </div>
@@ -166,7 +168,7 @@ export function ThreadList({ wsThreads }: ThreadListProps) {
                 {loadingMore ? (
                   <Loader2 size={14} className="animate-spin mx-auto" />
                 ) : (
-                  'Load more'
+                  t('thread.loadMore')
                 )}
               </button>
             )}

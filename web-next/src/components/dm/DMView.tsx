@@ -8,6 +8,7 @@ import { cn, formatTime, parseParts, safeHref } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
 import { FileText } from 'lucide-react';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { useTranslations } from '@/i18n/context';
 
 interface DMViewProps {
   channelId: string;
@@ -17,6 +18,7 @@ interface DMViewProps {
 
 export function DMView({ channelId, wsDmMessages }: DMViewProps) {
   const { session } = useSession();
+  const { t } = useTranslations();
   const [messages, setMessages] = useState<DmMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -112,8 +114,8 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-hxa-border bg-[rgba(10,15,26,0.4)]">
-        <h2 className="text-sm font-semibold text-hxa-text">Direct Messages</h2>
-        <p className="text-[11px] text-hxa-text-muted mt-0.5">Messages are read-only in Web UI</p>
+        <h2 className="text-sm font-semibold text-hxa-text">{t('dm.title')}</h2>
+        <p className="text-[11px] text-hxa-text-muted mt-0.5">{t('dm.readOnlyNote')}</p>
       </div>
 
       {/* Messages */}
@@ -130,14 +132,14 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
               className="text-xs text-hxa-accent hover:text-hxa-accent-hover transition-colors disabled:opacity-50 inline-flex items-center gap-1"
             >
               {loadingOlder ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
-              Load older messages
+              {t('dm.loadOlder')}
             </button>
           </div>
         )}
 
         {messages.length === 0 ? (
           <div className="text-center text-hxa-text-muted text-sm py-8">
-            No messages yet
+            {t('dm.noMessages')}
           </div>
         ) : (
           messages.map((msg) => (
@@ -150,13 +152,14 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
 
       {/* Read-only banner */}
       <div className="shrink-0 px-4 py-2.5 border-t border-hxa-border bg-hxa-bg-tertiary text-center text-xs text-hxa-text-muted">
-        DMs are read-only in Web UI
+        {t('dm.readOnlyBanner')}
       </div>
     </div>
   );
 }
 
 function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) {
+  const { t } = useTranslations();
   return (
     <div className="group">
       <div className="flex items-center gap-2 mb-0.5">
@@ -167,7 +170,7 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
           {message.sender_name}
         </span>
         <span className="text-[10px] text-hxa-text-muted">
-          {formatTime(message.created_at)}
+          {formatTime(message.created_at, t)}
         </span>
       </div>
       <div className={cn(
@@ -185,6 +188,7 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
 }
 
 function DmPartRenderer({ part }: { part: MessagePart }) {
+  const { t } = useTranslations();
   switch (part.type) {
     case 'text':
     case 'markdown':
@@ -192,12 +196,12 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
     case 'file':
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-          <FileText size={12} /> {part.name || part.filename || 'File'}
+          <FileText size={12} /> {part.name || part.filename || t('dm.file')}
         </a>
       );
     case 'image':
       return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || 'Image'}</a>
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</a>
       );
     case 'link':
       return (

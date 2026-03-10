@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
+import { useTranslations } from '@/i18n/context';
 
 export interface MentionCandidate {
   id: string;
@@ -23,6 +24,7 @@ interface MentionPopupProps {
 
 export function MentionPopup({ candidates, query, selectedIndex, onSelect, onClose, onHover, anchor }: MentionPopupProps) {
   const listRef = useRef<HTMLDivElement>(null);
+  const { t } = useTranslations();
 
   const filtered = candidates.filter((c) =>
     c.name.toLowerCase().includes(query.toLowerCase()),
@@ -60,7 +62,7 @@ export function MentionPopup({ candidates, query, selectedIndex, onSelect, onClo
               c.online ? 'bg-hxa-green shadow-[0_0_4px] text-hxa-green' : 'bg-hxa-text-muted/40',
             )} />
           )}
-          <span className="truncate">{c.isAll ? `${c.name} — notify everyone` : c.name}</span>
+          <span className="truncate">{c.isAll ? t('mention.all') : c.name}</span>
         </button>
       ))}
     </div>

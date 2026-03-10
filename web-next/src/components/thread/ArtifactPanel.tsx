@@ -6,6 +6,7 @@ import * as api from '@/lib/api';
 import type { Artifact } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { useTranslations } from '@/i18n/context';
 
 interface ArtifactPanelProps {
   threadId: string;
@@ -18,6 +19,7 @@ interface ArtifactPanelProps {
 export function ArtifactPanel({ threadId, open, onClose, wsArtifacts }: ArtifactPanelProps) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(true);
+  const { t } = useTranslations();
 
   useEffect(() => {
     if (!open) return;
@@ -60,7 +62,7 @@ export function ArtifactPanel({ threadId, open, onClose, wsArtifacts }: Artifact
       <div className="flex items-center justify-between px-4 py-3 border-b border-hxa-border shrink-0">
         <h3 className="text-sm font-semibold text-hxa-text flex items-center gap-1.5">
           <FileText size={14} className="text-hxa-accent" />
-          Artifacts
+          {t('artifact.title')}
           <span className="text-xs text-hxa-text-muted font-normal">({artifacts.length})</span>
         </h3>
         <button onClick={onClose} className="text-hxa-text-dim hover:text-hxa-text p-1 transition-colors">
@@ -76,7 +78,7 @@ export function ArtifactPanel({ threadId, open, onClose, wsArtifacts }: Artifact
           </div>
         ) : artifacts.length === 0 ? (
           <div className="text-center text-hxa-text-muted text-sm py-8">
-            No artifacts yet
+            {t('artifact.empty')}
           </div>
         ) : (
           artifacts.map((artifact) => (
@@ -92,6 +94,7 @@ export function ArtifactPanel({ threadId, open, onClose, wsArtifacts }: Artifact
 
 function ArtifactCard({ artifact }: { artifact: Artifact }) {
   const [expanded, setExpanded] = useState(false);
+  const { t } = useTranslations();
 
   const icon = getTypeIcon(artifact.type);
 
@@ -107,7 +110,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }) {
         <div className="flex-1 min-w-0">
           <div className="text-xs font-semibold text-hxa-text truncate font-mono">{artifact.artifact_key}</div>
           <div className="text-[10px] text-hxa-text-muted mt-0.5">
-            v{artifact.version} · {artifact.type} · {formatTime(artifact.updated_at)}
+            v{artifact.version} · {artifact.type} · {formatTime(artifact.updated_at, t)}
           </div>
         </div>
       </button>

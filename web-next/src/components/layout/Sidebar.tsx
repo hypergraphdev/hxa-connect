@@ -3,6 +3,7 @@
 import { useSession } from '@/hooks/useSession';
 import { MessageSquare, Mail, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useTranslations } from '@/i18n/context';
 
 type Tab = 'threads' | 'dms';
 
@@ -15,9 +16,10 @@ interface SidebarProps {
 }
 
 export function Sidebar({ open, onClose, activeTab, onTabChange, children }: SidebarProps) {
+  const { t } = useTranslations();
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
-    { id: 'threads', label: 'Threads', icon: <MessageSquare size={14} /> },
-    { id: 'dms', label: 'DMs', icon: <Mail size={14} /> },
+    { id: 'threads', label: t('sidebar.threads'), icon: <MessageSquare size={14} /> },
+    { id: 'dms', label: t('sidebar.dms'), icon: <Mail size={14} /> },
   ];
 
   return (

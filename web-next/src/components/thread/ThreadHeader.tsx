@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import { User, Clock, FileText, X, ChevronDown, Circle } from 'lucide-react';
 import { cn, formatTime, statusColor, STATUS_TRANSITIONS } from '@/lib/utils';
 import type { ThreadStatus } from '@/lib/types';
+import { useTranslations } from '@/i18n/context';
 
 export interface ThreadParticipantInfo {
   id: string;
@@ -36,6 +37,7 @@ export function ThreadHeader({
   onStatusChange,
   onOpenArtifacts,
 }: ThreadHeaderProps) {
+  const { t } = useTranslations();
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const statusRef = useRef<HTMLDivElement>(null);
@@ -86,7 +88,7 @@ export function ThreadHeader({
                 (!canChangeStatus || allowedTransitions.length === 0) && 'cursor-default',
               )}
             >
-              {status}
+              {t(`thread.status.${status}`)}
               {canChangeStatus && allowedTransitions.length > 0 && <ChevronDown size={8} />}
             </button>
             {statusDropdownOpen && (
@@ -98,7 +100,7 @@ export function ThreadHeader({
                     className="w-full text-left px-3 py-1.5 text-xs hover:bg-hxa-bg-hover transition-colors flex items-center gap-2"
                   >
                     <span className={cn('w-2 h-2 rounded-full', statusDot(s))} />
-                    {s}
+                    {t(`thread.status.${s}`)}
                   </button>
                 ))}
               </div>
@@ -116,7 +118,7 @@ export function ThreadHeader({
             {participantsOpen && (
               <div className="absolute top-full left-0 mt-1 z-50 bg-[#0d1a2d] border border-hxa-border rounded-lg shadow-xl py-2 px-3 min-w-[180px] max-w-[260px]">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-hxa-text">Participants ({participantCount})</span>
+                  <span className="text-xs font-semibold text-hxa-text">{t('thread.participants', { count: participantCount })}</span>
                   <button onClick={() => setParticipantsOpen(false)} className="text-hxa-text-muted hover:text-hxa-text">
                     <X size={12} />
                   </button>
@@ -138,14 +140,14 @@ export function ThreadHeader({
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-hxa-text-muted">No participant details available</p>
+                  <p className="text-xs text-hxa-text-muted">{t('thread.noParticipants')}</p>
                 )}
               </div>
             )}
           </div>
 
           <span className="text-[11px] text-hxa-text-muted flex items-center gap-1">
-            <Clock size={10} /> {formatTime(createdAt)}
+            <Clock size={10} /> {formatTime(createdAt, t)}
           </span>
         </div>
       </div>
@@ -155,7 +157,7 @@ export function ThreadHeader({
           onClick={onOpenArtifacts}
           className="text-xs text-hxa-accent border border-hxa-accent/30 px-2.5 py-1.5 rounded-md hover:bg-hxa-accent/10 transition-colors flex items-center gap-1"
         >
-          <FileText size={12} /> Artifacts
+          <FileText size={12} /> {t('thread.artifacts')}
         </button>
       )}
     </div>

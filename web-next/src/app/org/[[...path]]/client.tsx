@@ -17,6 +17,7 @@ import { THREAD_STATUS_OPTIONS, safeHref } from '@/lib/utils';
 import { FilterSelect } from '@/components/ui/FilterSelect';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { useTranslations } from '@/i18n/context';
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
@@ -35,13 +36,14 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
   title: string; message: string; confirmLabel: string; danger?: boolean;
   onConfirm: () => void; onCancel: () => void;
 }) {
+  const { t } = useTranslations();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
       <div className="bg-[#0d1a2d] border border-hxa-border rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <h3 className="text-lg font-semibold mb-2">{title}</h3>
         <p className="text-hxa-text-dim text-sm mb-4">{message}</p>
         <div className="flex justify-end gap-3">
-          <button onClick={onCancel} className="px-4 py-2 text-sm text-hxa-text-dim hover:text-hxa-text">Cancel</button>
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-hxa-text-dim hover:text-hxa-text">{t('org.confirm.cancel')}</button>
           <button onClick={onConfirm} className={`px-4 py-2 text-sm font-medium rounded-lg ${
             danger ? 'bg-hxa-red/20 text-hxa-red hover:bg-hxa-red/30 border border-hxa-red/30' : 'bg-hxa-accent/20 text-hxa-accent hover:bg-hxa-accent/30 border border-hxa-accent/30'
           }`}>{confirmLabel}</button>
@@ -53,6 +55,7 @@ function ConfirmDialog({ title, message, confirmLabel, danger, onConfirm, onCanc
 
 function SecretModal({ title, secret, onClose }: { title: string; secret: string; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useTranslations();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div className="bg-[#0d1a2d] border border-hxa-border rounded-xl p-6 max-w-lg w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -60,13 +63,13 @@ function SecretModal({ title, secret, onClose }: { title: string; secret: string
           <h3 className="text-lg font-semibold">{title}</h3>
           <button onClick={onClose} className="text-hxa-text-dim hover:text-hxa-text"><X size={18} /></button>
         </div>
-        <p className="text-hxa-amber text-xs mb-3">This is shown only once. Copy it now.</p>
+        <p className="text-hxa-amber text-xs mb-3">{t('org.secretShownOnce')}</p>
         <div className="bg-black/40 border border-hxa-border rounded-lg p-3 font-mono text-sm break-all text-hxa-accent mb-4">{secret}</div>
         <button
           onClick={() => { navigator.clipboard.writeText(secret); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-hxa-accent/20 text-hxa-accent rounded-lg hover:bg-hxa-accent/30 text-sm font-medium border border-hxa-accent/30"
         >
-          <Copy size={14} /> {copied ? 'Copied!' : 'Copy to Clipboard'}
+          <Copy size={14} /> {copied ? t('org.copied') : t('org.copyClipboard')}
         </button>
       </div>
     </div>
@@ -74,6 +77,7 @@ function SecretModal({ title, secret, onClose }: { title: string; secret: string
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const { t } = useTranslations();
   const colors: Record<string, string> = {
     active: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     open: 'bg-hxa-blue/20 text-hxa-blue border-hxa-blue/30',
@@ -85,18 +89,21 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span className={`px-2 py-0.5 text-xs font-medium rounded border ${colors[status] ?? 'bg-hxa-text-dim/20 text-hxa-text-dim border-hxa-text-dim/30'}`}>
-      {status}
+      {t(`thread.status.${status}`)}
     </span>
   );
 }
 
-function timeAgo(ts: string | number): string {
-  const d = typeof ts === 'number' ? ts : new Date(ts).getTime();
-  const sec = Math.floor((Date.now() - d) / 1000);
-  if (sec < 60) return 'just now';
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
-  return `${Math.floor(sec / 86400)}d ago`;
+function useTimeAgo() {
+  const { t } = useTranslations();
+  return (ts: string | number): string => {
+    const d = typeof ts === 'number' ? ts : new Date(ts).getTime();
+    const sec = Math.floor((Date.now() - d) / 1000);
+    if (sec < 60) return t('time.justNow');
+    if (sec < 3600) return t('time.mAgo', { count: Math.floor(sec / 60) });
+    if (sec < 86400) return t('time.hAgo', { count: Math.floor(sec / 3600) });
+    return t('time.dAgo', { count: Math.floor(sec / 86400) });
+  };
 }
 
 // ─── Views ───
@@ -111,6 +118,8 @@ type View =
 
 export default function OrgDashboard() {
   const router = useRouter();
+  const { t } = useTranslations();
+  const timeAgo = useTimeAgo();
   const [authenticated, setAuthenticated] = useState(false);
   const [orgName, setOrgName] = useState('');
   const [orgId, setOrgId] = useState('');
@@ -359,36 +368,36 @@ export default function OrgDashboard() {
           </button>
           <div className="flex-1" />
           <button onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-accent/10 text-hxa-accent rounded-lg hover:bg-hxa-accent/20 border border-hxa-accent/30 transition-colors max-md:px-2 max-md:gap-0">
-            <Plus size={14} /> <span className="hidden sm:inline">Invite Bot</span>
+            <Plus size={14} /> <span className="hidden sm:inline">{t('org.inviteBot')}</span>
           </button>
           <button onClick={() => setConfirm({
-            title: 'Rotate Org Secret',
-            message: 'Generate a new secret? The old one stops working immediately.',
-            confirmLabel: 'Rotate',
+            title: t('org.rotateSecret.title'),
+            message: t('org.rotateSecret.message'),
+            confirmLabel: t('org.rotateSecret.confirm'),
             onConfirm: async () => {
               setConfirm(null);
               try {
                 const result = await orgAdmin.rotateSecret();
-                setSecretModal({ title: 'New Org Secret', secret: result.org_secret });
-              } catch { showToast('Failed to rotate', 'error'); }
+                setSecretModal({ title: t('org.rotateSecret.newTitle'), secret: result.org_secret });
+              } catch { showToast(t('org.rotateSecret.error'), 'error'); }
             },
             onCancel: () => setConfirm(null),
           })} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-amber/10 text-hxa-amber rounded-lg hover:bg-hxa-amber/20 border border-hxa-amber/30 transition-colors max-md:px-2 max-md:gap-0">
-            <RotateCw size={14} /> <span className="hidden sm:inline">Rotate Secret</span>
+            <RotateCw size={14} /> <span className="hidden sm:inline">{t('org.rotateSecret')}</span>
           </button>
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-hxa-border text-xs font-mono">
             <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-hxa-green animate-pulse' : 'bg-hxa-red'}`} />
-            <span className="text-hxa-text-dim">{wsConnected ? 'Connected' : 'Disconnected'}</span>
+            <span className="text-hxa-text-dim">{wsConnected ? t('header.connected') : t('header.disconnected')}</span>
           </div>
           <button onClick={() => setConfirm({
-            title: 'Log Out',
-            message: 'Are you sure you want to log out?',
-            confirmLabel: 'Log Out',
+            title: t('org.logoutTitle'),
+            message: t('org.logoutMessage'),
+            confirmLabel: t('org.logoutConfirm'),
             danger: true,
             onConfirm: () => { setConfirm(null); handleLogout(); },
             onCancel: () => setConfirm(null),
           })} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-hxa-text-dim hover:text-hxa-red transition-colors">
-            <LogOut size={14} /> <span className="hidden sm:inline">Logout</span>
+            <LogOut size={14} /> <span className="hidden sm:inline">{t('org.logout')}</span>
           </button>
         </div>
       </header>
@@ -408,7 +417,7 @@ export default function OrgDashboard() {
                 sidebarTab === 'bots' ? 'text-hxa-accent border-b-2 border-hxa-accent' : 'text-hxa-text-dim hover:text-hxa-text'
               }`}
             >
-              <Bot size={14} className="inline mr-1" /> Bots ({bots.length})
+              <Bot size={14} className="inline mr-1" /> {t('org.sidebar.bots', { count: bots.length })}
             </button>
             <button
               onClick={() => setSidebarTab('threads')}
@@ -416,7 +425,7 @@ export default function OrgDashboard() {
                 sidebarTab === 'threads' ? 'text-hxa-accent border-b-2 border-hxa-accent' : 'text-hxa-text-dim hover:text-hxa-text'
               }`}
             >
-              <MessageSquare size={14} className="inline mr-1" /> Threads ({threads.length})
+              <MessageSquare size={14} className="inline mr-1" /> {t('org.sidebar.threads', { count: threads.length })}
             </button>
           </div>
 
@@ -428,7 +437,7 @@ export default function OrgDashboard() {
                   <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-hxa-text-dim" />
                   <input
                     type="text"
-                    placeholder="Search bots..."
+                    placeholder={t('org.search.bots')}
                     value={botSearch}
                     onChange={e => setBotSearch(e.target.value)}
                     className="w-full bg-black/30 border border-hxa-border rounded-lg pl-8 pr-3 py-2 text-xs outline-none focus:border-hxa-accent"
@@ -468,14 +477,14 @@ export default function OrgDashboard() {
                   <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-hxa-text-dim" />
                   <input
                     type="text"
-                    placeholder="Search threads..."
+                    placeholder={t('org.search.threads')}
                     value={threadSearch}
                     onChange={e => setThreadSearch(e.target.value)}
                     className="w-full bg-black/30 border border-hxa-border rounded-lg pl-8 pr-3 py-2 text-xs outline-none focus:border-hxa-accent"
                   />
                 </div>
                 <FilterSelect
-                  options={THREAD_STATUS_OPTIONS}
+                  options={THREAD_STATUS_OPTIONS.map(o => ({ ...o, label: t(o.label) }))}
                   value={threadStatus}
                   onChange={setThreadStatus}
                   size="sm"
@@ -514,10 +523,10 @@ export default function OrgDashboard() {
                 {/* Stats row — 4 cols desktop, 2 cols mobile */}
                 <div className="flex flex-wrap gap-4">
                   {[
-                    { label: 'Total Bots', value: bots.length, color: 'text-hxa-accent' },
-                    { label: 'Online', value: bots.filter(b => b.online).length, color: 'text-hxa-green' },
-                    { label: 'Active Threads', value: threads.filter(t => t.status === 'active').length, color: 'text-hxa-blue' },
-                    { label: 'Channels', value: channels.length, color: 'text-hxa-purple' },
+                    { label: t('org.stat.totalBots'), value: bots.length, color: 'text-hxa-accent' },
+                    { label: t('org.stat.online'), value: bots.filter(b => b.online).length, color: 'text-hxa-green' },
+                    { label: t('org.stat.activeThreads'), value: threads.filter(t => t.status === 'active').length, color: 'text-hxa-blue' },
+                    { label: t('org.stat.channels'), value: channels.length, color: 'text-hxa-purple' },
                   ].map(stat => (
                     <div key={stat.label} className="flex-1 min-w-[calc(50%-8px)] md:min-w-0 bg-hxa-accent/[0.06] border border-hxa-accent/15 rounded-xl py-4 px-5 flex flex-col items-center gap-1">
                       <div className={`text-[28px] font-bold font-mono ${stat.color}`}>{stat.value}</div>
@@ -529,22 +538,22 @@ export default function OrgDashboard() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                   {/* Active Bots */}
                   <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
-                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">Active Bots</h3>
+                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.activeBots')}</h3>
                     <div className="space-y-2">
                       {sortedBots.slice(0, 5).map(bot => (
                         <button key={bot.id} onClick={() => setView({ type: 'bot', bot })}
                           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-hxa-bg-hover transition-colors text-left text-sm">
                           <Circle size={7} className={bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'} />
                           <span className="truncate flex-1">{bot.name}</span>
-                          <span className={`text-[10px] ${bot.online ? 'text-hxa-green' : 'text-hxa-text-dim'}`}>{bot.online ? 'Online' : 'Offline'}</span>
+                          <span className={`text-[10px] ${bot.online ? 'text-hxa-green' : 'text-hxa-text-dim'}`}>{bot.online ? t('org.botStatus.online') : t('org.botStatus.offline')}</span>
                         </button>
                       ))}
-                      {bots.length === 0 && <p className="text-xs text-hxa-text-dim">No bots yet</p>}
+                      {bots.length === 0 && <p className="text-xs text-hxa-text-dim">{t('org.noBots')}</p>}
                     </div>
                   </div>
                   {/* Recent Threads */}
                   <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
-                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">Recent Threads</h3>
+                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.recentThreads')}</h3>
                     <div className="space-y-2">
                       {threads.slice(0, 5).map(thread => (
                         <button key={thread.id} onClick={() => setView({ type: 'thread', thread })}
@@ -553,12 +562,12 @@ export default function OrgDashboard() {
                           <StatusBadge status={thread.status} />
                         </button>
                       ))}
-                      {threads.length === 0 && <p className="text-xs text-hxa-text-dim">No threads yet</p>}
+                      {threads.length === 0 && <p className="text-xs text-hxa-text-dim">{t('org.noThreads')}</p>}
                     </div>
                   </div>
                   {/* Recent Channels */}
                   <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
-                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">Recent Channels</h3>
+                    <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.recentChannels')}</h3>
                     <div className="space-y-2">
                       {channels.slice(0, 5).map(ch => {
                         const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
@@ -570,7 +579,7 @@ export default function OrgDashboard() {
                           </button>
                         );
                       })}
-                      {channels.length === 0 && <p className="text-xs text-hxa-text-dim">No channels yet</p>}
+                      {channels.length === 0 && <p className="text-xs text-hxa-text-dim">{t('org.noChannels')}</p>}
                     </div>
                   </div>
                 </div>
@@ -626,6 +635,8 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
   onDeleted: () => void;
   onRoleChanged: (role: 'admin' | 'member') => void;
 }) {
+  const { t } = useTranslations();
+  const timeAgo = useTimeAgo();
   const [channels, setChannels] = useState<OrgChannel[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -639,9 +650,9 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
     try {
       await orgAdmin.updateBotRole(bot.id, role);
       onRoleChanged(role);
-      showToast(`Role updated to ${role}`);
+      showToast(t('org.bot.roleUpdated', { role }));
     } catch {
-      showToast('Failed to update role', 'error');
+      showToast(t('org.bot.roleError'), 'error');
     }
   }
 
@@ -649,13 +660,13 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
     <div className="h-full overflow-auto p-8 max-md:p-4">
       {confirmDelete && (
         <ConfirmDialog
-          title="Delete Bot"
-          message={`Permanently delete "${bot.name}"? This cannot be undone.`}
-          confirmLabel="Delete"
+          title={t('org.bot.deleteTitle')}
+          message={t('org.bot.deleteMessage', { name: bot.name })}
+          confirmLabel={t('org.bot.deleteConfirm')}
           danger
           onConfirm={async () => {
             setConfirmDelete(false);
-            try { await orgAdmin.deleteBot(bot.id); onDeleted(); showToast('Bot deleted'); } catch { showToast('Failed to delete', 'error'); }
+            try { await orgAdmin.deleteBot(bot.id); onDeleted(); showToast(t('org.bot.deleted')); } catch { showToast(t('org.bot.deleteError'), 'error'); }
           }}
           onCancel={() => setConfirmDelete(false)}
         />
@@ -672,7 +683,7 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
             <h2 className="text-2xl max-md:text-xl font-bold">{bot.name}</h2>
             <div className="flex items-center gap-2 mt-1 font-mono text-sm">
               <Circle size={8} className={bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'} />
-              <span className={bot.online ? 'text-hxa-green' : 'text-hxa-text-dim'}>{bot.online ? 'Online' : 'Offline'}</span>
+              <span className={bot.online ? 'text-hxa-green' : 'text-hxa-text-dim'}>{bot.online ? t('org.botStatus.online') : t('org.botStatus.offline')}</span>
               {bot.display_name && bot.display_name !== bot.name && (
                 <span className="text-hxa-text-dim text-xs">({bot.display_name})</span>
               )}
@@ -682,41 +693,41 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
 
         {/* Role */}
         <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
-          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">Auth Role</h3>
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.bot.authRole')}</h3>
           <div className="flex items-center justify-between">
             <span className="text-xs text-hxa-text-dim">
-              {bot.auth_role === 'admin' ? 'Can manage org, create tickets, change roles' : 'Standard bot with messaging access'}
+              {bot.auth_role === 'admin' ? t('org.bot.adminDesc') : t('org.bot.memberDesc')}
             </span>
             <select
               value={bot.auth_role}
               onChange={e => handleRoleChange(e.target.value as 'admin' | 'member')}
               className="bg-black/30 border border-hxa-border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-hxa-accent"
             >
-              <option value="admin">Admin</option>
-              <option value="member">Member</option>
+              <option value="admin">{t('org.bot.roleAdmin')}</option>
+              <option value="member">{t('org.bot.roleMember')}</option>
             </select>
           </div>
         </div>
 
         {/* Details */}
         <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider">Details</h3>
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider">{t('org.bot.details')}</h3>
           <div className="grid grid-cols-2 gap-3 text-sm">
-            {bot.bio && <div className="col-span-2"><span className="text-hxa-text-dim">Bio:</span> {bot.bio}</div>}
-            {bot.role && <div><span className="text-hxa-text-dim">Role:</span> {bot.role}</div>}
-            {bot.function && <div><span className="text-hxa-text-dim">Function:</span> {bot.function}</div>}
-            {bot.team && <div><span className="text-hxa-text-dim">Team:</span> {bot.team}</div>}
-            {bot.timezone && <div><span className="text-hxa-text-dim">Timezone:</span> {bot.timezone}</div>}
-            {bot.version && <div><span className="text-hxa-text-dim">Version:</span> <span className="font-mono">{bot.version}</span></div>}
+            {bot.bio && <div className="col-span-2"><span className="text-hxa-text-dim">{t('org.bot.bio')}</span> {bot.bio}</div>}
+            {bot.role && <div><span className="text-hxa-text-dim">{t('org.bot.role')}</span> {bot.role}</div>}
+            {bot.function && <div><span className="text-hxa-text-dim">{t('org.bot.function')}</span> {bot.function}</div>}
+            {bot.team && <div><span className="text-hxa-text-dim">{t('org.bot.team')}</span> {bot.team}</div>}
+            {bot.timezone && <div><span className="text-hxa-text-dim">{t('org.bot.timezone')}</span> {bot.timezone}</div>}
+            {bot.version && <div><span className="text-hxa-text-dim">{t('org.bot.version')}</span> <span className="font-mono">{bot.version}</span></div>}
             {bot.languages && bot.languages.length > 0 && (
               <div className="col-span-2">
-                <span className="text-hxa-text-dim">Languages:</span>{' '}
+                <span className="text-hxa-text-dim">{t('org.bot.languages')}</span>{' '}
                 {bot.languages.map(l => <span key={l} className="inline-block px-1.5 py-0.5 text-xs bg-hxa-blue/20 text-hxa-blue rounded mr-1">{l}</span>)}
               </div>
             )}
             {bot.tags && bot.tags.length > 0 && (
               <div className="col-span-2">
-                <span className="text-hxa-text-dim">Tags:</span>{' '}
+                <span className="text-hxa-text-dim">{t('org.bot.tags')}</span>{' '}
                 {bot.tags.map(t => <span key={t} className="inline-block px-1.5 py-0.5 text-xs bg-hxa-purple/20 text-hxa-purple rounded mr-1">{t}</span>)}
               </div>
             )}
@@ -726,7 +737,7 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
         {/* Channels */}
         {channels.length > 0 && (
           <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
-            <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">DM Channels</h3>
+            <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.bot.dmChannels')}</h3>
             <div className="space-y-2">
               {channels.map(ch => {
                 const otherMembers = ch.members
@@ -750,9 +761,9 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
 
         {/* Danger Zone */}
         <div className="border border-hxa-red/30 rounded-xl p-4">
-          <h3 className="text-sm font-semibold text-hxa-red mb-2">Danger Zone</h3>
+          <h3 className="text-sm font-semibold text-hxa-red mb-2">{t('org.bot.dangerZone')}</h3>
           <button onClick={() => setConfirmDelete(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-hxa-red/20 text-hxa-red rounded hover:bg-hxa-red/30 border border-hxa-red/30">
-            <Trash2 size={12} /> Delete Bot
+            <Trash2 size={12} /> {t('org.bot.delete')}
           </button>
         </div>
       </div>
@@ -772,6 +783,8 @@ function ChannelView({ channelId, label, onBack }: {
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { t } = useTranslations();
+  const timeAgo = useTimeAgo();
 
   const loadMessages = useCallback(async (before?: string) => {
     try {
@@ -830,7 +843,7 @@ function ChannelView({ channelId, label, onBack }: {
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {hasMore && (
           <button onClick={() => loadMessages(cursor)} className="w-full text-center text-xs text-hxa-accent hover:underline py-2">
-            Load older messages
+            {t('org.thread.loadOlder')}
           </button>
         )}
         {messages.map(msg => (
@@ -856,6 +869,8 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   onStatusChanged: (status: string) => void;
   wsRef: React.MutableRefObject<WebSocket | null>;
 }) {
+  const { t } = useTranslations();
+  const timeAgo = useTimeAgo();
   const [messages, setMessages] = useState<OrgThreadMessage[]>([]);
   const [artifacts, setArtifacts] = useState<OrgArtifact[]>([]);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
@@ -965,9 +980,9 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
       if (status === 'closed') updates.close_reason = 'manual';
       await orgAdmin.updateThread(thread.id, updates);
       onStatusChanged(status);
-      showToast(`Status changed to ${status}`);
+      showToast(t('org.thread.statusChanged', { status }));
     } catch {
-      showToast('Failed to update status', 'error');
+      showToast(t('org.thread.statusError'), 'error');
     }
   }
 
@@ -1022,7 +1037,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {hasMore && (
             <button onClick={() => loadMessages(cursor)} className="w-full text-center text-xs text-hxa-accent hover:underline py-2">
-              Load older messages
+              {t('org.thread.loadOlder')}
             </button>
           )}
           {messages.map(msg => {
@@ -1054,7 +1069,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
           <div className="flex items-center justify-between px-4 py-3 border-b border-hxa-border shrink-0">
             <h3 className="text-sm font-semibold text-hxa-text flex items-center gap-1.5">
               <FileCode size={14} className="text-hxa-accent" />
-              Artifacts
+              {t('artifact.title')}
               <span className="text-xs text-hxa-text-muted font-normal">({artifacts.length})</span>
             </h3>
             <button onClick={() => setArtifactsOpen(false)} className="text-hxa-text-dim hover:text-hxa-text p-1 transition-colors">
@@ -1063,9 +1078,9 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
             {artifactsLoading ? (
-              <div className="text-center py-8 text-hxa-text-muted text-sm">Loading...</div>
+              <div className="text-center py-8 text-hxa-text-muted text-sm">{t('artifact.loading')}</div>
             ) : artifacts.length === 0 ? (
-              <p className="text-hxa-text-dim text-sm text-center py-8">No artifacts in this thread.</p>
+              <p className="text-hxa-text-dim text-sm text-center py-8">{t('artifact.noArtifacts')}</p>
             ) : (
               artifacts.map(art => (
                 <details key={art.id} className="border border-hxa-border rounded-lg overflow-hidden bg-black/20">
@@ -1106,6 +1121,7 @@ function TicketModal({ orgId, orgName, onClose }: {
   orgName: string;
   onClose: () => void;
 }) {
+  const { t } = useTranslations();
   const [reusable, setReusable] = useState(false);
   const [expiresIn, setExpiresIn] = useState('86400');
   const [error, setError] = useState('');
@@ -1151,43 +1167,43 @@ function TicketModal({ orgId, orgName, onClose }: {
         {/* Header with icon */}
         <div className="flex items-center gap-2.5 mb-4">
           <Users size={22} className="text-hxa-accent" />
-          <span className="text-lg font-bold">Invite Bot</span>
+          <span className="text-lg font-bold">{t('org.ticket.title')}</span>
         </div>
         <p className="text-sm text-hxa-text-dim leading-relaxed mb-5">
-          Create a registration ticket for a new bot to join this organization.
+          {t('org.ticket.description')}
         </p>
 
         {!result ? (
           /* Form State */
           <div>
             <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-hxa-text-dim mb-1.5">Expires In</label>
+              <label className="block text-[13px] font-semibold text-hxa-text-dim mb-1.5">{t('org.ticket.expiresIn')}</label>
               <select
                 value={expiresIn}
                 onChange={e => setExpiresIn(e.target.value)}
                 className="w-full py-2 px-3 bg-white/[0.04] border border-hxa-border rounded-lg text-hxa-text text-[13px] outline-none focus:border-hxa-accent/40 cursor-pointer appearance-none"
               >
-                <option value="1800">30 minutes</option>
-                <option value="3600">1 hour</option>
-                <option value="86400">24 hours</option>
-                <option value="604800">7 days</option>
-                <option value="0">Never (no expiry)</option>
+                <option value="1800">{t('org.ticket.expire.30m')}</option>
+                <option value="3600">{t('org.ticket.expire.1h')}</option>
+                <option value="86400">{t('org.ticket.expire.24h')}</option>
+                <option value="604800">{t('org.ticket.expire.7d')}</option>
+                <option value="0">{t('org.ticket.expire.never')}</option>
               </select>
             </div>
             <div className="mb-4">
               <label className="inline-flex items-center gap-2 cursor-pointer font-semibold text-hxa-text">
                 <input type="checkbox" checked={reusable} onChange={e => setReusable(e.target.checked)} className="w-4 h-4 accent-hxa-accent cursor-pointer" />
-                <span>Reusable</span>
+                <span>{t('org.ticket.reusable')}</span>
               </label>
-              <p className="text-xs text-hxa-text-dim mt-1 leading-snug">Allow multiple bots to register with the same ticket</p>
+              <p className="text-xs text-hxa-text-dim mt-1 leading-snug">{t('org.ticket.reusableDesc')}</p>
             </div>
             {error && <p className="text-hxa-red text-sm mb-3">{error}</p>}
             <div className="flex gap-3 justify-center mt-5">
               <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
-                Cancel
+                {t('org.ticket.cancel')}
               </button>
               <button type="button" onClick={handleCreate} disabled={loading} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-hxa-accent/15 border border-hxa-accent/30 text-hxa-accent hover:bg-hxa-accent/25 hover:border-hxa-accent/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                {loading ? 'Creating...' : 'Create Ticket'}
+                {loading ? t('org.ticket.creating') : t('org.ticket.create')}
               </button>
             </div>
           </div>
@@ -1200,30 +1216,30 @@ function TicketModal({ orgId, orgName, onClose }: {
               return (
                 <>
                   <div className="bg-white/[0.03] border border-hxa-border rounded-[10px] p-4">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-hxa-text-dim mb-2 text-center">Bot Invite Prompt</div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-hxa-text-dim mb-2 text-center">{t('org.ticket.promptLabel')}</div>
                     <pre className="font-mono text-xs text-hxa-text leading-relaxed whitespace-pre-wrap break-words bg-black/20 rounded-md p-3 mb-3 max-h-[200px] overflow-auto select-all">{prompt}</pre>
                     <div className="flex justify-center">
                       <button
                         onClick={() => { navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
                         className="inline-flex items-center gap-1.5 bg-hxa-accent/10 border border-hxa-accent/20 text-hxa-accent py-1.5 px-4 rounded-md text-xs font-semibold hover:bg-hxa-accent/20 transition-colors"
                       >
-                        <Copy size={14} /> {copied ? 'Copied!' : 'Copy Prompt'}
+                        <Copy size={14} /> {copied ? t('org.ticket.copied') : t('org.ticket.copyPrompt')}
                       </button>
                     </div>
                   </div>
                   <div className="flex justify-center gap-4 mt-2.5 text-xs text-hxa-text-dim">
-                    <span>{result.reusable ? 'Reusable' : 'Single use'}</span>
-                    <span>{result.expiresIn === 0 ? 'No expiry' : `Expires in ${formatExpiry(result.expiresIn)}`}</span>
+                    <span>{result.reusable ? t('org.ticket.reusableLabel') : t('org.ticket.singleUse')}</span>
+                    <span>{result.expiresIn === 0 ? t('org.ticket.noExpiry') : t('org.ticket.expiresInLabel', { time: formatExpiry(result.expiresIn) })}</span>
                   </div>
                   <p className="text-xs text-hxa-text-dim mt-3 leading-snug">
-                    Copy this prompt and send it to the bot you want to invite.
+                    {t('org.ticket.sendHint')}
                   </p>
                   <div className="flex gap-3 justify-center mt-5">
                     <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
-                      Close
+                      {t('org.ticket.close')}
                     </button>
                     <button type="button" onClick={resetForm} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-hxa-accent/15 border border-hxa-accent/30 text-hxa-accent hover:bg-hxa-accent/25 hover:border-hxa-accent/50 transition-colors">
-                      Create Another
+                      {t('org.ticket.createAnother')}
                     </button>
                   </div>
                 </>
