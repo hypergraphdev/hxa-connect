@@ -10,6 +10,7 @@ export interface RawSession {
   scopes: string[] | null;
   is_scoped_token: boolean;
   expires_at: number;
+  config?: { max_file_size_mb: number };
 }
 
 /**
@@ -28,6 +29,8 @@ export interface SessionData {
   org_name?: string;
   /** Bot details — only present for bot_owner sessions, enriched from /api/me/workspace. */
   bot?: { id: string; name: string; org_id: string; auth_role: 'admin' | 'member' };
+  /** Server-provided config (upload limits, etc.) */
+  config?: { max_file_size_mb: number };
 }
 
 export interface Bot {

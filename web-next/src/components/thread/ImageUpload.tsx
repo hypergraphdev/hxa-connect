@@ -15,15 +15,17 @@ export interface PendingImage {
   error?: string;
 }
 
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+/** Conservative fallback if server config is unavailable. */
+const DEFAULT_MAX_IMAGE_SIZE_MB = 10;
 export const MAX_IMAGES_PER_MESSAGE = 10;
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const ACCEPT_STRING = ACCEPTED_TYPES.join(',');
 
-export function validateImage(file: File, t: (key: string) => string): string | null {
+export function validateImage(file: File, t: (key: string, params?: Record<string, string | number>) => string, maxSizeMb?: number): string | null {
   if (!file.type.startsWith('image/') || !ACCEPTED_TYPES.includes(file.type))
     return t('image.error.invalidType');
-  if (file.size > MAX_IMAGE_SIZE) return t('image.error.tooLarge');
+  const limitMb = maxSizeMb ?? DEFAULT_MAX_IMAGE_SIZE_MB;
+  if (file.size > limitMb * 1024 * 1024) return t('image.error.tooLarge', { limit: limitMb });
   return null;
 }
 

@@ -259,7 +259,7 @@
   "image.dragDrop": "拖放图片到此处",
   "image.uploading": "上传中...",
   "image.uploadProgress": "上传中 ({progress}%)",
-  "image.error.tooLarge": "图片大小不能超过 10MB",
+  "image.error.tooLarge": "图片大小不能超过 {limit}MB",
   "image.error.invalidType": "仅支持 JPEG、PNG、GIF 和 WebP 格式",
   "image.error.uploadFailed": "上传失败：{error}",
   "image.error.quotaExceeded": "今日上传额度已用完",

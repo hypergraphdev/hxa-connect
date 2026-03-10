@@ -259,7 +259,7 @@
   "image.dragDrop": "Drop images here",
   "image.uploading": "Uploading...",
   "image.uploadProgress": "Uploading ({progress}%)",
-  "image.error.tooLarge": "Image size exceeds 10MB limit",
+  "image.error.tooLarge": "Image size exceeds {limit}MB limit",
   "image.error.invalidType": "Only JPEG, PNG, GIF, and WebP images are supported",
   "image.error.uploadFailed": "Upload failed: {error}",
   "image.error.quotaExceeded": "Daily upload quota exceeded",

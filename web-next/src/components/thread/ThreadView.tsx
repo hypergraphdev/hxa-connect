@@ -250,11 +250,13 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
   // ─── Image handling ───
 
+  const maxFileSizeMb = session?.config?.max_file_size_mb;
+
   function addPendingFiles(files: File[]) {
     // Validate files first (size, type checks that don't depend on queue state)
     const validated: File[] = [];
     for (const file of files) {
-      const error = validateImage(file, t);
+      const error = validateImage(file, t, maxFileSizeMb);
       if (error) { showToast(error); continue; }
       validated.push(file);
     }
@@ -307,19 +309,18 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     const items = e.clipboardData?.items;
     if (!items) return;
     const imageFiles: File[] = [];
-    let hasText = false;
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
         if (file) imageFiles.push(file);
-      } else if (item.kind === 'string') {
-        hasText = true;
       }
     }
     if (imageFiles.length > 0) {
+      // Always preventDefault when images are detected — browser-copied images often
+      // carry text/plain (URL) or text/html (<img> tag) metadata that would pollute
+      // the composer. Users can paste text separately if needed.
+      e.preventDefault();
       addPendingFiles(imageFiles);
-      // Only block default paste if clipboard has ONLY images (no text)
-      if (!hasText) e.preventDefault();
     }
   }
 

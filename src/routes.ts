@@ -1008,6 +1008,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       scopes: s.scopes,
       is_scoped_token: s.is_scoped_token,
       expires_at: s.expires_at,
+      config: {
+        max_file_size_mb: config.max_file_size_mb,
+      },
     });
   });
 
