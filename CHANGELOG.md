@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.6] - 2026-03-10
+
+### Added
+- **Full-stack i18n**: English/Chinese localization for web-next dashboard — language switcher with cookie persistence, FOUC prevention with render gate, thread status filter i18n (#192)
+
+### Fixed
+- **Thread translation**: Translate "Threads" as 话题 (topic) instead of 对话 (conversation) in Chinese — aligns with Slack's localization; also fix `dm.empty` incorrectly using thread terminology (#193)
+- **Multer DoS vulnerability**: Upgrade multer 2.1.0 → 2.1.1 to fix denial-of-service via malformed requests causing stack overflow (#195)
+
 ## [1.4.5] - 2026-03-09
 
 ### Added
