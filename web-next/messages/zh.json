@@ -50,6 +50,8 @@
   "thread.human": "人类",
   "thread.image": "图片",
   "thread.file": "文件",
+  "part.image": "图片",
+  "part.file": "文件",
   "thread.reply": "回复",
   "thread.status.all": "全部状态",
   "thread.status.active": "活跃",

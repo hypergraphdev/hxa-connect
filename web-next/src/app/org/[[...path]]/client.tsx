@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   Building2, Bot, MessageSquare, Search, LogOut, KeyRound,
   RotateCw, Plus, Trash2, Copy, X, ArrowLeft, Shield, Users,
-  Circle, ChevronDown, FileCode, FileText, Menu,
+  Circle, ChevronDown, FileCode, Menu,
 } from 'lucide-react';
 import {
   orgAdmin, type OrgBot, type OrgThread, type OrgChannel,
@@ -13,9 +13,11 @@ import {
   AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
-import { THREAD_STATUS_OPTIONS, safeHref, parseParts } from '@/lib/utils';
+import { THREAD_STATUS_OPTIONS, parseParts } from '@/lib/utils';
 import { FilterSelect } from '@/components/ui/FilterSelect';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { PartRenderer } from '@/components/ui/PartRenderer';
+import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { useTranslations } from '@/i18n/context';
 
@@ -782,6 +784,7 @@ function ChannelView({ channelId, label, onBack }: {
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslations();
   const timeAgo = useTimeAgo();
@@ -817,43 +820,10 @@ function ChannelView({ channelId, label, onBack }: {
   }, [messages.length, loading]);
 
   function renderContent(msg: OrgChannelMessage) {
-    const parts = parseParts(msg.parts as Parameters<typeof parseParts>[0], msg.content);
-    return parts.map((p, i) => {
-      switch (p.type) {
-        case 'text':
-        case 'markdown':
-          return <MarkdownContent key={i} content={p.content || ''} />;
-        case 'json': {
-          const raw = typeof p.content === 'string' ? p.content : JSON.stringify(p.content);
-          try {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
-          } catch {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
-          }
-        }
-        case 'file':
-          return (
-            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-              <FileText size={12} /> {p.name || p.filename || t('dm.file')}
-              {p.mime_type && <span className="text-hxa-text-muted">({p.mime_type})</span>}
-            </a>
-          );
-        case 'image':
-          return (
-            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-              <span className="text-xs text-hxa-accent hover:underline">{p.alt || p.filename || t('dm.image')}</span>
-            </a>
-          );
-        case 'link':
-          return (
-            <a key={i} href={safeHref(p.url || p.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-              {p.title || p.content || p.url}
-            </a>
-          );
-        default:
-          return p.content ? <div key={i} className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof p.content === 'string' ? p.content : JSON.stringify(p.content)}</div> : null;
-      }
-    });
+    const parts = parseParts(msg.parts, msg.content);
+    return parts.map((p, i) => (
+      <PartRenderer key={i} part={p} onImageClick={setLightboxSrc} />
+    ));
   }
 
   return (
@@ -880,6 +850,8 @@ function ChannelView({ channelId, label, onBack }: {
         ))}
         <div ref={messagesEndRef} />
       </div>
+
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>
   );
 }
@@ -901,6 +873,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
+  const [lightboxSrc2, setLightboxSrc2] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [currentStatus, setCurrentStatus] = useState(thread.status);
@@ -1010,43 +983,10 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   }
 
   function renderParts(msg: OrgThreadMessage) {
-    const parts = parseParts(msg.parts as Parameters<typeof parseParts>[0], msg.content);
-    return parts.map((p, i) => {
-      switch (p.type) {
-        case 'text':
-        case 'markdown':
-          return <MarkdownContent key={i} content={p.content || ''} />;
-        case 'json': {
-          const raw = typeof p.content === 'string' ? p.content : JSON.stringify(p.content);
-          try {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
-          } catch {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
-          }
-        }
-        case 'file':
-          return (
-            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-              <FileText size={12} /> {p.name || p.filename || t('thread.file')}
-              {p.mime_type && <span className="text-hxa-text-muted">({p.mime_type})</span>}
-            </a>
-          );
-        case 'image':
-          return (
-            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-              <span className="text-xs text-hxa-accent hover:underline">{p.alt || p.filename || t('thread.image')}</span>
-            </a>
-          );
-        case 'link':
-          return (
-            <a key={i} href={safeHref(p.url || p.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-              {p.title || p.content || p.url}
-            </a>
-          );
-        default:
-          return p.content ? <div key={i} className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof p.content === 'string' ? p.content : JSON.stringify(p.content)}</div> : null;
-      }
-    });
+    const parts = parseParts(msg.parts, msg.content);
+    return parts.map((p, i) => (
+      <PartRenderer key={i} part={p} onImageClick={setLightboxSrc2} />
+    ));
   }
 
   return (
@@ -1149,6 +1089,8 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
           </div>
         </div>
       )}
+
+      {lightboxSrc2 && <ImageLightbox src={lightboxSrc2} onClose={() => setLightboxSrc2(null)} />}
     </div>
   );
 }

@@ -35,7 +35,11 @@ export function formatTime(ts: string | number, t?: TFunc): string {
 export function parseParts(parts: string | null | import('./types').MessagePart[], content?: string): import('./types').MessagePart[] {
   if (Array.isArray(parts)) return parts;
   if (typeof parts === 'string') {
-    try { return JSON.parse(parts); } catch { return [{ type: 'text', content: parts }]; }
+    try {
+      const parsed = JSON.parse(parts);
+      if (Array.isArray(parsed)) return parsed;
+      return [{ type: 'text', content: parts }];
+    } catch { return [{ type: 'text', content: parts }]; }
   }
   // parts is null — fall back to content field (legacy messages)
   if (content) return [{ type: 'text', content }];

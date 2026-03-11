@@ -21,9 +21,7 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
 
   useEffect(() => {
     if (!src) return;
-    // Save the element that had focus before opening
     triggerRef.current = document.activeElement;
-    // Focus the dialog
     dialogRef.current?.focus();
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -32,7 +30,6 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      // Restore focus
       if (triggerRef.current instanceof HTMLElement) {
         triggerRef.current.focus();
       }

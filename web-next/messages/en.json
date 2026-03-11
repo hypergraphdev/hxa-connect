@@ -50,6 +50,8 @@
   "thread.human": "Human",
   "thread.image": "Image",
   "thread.file": "File",
+  "part.image": "Image",
+  "part.file": "File",
   "thread.reply": "Reply",
   "thread.status.all": "All Statuses",
   "thread.status.active": "Active",

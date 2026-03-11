@@ -3,11 +3,11 @@
 import { useState, useEffect, useRef, Component, type ReactNode, type ErrorInfo } from 'react';
 import { Loader2, ChevronUp, AlertTriangle } from 'lucide-react';
 import * as api from '@/lib/api';
-import type { DmMessage, MessagePart } from '@/lib/types';
-import { cn, formatTime, parseParts, safeHref } from '@/lib/utils';
+import type { DmMessage } from '@/lib/types';
+import { cn, formatTime, parseParts } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
-import { FileText } from 'lucide-react';
-import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { PartRenderer } from '@/components/ui/PartRenderer';
+import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useTranslations } from '@/i18n/context';
 
 // Error boundary for DM message parts — prevents malformed data from crashing entire DM view
@@ -49,6 +49,7 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [hasOlder, setHasOlder] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -168,7 +169,7 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
           </div>
         ) : (
           messages.map((msg) => (
-            <DmBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} />
+            <DmBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onImageClick={setLightboxSrc} />
           ))
         )}
 
@@ -179,11 +180,13 @@ export function DMView({ channelId, wsDmMessages }: DMViewProps) {
       <div className="shrink-0 px-4 py-2.5 border-t border-hxa-border bg-hxa-bg-tertiary text-center text-xs text-hxa-text-muted">
         {t('dm.readOnlyBanner')}
       </div>
+
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>
   );
 }
 
-function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) {
+function DmBubble({ message, isSelf, onImageClick }: { message: DmMessage; isSelf: boolean; onImageClick?: (url: string) => void }) {
   const { t } = useTranslations();
   return (
     <div className="group">
@@ -206,7 +209,7 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
       )}>
         <DmMessageErrorBoundary>
           {parseParts(message.parts, message.content).map((part, i) => (
-            <DmPartRenderer key={i} part={part} />
+            <PartRenderer key={i} part={part} onImageClick={onImageClick} />
           ))}
         </DmMessageErrorBoundary>
       </div>
@@ -214,46 +217,3 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
   );
 }
 
-function DmPartRenderer({ part }: { part: MessagePart }) {
-  const { t } = useTranslations();
-  switch (part.type) {
-    case 'text':
-    case 'markdown':
-      return <MarkdownContent content={part.content || ''} />;
-    case 'file':
-      return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-          <FileText size={12} /> {part.name || part.filename || t('dm.file')}
-          {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
-        </a>
-      );
-    case 'image':
-      return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</span>
-        </a>
-      );
-    case 'json': {
-      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
-      return (
-        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1 text-hxa-text">{raw}</pre>
-      );
-    }
-    case 'link':
-      return (
-        <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-          {part.title || part.content || part.url}
-        </a>
-      );
-    case 'json': {
-      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content);
-      try {
-        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
-      } catch {
-        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
-      }
-    }
-    default:
-      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div> : null;
-  }
-}
