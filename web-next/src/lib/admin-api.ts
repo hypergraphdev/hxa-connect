@@ -149,7 +149,7 @@ export interface OrgChannelMessage {
   sender_id: string;
   sender_name: string;
   content: string;
-  parts: string | null | Array<{ type: string; content?: string }>;
+  parts: string | null | Array<{ type?: string; content?: string; url?: string; name?: string; filename?: string; alt?: string; title?: string; mime_type?: string; size?: number }>;
   metadata?: Record<string, unknown>;
   created_at: string;
 }
@@ -160,7 +160,7 @@ export interface OrgThreadMessage {
   sender_id: string;
   sender_name: string;
   content?: string;
-  parts: Array<{ type: string; content?: string }>;
+  parts: Array<{ type?: string; content?: string; url?: string; name?: string; filename?: string; alt?: string; title?: string; mime_type?: string; size?: number }>;
   metadata?: Record<string, unknown>;
   created_at: string;
 }

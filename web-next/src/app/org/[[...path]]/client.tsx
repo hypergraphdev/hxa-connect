@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   Building2, Bot, MessageSquare, Search, LogOut, KeyRound,
   RotateCw, Plus, Trash2, Copy, X, ArrowLeft, Shield, Users,
-  Circle, ChevronDown, FileCode, Menu,
+  Circle, ChevronDown, FileCode, FileText, Menu,
 } from 'lucide-react';
 import {
   orgAdmin, type OrgBot, type OrgThread, type OrgChannel,
@@ -13,7 +13,7 @@ import {
   AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
-import { THREAD_STATUS_OPTIONS, safeHref } from '@/lib/utils';
+import { THREAD_STATUS_OPTIONS, safeHref, parseParts } from '@/lib/utils';
 import { FilterSelect } from '@/components/ui/FilterSelect';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
@@ -817,20 +817,43 @@ function ChannelView({ channelId, label, onBack }: {
   }, [messages.length, loading]);
 
   function renderContent(msg: OrgChannelMessage) {
-    if (msg.parts) {
-      try {
-        const parsed = typeof msg.parts === 'string' ? JSON.parse(msg.parts) : msg.parts;
-        if (Array.isArray(parsed)) {
-          return parsed.map((p: { type?: string; content?: string }, i: number) => {
-            if (p.type === 'text' || p.type === 'markdown' || !p.type) {
-              return <MarkdownContent key={i} content={p.content || ''} />;
-            }
-            return <span key={i}>{p.content || ''}</span>;
-          });
+    const parts = parseParts(msg.parts as Parameters<typeof parseParts>[0], msg.content);
+    return parts.map((p, i) => {
+      switch (p.type) {
+        case 'text':
+        case 'markdown':
+          return <MarkdownContent key={i} content={p.content || ''} />;
+        case 'json': {
+          const raw = typeof p.content === 'string' ? p.content : JSON.stringify(p.content);
+          try {
+            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
+          } catch {
+            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
+          }
         }
-      } catch { /* malformed parts — fall through to content */ }
-    }
-    return msg.content;
+        case 'file':
+          return (
+            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
+              <FileText size={12} /> {p.name || p.filename || t('dm.file')}
+              {p.mime_type && <span className="text-hxa-text-muted">({p.mime_type})</span>}
+            </a>
+          );
+        case 'image':
+          return (
+            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
+              <span className="text-xs text-hxa-accent hover:underline">{p.alt || p.filename || t('dm.image')}</span>
+            </a>
+          );
+        case 'link':
+          return (
+            <a key={i} href={safeHref(p.url || p.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
+              {p.title || p.content || p.url}
+            </a>
+          );
+        default:
+          return p.content ? <div key={i} className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof p.content === 'string' ? p.content : JSON.stringify(p.content)}</div> : null;
+      }
+    });
   }
 
   return (
@@ -987,27 +1010,43 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   }
 
   function renderParts(msg: OrgThreadMessage) {
-    if (msg.parts && Array.isArray(msg.parts) && msg.parts.length > 0) {
-      return msg.parts.map((p, i) => {
-        const content = p.content || '';
-        const part = p as Record<string, unknown>;
-        const url = (part.url as string) || content;
-        const filename = (part.filename as string) || (part.name as string) || '';
-        if (p.type === 'json') {
+    const parts = parseParts(msg.parts as Parameters<typeof parseParts>[0], msg.content);
+    return parts.map((p, i) => {
+      switch (p.type) {
+        case 'text':
+        case 'markdown':
+          return <MarkdownContent key={i} content={p.content || ''} />;
+        case 'json': {
+          const raw = typeof p.content === 'string' ? p.content : JSON.stringify(p.content);
           try {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(content), null, 2)}</pre>;
-          } catch { return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{content}</pre>; }
+            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
+          } catch {
+            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
+          }
         }
-        if (p.type === 'file') return <div key={i} className="text-xs my-1">📎 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{filename || url}</a></div>;
-        if (p.type === 'image') return <div key={i} className="text-xs my-1">🖼 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{filename || 'Image'}</a></div>;
-        if (p.type === 'link') return <div key={i} className="text-xs my-1">🔗 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{content || url}</a></div>;
-        if (p.type === 'markdown' || p.type === 'text') {
-          return <MarkdownContent key={i} content={content} />;
-        }
-        return <span key={i} className="whitespace-pre-wrap">{content}</span>;
-      });
-    }
-    return (msg as unknown as { content?: string }).content || '';
+        case 'file':
+          return (
+            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
+              <FileText size={12} /> {p.name || p.filename || t('thread.file')}
+              {p.mime_type && <span className="text-hxa-text-muted">({p.mime_type})</span>}
+            </a>
+          );
+        case 'image':
+          return (
+            <a key={i} href={safeHref(p.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
+              <span className="text-xs text-hxa-accent hover:underline">{p.alt || p.filename || t('thread.image')}</span>
+            </a>
+          );
+        case 'link':
+          return (
+            <a key={i} href={safeHref(p.url || p.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
+              {p.title || p.content || p.url}
+            </a>
+          );
+        default:
+          return p.content ? <div key={i} className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof p.content === 'string' ? p.content : JSON.stringify(p.content)}</div> : null;
+      }
+    });
   }
 
   return (

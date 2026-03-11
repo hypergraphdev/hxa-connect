@@ -877,6 +877,14 @@ function PartRenderer({ part, onImageClick }: { part: MessagePart; onImageClick?
           {part.title || part.content || part.url}
         </a>
       );
+    case 'json': {
+      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content);
+      try {
+        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
+      } catch {
+        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
+      }
+    }
     default:
       // Unknown part type — render content as text
       return part.content ? (

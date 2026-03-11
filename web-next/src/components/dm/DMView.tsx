@@ -224,11 +224,14 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
           <FileText size={12} /> {part.name || part.filename || t('dm.file')}
+          {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
         </a>
       );
     case 'image':
       return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</a>
+        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
+          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</span>
+        </a>
       );
     case 'json': {
       const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
@@ -242,6 +245,14 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
           {part.title || part.content || part.url}
         </a>
       );
+    case 'json': {
+      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content);
+      try {
+        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(raw), null, 2)}</pre>;
+      } catch {
+        return <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{raw}</pre>;
+      }
+    }
     default:
       return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div> : null;
   }
