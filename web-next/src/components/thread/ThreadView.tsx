@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Loader2, ChevronUp, Send, FileText, Reply, X } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback, useMemo, Component, type ReactNode, type ErrorInfo } from 'react';
+import { Loader2, ChevronUp, Send, FileText, ImageIcon, Reply, X, AlertTriangle } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadMessage, MessagePart, ThreadStatus } from '@/lib/types';
 import { cn, formatTime, safeHref } from '@/lib/utils';
@@ -10,6 +10,49 @@ import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/comp
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { useTranslations } from '@/i18n/context';
+import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
+import { ImageLightbox } from './ImageLightbox';
+
+// Error boundary for message parts — prevents malformed data from crashing entire thread
+class MessageErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode; fallback?: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[MessageErrorBoundary]', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div className="flex items-center gap-1 text-xs text-amber-400/70 italic">
+          <AlertTriangle size={12} />
+          <span>Failed to render message</span>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const MAX_CONCURRENT_UPLOADS = 3;
+
+/** Run async tasks with a concurrency limit (worker-pool pattern). */
+async function withConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const idx = next++;
+      results[idx] = await tasks[idx]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
 
 interface ThreadViewProps {
   threadId: string;
@@ -40,6 +83,12 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [mentionQuery, setMentionQuery] = useState<{ query: string; startIndex: number } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [replyTo, setReplyTo] = useState<ThreadMessage | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uploadAborts = useRef<Map<string, () => void>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -65,6 +114,17 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setCursor(undefined);
     setHasOlder(false);
     setReplyTo(null);
+    // Abort any in-flight uploads and clear timers
+    uploadAborts.current.forEach((abort) => abort());
+    uploadAborts.current.clear();
+    if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null; }
+    setPendingImages((prev) => {
+      prev.forEach((img) => URL.revokeObjectURL(img.preview));
+      return [];
+    });
+    setDragOver(false);
+    setLightboxSrc(null);
+    setToast(null);
     userScrolledUp.current = false;
 
     (async () => {
@@ -83,7 +143,15 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       if (!cancelled) setLoading(false);
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null; }
+      // Revoke any remaining blob URLs on unmount to prevent memory leaks
+      setPendingImages((prev) => {
+        prev.forEach((img) => URL.revokeObjectURL(img.preview));
+        return [];
+      });
+    };
   }, [threadId]);
 
   // Scroll to bottom on initial load
@@ -197,13 +265,187 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setLoadingOlder(false);
   }
 
+  // ─── Toast helper ───
+
+  function showToast(msg: string) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }
+
+  // ─── Image handling ───
+
+  const maxFileSizeMb = session?.config?.max_file_size_mb;
+
+  function addPendingFiles(files: File[]) {
+    // Validate files first (size, type checks that don't depend on queue state)
+    const validated: File[] = [];
+    for (const file of files) {
+      const error = validateImage(file, t, maxFileSizeMb);
+      if (error) { showToast(error); continue; }
+      validated.push(file);
+    }
+    if (validated.length === 0) return;
+
+    // Use functional updater so remaining count is always accurate
+    // (prevents race if two paste/drop events fire before React re-renders)
+    let wasTruncated = false;
+    setPendingImages((prev) => {
+      const remaining = MAX_IMAGES_PER_MESSAGE - prev.length;
+      const toAdd = validated.slice(0, Math.max(0, remaining));
+      wasTruncated = toAdd.length < validated.length;
+      return [
+        ...prev,
+        ...toAdd.map((file) => ({
+          id: crypto.randomUUID(),
+          file,
+          preview: URL.createObjectURL(file),
+          status: 'pending' as const,
+          progress: 0,
+        })),
+      ];
+    });
+    if (wasTruncated) {
+      showToast(t('image.error.tooMany', { max: MAX_IMAGES_PER_MESSAGE }));
+    }
+  }
+
+  function removePendingImage(id: string) {
+    setPendingImages((prev) => {
+      const img = prev.find((i) => i.id === id);
+      if (img) URL.revokeObjectURL(img.preview);
+      return prev.filter((i) => i.id !== id);
+    });
+  }
+
+  function retryPendingImage(id: string) {
+    setPendingImages((prev) =>
+      prev.map((img) => (img.id === id ? { ...img, status: 'pending' as const, progress: 0, error: undefined } : img)),
+    );
+  }
+
+  function updatePendingImage(id: string, updates: Partial<PendingImage>) {
+    setPendingImages((prev) =>
+      prev.map((img) => (img.id === id ? { ...img, ...updates } : img)),
+    );
+  }
+
+  function handlePaste(e: React.ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length > 0) {
+      // Always preventDefault when images are detected — browser-copied images often
+      // carry text/plain (URL) or text/html (<img> tag) metadata that would pollute
+      // the composer. Users can paste text separately if needed.
+      e.preventDefault();
+      addPendingFiles(imageFiles);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const imageFiles = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    if (imageFiles.length > 0) addPendingFiles(imageFiles);
+  }
+
   // Send message
   async function handleSend() {
     const text = composerText.trim();
-    if (!text || sending) return;
+    const imagesToSend = pendingImages.filter((i) => i.status !== 'error');
+    if (!text && imagesToSend.length === 0) return;
+    if (sending) return;
     setSending(true);
+
     try {
-      const msg = await api.sendThreadMessage(threadId, text, replyTo ? { reply_to: replyTo.id } : undefined);
+      // 1. Upload pending images concurrently (skip already-done ones)
+      const needUpload = imagesToSend.filter((i) => !(i.status === 'done' && i.uploadResult));
+      const alreadyDone = imagesToSend
+        .filter((i) => i.status === 'done' && i.uploadResult)
+        .map((i) => i.uploadResult as api.UploadResult);
+
+      // Upload with concurrency limit (max 3 simultaneous uploads)
+      const uploadTasks = needUpload.map((img) => () => {
+        updatePendingImage(img.id, { status: 'uploading', progress: 0 });
+        let lastReportedPct = 0;
+        const handle = api.uploadFile(img.file, (pct) => {
+          // Throttle progress updates: only re-render when progress jumps ≥5% or hits 100%
+          if (pct - lastReportedPct >= 5 || pct === 100) {
+            lastReportedPct = pct;
+            updatePendingImage(img.id, { progress: pct });
+          }
+        });
+        uploadAborts.current.set(img.id, handle.abort);
+        return handle.promise
+          .then((result) => {
+            updatePendingImage(img.id, { status: 'done', uploadResult: result, progress: 100 });
+            uploadAborts.current.delete(img.id);
+            return { ok: true as const, id: img.id, result };
+          })
+          .catch((err) => {
+            updatePendingImage(img.id, { status: 'error', error: (err as Error).message });
+            uploadAborts.current.delete(img.id);
+            return { ok: false as const, id: img.id };
+          });
+      });
+
+      const results = await withConcurrency(uploadTasks, MAX_CONCURRENT_UPLOADS);
+      const newlyUploaded = results.filter((r) => r.ok).map((r) => (r as { ok: true; result: api.UploadResult }).result);
+      const failedCount = results.filter((r) => !r.ok).length;
+      const uploadedImages = [...alreadyDone, ...newlyUploaded];
+
+      // If some uploads failed but we have text or successful images, send what we can
+      if (uploadedImages.length === 0 && !text) {
+        if (failedCount > 0) showToast(t('image.error.uploadFailed', { error: `${failedCount} failed` }));
+        return; // finally block handles setSending(false)
+      }
+
+      // 2. Build parts — only when images are present (avoids text duplication in content + parts)
+      const parts: MessagePart[] | undefined = uploadedImages.length > 0
+        ? [
+            ...(text ? [{ type: 'text' as const, content: text }] : []),
+            ...uploadedImages.map((up) => ({ type: 'image' as const, url: up.url, alt: up.name })),
+          ]
+        : undefined;
+
+      // 3. Build content — include summary for bots that only read content field
+      let content = text;
+      if (!content && uploadedImages.length > 0) {
+        content = uploadedImages.length === 1 ? '[image]' : `[${uploadedImages.length} images]`;
+      }
+
+      // 4. Send
+      const msg = await api.sendThreadMessage(threadId, content, {
+        parts,
+        reply_to: replyTo?.id,
+      });
+
+      // 5. Cleanup — only remove successfully sent images (match by ID, not filename)
+      const alreadyDoneIds = new Set(
+        imagesToSend.filter((i) => i.status === 'done' && i.uploadResult).map((i) => i.id),
+      );
+      const successIds = new Set([
+        ...alreadyDoneIds,
+        ...results.filter((r) => r.ok).map((r) => r.id),
+      ]);
+      setPendingImages((prev) => {
+        const remaining: PendingImage[] = [];
+        for (const img of prev) {
+          if (successIds.has(img.id)) {
+            URL.revokeObjectURL(img.preview);
+          } else {
+            remaining.push(img);
+          }
+        }
+        return remaining;
+      });
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
@@ -212,8 +454,16 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       setReplyTo(null);
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
       requestAnimationFrame(() => scrollToBottom());
-    } catch { /* toast in future */ }
-    setSending(false);
+
+      if (failedCount > 0) {
+        showToast(t('image.error.uploadFailed', { error: `${failedCount} failed, message sent with ${uploadedImages.length} images` }));
+      }
+    } catch (err) {
+      // Don't clear on message send error — preserve pending images and text
+      showToast(t('image.error.uploadFailed', { error: (err as Error).message || 'Send failed' }));
+    } finally {
+      setSending(false);
+    }
   }
 
   // Handle mention selection
@@ -319,7 +569,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <ThreadHeader
         topic={thread.topic}
         status={thread.status}
@@ -362,7 +612,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => { setReplyTo(msg); textareaRef.current?.focus(); } : undefined} />
+          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => { setReplyTo(msg); textareaRef.current?.focus(); } : undefined} onImageClick={setLightboxSrc} />
         ))}
 
         <div ref={messagesEndRef} />
@@ -370,7 +620,18 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
       {/* Composer */}
       {canSend && (
-        <div className="shrink-0 border-t border-hxa-border bg-[rgba(10,15,26,0.4)]">
+        <div
+          className={cn('shrink-0 border-t border-hxa-border bg-[rgba(10,15,26,0.4)] relative', dragOver && 'border-hxa-accent bg-hxa-accent/5')}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+        >
+          {/* Drag-drop overlay */}
+          {dragOver && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-hxa-accent/10 border-2 border-dashed border-hxa-accent rounded-lg pointer-events-none">
+              <span className="text-sm font-medium text-hxa-accent">{t('image.dragDrop')}</span>
+            </div>
+          )}
           {/* Reply bar */}
           {replyTo && (
             <div className="flex items-center gap-2 px-4 py-2 border-b border-hxa-border bg-white/[0.02]">
@@ -385,6 +646,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
               </button>
             </div>
           )}
+          {/* Pending image preview strip */}
+          <PendingImagePreview images={pendingImages} onRemove={removePendingImage} onRetry={retryPendingImage} />
           <div className="relative flex gap-2 items-end px-4 py-3">
             {/* @mention popup */}
             {mentionQuery && filteredMentions.length > 0 && (
@@ -402,6 +665,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
               value={composerText}
               onChange={handleTextareaInput}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               onClick={() => {
                 const ta = textareaRef.current;
                 if (ta) updateMentionState(ta.value, ta.selectionStart);
@@ -410,9 +674,10 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
               rows={1}
               className="flex-1 bg-black/30 border border-hxa-border rounded-lg px-3 py-2.5 text-sm text-hxa-text placeholder:text-hxa-text-muted outline-none focus:border-hxa-accent transition-colors resize-none"
             />
+            <ImageUploadButton onAdd={addPendingFiles} disabled={sending} />
             <button
               onClick={handleSend}
-              disabled={!composerText.trim() || sending}
+              disabled={(!composerText.trim() && pendingImages.length === 0) || sending}
               className="shrink-0 gradient-btn rounded-lg p-2.5 disabled:opacity-30 disabled:cursor-not-allowed transition-opacity"
             >
               {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
@@ -420,6 +685,16 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
           </div>
         </div>
       )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div role="alert" className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-red-900/90 text-white text-xs rounded-lg shadow-lg border border-red-700/50 max-w-[80%] text-center animate-in fade-in slide-in-from-bottom-2">
+          {toast}
+        </div>
+      )}
+
+      {/* Image lightbox */}
+      <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
 
       {/* Closed thread banner */}
       {!canSend && (
@@ -436,7 +711,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 const SWIPE_THRESHOLD = 60;
 const LONG_PRESS_MS = 500;
 
-function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; isSelf: boolean; onReply?: () => void }) {
+function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: ThreadMessage; isSelf: boolean; onReply?: () => void; onImageClick?: (src: string) => void }) {
   const provenance = message.metadata?.provenance as Record<string, unknown> | undefined;
   const isHuman = provenance?.authored_by === 'human';
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
@@ -561,9 +836,11 @@ function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; i
             : 'bg-white/[0.03] border border-white/[0.06]',
           isHuman && 'border-amber-500/20',
         )}>
-          {message.parts.map((part, i) => (
-            <PartRenderer key={i} part={part} />
-          ))}
+          <MessageErrorBoundary>
+            {message.parts.map((part, i) => (
+              <PartRenderer key={i} part={part} onImageClick={onImageClick} />
+            ))}
+          </MessageErrorBoundary>
         </div>
       </div>
     </div>
@@ -572,18 +849,14 @@ function MessageBubble({ message, isSelf, onReply }: { message: ThreadMessage; i
 
 // ─── Part Renderer ───
 
-function PartRenderer({ part }: { part: MessagePart }) {
+function PartRenderer({ part, onImageClick }: { part: MessagePart; onImageClick?: (src: string) => void }) {
   const { t } = useTranslations();
   switch (part.type) {
     case 'text':
     case 'markdown':
       return <MarkdownContent content={part.content || ''} />;
     case 'image':
-      return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-          <span className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('thread.image')}</span>
-        </a>
-      );
+      return <ImagePart part={part} onImageClick={onImageClick} />;
     case 'file':
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
@@ -592,6 +865,12 @@ function PartRenderer({ part }: { part: MessagePart }) {
           {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
         </a>
       );
+    case 'json': {
+      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
+      return (
+        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1 text-hxa-text">{raw}</pre>
+      );
+    }
     case 'link':
       return (
         <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
@@ -601,7 +880,43 @@ function PartRenderer({ part }: { part: MessagePart }) {
     default:
       // Unknown part type — render content as text
       return part.content ? (
-        <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{part.content}</div>
+        <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div>
       ) : null;
   }
+}
+
+// ─── Image Part with Fallback ───
+
+const IMAGE_BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+
+function ImagePart({ part, onImageClick }: { part: MessagePart; onImageClick?: (src: string) => void }) {
+  const [failed, setFailed] = useState(false);
+  const { t } = useTranslations();
+  const src = part.url?.startsWith('/') ? `${IMAGE_BASE}${part.url}` : part.url;
+
+  if (failed || !src) {
+    return (
+      <a
+        href={safeHref(src || part.url)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-xs text-hxa-accent hover:underline inline-flex items-center gap-1 mt-1"
+      >
+        <ImageIcon size={12} /> {part.alt || part.filename || t('thread.image')}
+      </a>
+    );
+  }
+
+  return (
+    <div className="my-1">
+      <img
+        src={src}
+        alt={part.alt || t('thread.image')}
+        className="max-w-xs max-h-48 rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
+        loading="lazy"
+        onClick={() => onImageClick?.(src)}
+        onError={() => setFailed(true)}
+      />
+    </div>
+  );
 }

@@ -3,6 +3,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileTypeFromFile } from 'file-type';
 import { fileURLToPath } from 'node:url';
 import { HubDB, encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
@@ -1007,6 +1008,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       scopes: s.scopes,
       is_scoped_token: s.is_scoped_token,
       expires_at: s.expires_at,
+      config: {
+        max_file_size_mb: config.max_file_size_mb,
+      },
     });
   });
 
@@ -3219,16 +3223,33 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   const filesDir = path.join(config.data_dir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
 
+  // Single source of truth: MIME → safe disk extension. ALLOWED_MIME_TYPES is derived from this.
+  const MIME_TO_EXT: Record<string, string> = {
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
+    'application/pdf': '.pdf', 'text/plain': '.txt', 'text/csv': '.csv', 'application/json': '.json',
+  };
+  const ALLOWED_MIME_TYPES = new Set(Object.keys(MIME_TO_EXT));
+
   const upload = multer({
     storage: multer.diskStorage({
       destination: (_req, _file, cb) => cb(null, filesDir),
       filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname);
+        // Use safe extension derived from MIME (falls back to original extension for unknown types)
+        const ext = MIME_TO_EXT[file.mimetype] ?? path.extname(file.originalname);
         cb(null, `${crypto.randomUUID()}${ext}`);
       },
     }),
     limits: {
       fileSize: config.max_file_size_mb * 1024 * 1024,
+    },
+    fileFilter: (_req, file, cb) => {
+      if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+        cb(null, true);
+      } else {
+        const err = new Error(`File type not allowed: ${file.mimetype}`);
+        (err as any).code = 'UNSUPPORTED_MEDIA_TYPE';
+        cb(err);
+      }
     },
   });
 
@@ -3237,7 +3258,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    * Auth: bot token
    * Returns: { id, name, mime_type, size, url, created_at }
    */
-  auth.post('/api/files/upload', requireBot, requireScope('message'), async (req, res, next) => {
+  auth.post('/api/files/upload', requireBot, requireScope('upload'), async (req, res, next) => {
     // O5: Wrap multer middleware to catch MulterError and return JSON
     upload.single('file')(req, res, (err) => {
       if (err) {
@@ -3249,7 +3270,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
           res.status(400).json({ error: err.message, code: 'UPLOAD_ERROR' });
           return;
         }
-        // Non-multer error (e.g. disk failure)
+        // fileFilter rejection (identified by error code, not fragile string match)
+        if ((err as any).code === 'UNSUPPORTED_MEDIA_TYPE') {
+          res.status(415).json({ error: err.message, code: 'UNSUPPORTED_MEDIA_TYPE' });
+          return;
+        }
         next(err);
         return;
       }
@@ -3262,6 +3287,50 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
+    // Validate actual file content via magic bytes (client Content-Type can be spoofed)
+    try {
+      const detected = await fileTypeFromFile(file.path);
+      if (detected) {
+        // File has recognizable magic bytes — verify against whitelist
+        if (!ALLOWED_MIME_TYPES.has(detected.mime)) {
+          try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+          res.status(415).json({
+            error: `File content type not allowed: ${detected.mime}`,
+            code: 'UNSUPPORTED_MEDIA_TYPE',
+          });
+          return;
+        }
+        // Override client-provided MIME with detected one for accuracy
+        (file as any).mimetype = detected.mime;
+      } else {
+        // file-type returned null — no recognizable binary magic bytes.
+        // SVG/XML files are text-based and not detected by file-type.
+        // Check the first bytes for XML/SVG signatures to block SVG bypass.
+        const head = Buffer.alloc(256);
+        const fd = fs.openSync(file.path, 'r');
+        try { fs.readSync(fd, head, 0, 256, 0); } finally { fs.closeSync(fd); }
+        const headStr = head.toString('utf8').trimStart().toLowerCase();
+        if (headStr.startsWith('<?xml') || headStr.startsWith('<svg') || headStr.startsWith('<!doctype svg')) {
+          try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+          res.status(415).json({
+            error: 'File content type not allowed: image/svg+xml',
+            code: 'UNSUPPORTED_MEDIA_TYPE',
+          });
+          return;
+        }
+      }
+      // If no magic bytes and not SVG/XML, trust the client MIME (already checked by fileFilter).
+    } catch {
+      // fileTypeFromFile failed (e.g. file disappeared) — reject safely
+      try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+      res.status(500).json({ error: 'Failed to validate file content', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // Multer decodes multipart filenames as Latin-1 (per RFC). Re-decode as UTF-8
+    // so that CJK characters and emoji are preserved correctly.
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
     const orgId = req.bot!.org_id;
     const relativePath = `files/${file.filename}`;
     const dailyLimitBytes = config.file_upload_mb_per_day * 1024 * 1024;
@@ -3272,7 +3341,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const result = await db.createFileWithQuotaCheck(
       orgId,
       req.bot!.id,
-      file.originalname,
+      originalName,
       file.mimetype || null,
       file.size,
       relativePath,
@@ -3343,11 +3412,27 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    res.setHeader('Content-Type', record.mime_type || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(record.name)}"`);
+    // Serve with safe Content-Type — reject dangerous MIME types (e.g., SVG with scripts)
+    const safeMime = ALLOWED_MIME_TYPES.has(record.mime_type || '') ? record.mime_type! : 'application/octet-stream';
+    const isInlineType = safeMime.startsWith('image/');
+    res.setHeader('Content-Type', safeMime);
+    const encodedName = encodeURIComponent(record.name);
+    res.setHeader('Content-Disposition', isInlineType
+      ? `inline; filename*=UTF-8''${encodedName}`
+      : `attachment; filename*=UTF-8''${encodedName}`);
     res.setHeader('Content-Length', record.size);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
     const stream = fs.createReadStream(diskPath);
+    stream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to read file', code: 'READ_ERROR' });
+      } else {
+        res.destroy();
+      }
+    });
     stream.pipe(res);
   });
 

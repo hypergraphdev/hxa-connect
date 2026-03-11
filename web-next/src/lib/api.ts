@@ -1,4 +1,4 @@
-import type { RawSession, SessionData, Thread, ThreadMessage, Channel, DmMessage, DmChannelItem, Bot, Artifact } from './types';
+import type { RawSession, SessionData, Thread, ThreadMessage, MessagePart, Channel, DmMessage, DmChannelItem, Bot, Artifact } from './types';
 
 /** Base path for the hxa-connect Express server.
  *  NEXT_PUBLIC_BASE_PATH is set when the app is behind a URL prefix (e.g. "/hub"). */
@@ -99,11 +99,73 @@ export async function getThreadMessages(threadId: string, params?: {
 }
 
 /** Backend expects content (string) + optional parts + optional reply_to */
-export async function sendThreadMessage(threadId: string, content: string, opts?: { parts?: Array<{ type: string; content: string }>; reply_to?: string }): Promise<ThreadMessage> {
+export async function sendThreadMessage(threadId: string, content: string, opts?: { parts?: MessagePart[]; reply_to?: string }): Promise<ThreadMessage> {
   return request<ThreadMessage>(`/api/threads/${threadId}/messages`, {
     method: 'POST',
     body: JSON.stringify({ content, parts: opts?.parts, reply_to: opts?.reply_to }),
   });
+}
+
+// ─── File Upload ───
+
+export interface UploadResult {
+  id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  url: string;
+  created_at: number;
+}
+
+export interface UploadHandle {
+  promise: Promise<UploadResult>;
+  abort: () => void;
+}
+
+export function uploadFile(
+  file: File,
+  onProgress?: (pct: number) => void
+): UploadHandle {
+  const form = new FormData();
+  form.append('file', file);
+
+  const xhr = new XMLHttpRequest();
+
+  const promise = new Promise<UploadResult>((resolve, reject) => {
+    xhr.open('POST', `${BASE}/api/files/upload`);
+    xhr.withCredentials = true;
+    xhr.timeout = 60_000;
+
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new Error('Invalid server response'));
+        }
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText);
+          reject(new Error(err.error || `Upload failed (${xhr.status})`));
+        } catch {
+          reject(new Error(`Upload failed (${xhr.status})`));
+        }
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.onabort = () => reject(new Error('Upload aborted'));
+    xhr.send(form);
+  });
+
+  return { promise, abort: () => xhr.abort() };
 }
 
 // ─── Thread Status ───

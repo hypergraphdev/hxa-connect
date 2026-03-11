@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-import { Loader2, ChevronUp } from 'lucide-react';
+import { useState, useEffect, useRef, Component, type ReactNode, type ErrorInfo } from 'react';
+import { Loader2, ChevronUp, AlertTriangle } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { DmMessage, MessagePart } from '@/lib/types';
 import { cn, formatTime, parseParts, safeHref } from '@/lib/utils';
@@ -9,6 +9,31 @@ import { useSession } from '@/hooks/useSession';
 import { FileText } from 'lucide-react';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { useTranslations } from '@/i18n/context';
+
+// Error boundary for DM message parts — prevents malformed data from crashing entire DM view
+class DmMessageErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[DmMessageErrorBoundary]', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex items-center gap-1 text-xs text-amber-400/70 italic">
+          <AlertTriangle size={12} />
+          <span>Failed to render message</span>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface DMViewProps {
   channelId: string;
@@ -179,9 +204,11 @@ function DmBubble({ message, isSelf }: { message: DmMessage; isSelf: boolean }) 
           ? 'bg-hxa-accent/10 border border-hxa-accent/15'
           : 'bg-white/[0.03] border border-white/[0.06]',
       )}>
-        {parseParts(message.parts, message.content).map((part, i) => (
-          <DmPartRenderer key={i} part={part} />
-        ))}
+        <DmMessageErrorBoundary>
+          {parseParts(message.parts, message.content).map((part, i) => (
+            <DmPartRenderer key={i} part={part} />
+          ))}
+        </DmMessageErrorBoundary>
       </div>
     </div>
   );
@@ -203,6 +230,12 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</a>
       );
+    case 'json': {
+      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
+      return (
+        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1 text-hxa-text">{raw}</pre>
+      );
+    }
     case 'link':
       return (
         <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
@@ -210,6 +243,6 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
         </a>
       );
     default:
-      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{part.content}</div> : null;
+      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div> : null;
   }
 }
