@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Loader2, ChevronUp, Send, FileText, ImageIcon, Reply, X } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback, useMemo, Component, type ReactNode, type ErrorInfo } from 'react';
+import { Loader2, ChevronUp, Send, FileText, ImageIcon, Reply, X, AlertTriangle } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadMessage, MessagePart, ThreadStatus } from '@/lib/types';
 import { cn, formatTime, safeHref } from '@/lib/utils';
@@ -12,6 +12,31 @@ import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/Th
 import { useTranslations } from '@/i18n/context';
 import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
 import { ImageLightbox } from './ImageLightbox';
+
+// Error boundary for message parts — prevents malformed data from crashing entire thread
+class MessageErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode; fallback?: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[MessageErrorBoundary]', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div className="flex items-center gap-1 text-xs text-amber-400/70 italic">
+          <AlertTriangle size={12} />
+          <span>Failed to render message</span>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const MAX_CONCURRENT_UPLOADS = 3;
 
@@ -811,9 +836,11 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
             : 'bg-white/[0.03] border border-white/[0.06]',
           isHuman && 'border-amber-500/20',
         )}>
-          {message.parts.map((part, i) => (
-            <PartRenderer key={i} part={part} onImageClick={onImageClick} />
-          ))}
+          <MessageErrorBoundary>
+            {message.parts.map((part, i) => (
+              <PartRenderer key={i} part={part} onImageClick={onImageClick} />
+            ))}
+          </MessageErrorBoundary>
         </div>
       </div>
     </div>

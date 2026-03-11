@@ -3302,15 +3302,34 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         }
         // Override client-provided MIME with detected one for accuracy
         (file as any).mimetype = detected.mime;
+      } else {
+        // file-type returned null — no recognizable binary magic bytes.
+        // SVG/XML files are text-based and not detected by file-type.
+        // Check the first bytes for XML/SVG signatures to block SVG bypass.
+        const head = Buffer.alloc(256);
+        const fd = fs.openSync(file.path, 'r');
+        try { fs.readSync(fd, head, 0, 256, 0); } finally { fs.closeSync(fd); }
+        const headStr = head.toString('utf8').trimStart().toLowerCase();
+        if (headStr.startsWith('<?xml') || headStr.startsWith('<svg') || headStr.startsWith('<!doctype svg')) {
+          try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+          res.status(415).json({
+            error: 'File content type not allowed: image/svg+xml',
+            code: 'UNSUPPORTED_MEDIA_TYPE',
+          });
+          return;
+        }
       }
-      // If detected is null, file has no recognizable magic bytes (e.g. plain text, CSV, JSON).
-      // For these, we trust the client MIME which was already checked by fileFilter.
+      // If no magic bytes and not SVG/XML, trust the client MIME (already checked by fileFilter).
     } catch {
       // fileTypeFromFile failed (e.g. file disappeared) — reject safely
       try { fs.unlinkSync(file.path); } catch { /* ignore */ }
       res.status(500).json({ error: 'Failed to validate file content', code: 'VALIDATION_ERROR' });
       return;
     }
+
+    // Multer decodes multipart filenames as Latin-1 (per RFC). Re-decode as UTF-8
+    // so that CJK characters and emoji are preserved correctly.
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 
     const orgId = req.bot!.org_id;
     const relativePath = `files/${file.filename}`;
@@ -3322,7 +3341,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const result = await db.createFileWithQuotaCheck(
       orgId,
       req.bot!.id,
-      file.originalname,
+      originalName,
       file.mimetype || null,
       file.size,
       relativePath,
