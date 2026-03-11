@@ -89,7 +89,7 @@ export interface ThreadMessage {
 }
 
 export interface MessagePart {
-  type: 'text' | 'markdown' | 'file' | 'image' | 'link';
+  type: 'text' | 'markdown' | 'json' | 'file' | 'image' | 'link';
   content?: string;
   url?: string;
   filename?: string;
