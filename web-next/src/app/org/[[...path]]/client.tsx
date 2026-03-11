@@ -13,9 +13,11 @@ import {
   AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
-import { THREAD_STATUS_OPTIONS, safeHref } from '@/lib/utils';
+import { THREAD_STATUS_OPTIONS, parseParts } from '@/lib/utils';
 import { FilterSelect } from '@/components/ui/FilterSelect';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { PartRenderer } from '@/components/ui/PartRenderer';
+import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { useTranslations } from '@/i18n/context';
 
@@ -782,6 +784,7 @@ function ChannelView({ channelId, label, onBack }: {
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslations();
   const timeAgo = useTimeAgo();
@@ -817,20 +820,10 @@ function ChannelView({ channelId, label, onBack }: {
   }, [messages.length, loading]);
 
   function renderContent(msg: OrgChannelMessage) {
-    if (msg.parts) {
-      try {
-        const parsed = typeof msg.parts === 'string' ? JSON.parse(msg.parts) : msg.parts;
-        if (Array.isArray(parsed)) {
-          return parsed.map((p: { type?: string; content?: string }, i: number) => {
-            if (p.type === 'text' || p.type === 'markdown' || !p.type) {
-              return <MarkdownContent key={i} content={p.content || ''} />;
-            }
-            return <span key={i}>{p.content || ''}</span>;
-          });
-        }
-      } catch { /* malformed parts — fall through to content */ }
-    }
-    return msg.content;
+    const parts = parseParts(msg.parts, msg.content);
+    return parts.map((p, i) => (
+      <PartRenderer key={i} part={p} onImageClick={setLightboxSrc} />
+    ));
   }
 
   return (
@@ -857,6 +850,8 @@ function ChannelView({ channelId, label, onBack }: {
         ))}
         <div ref={messagesEndRef} />
       </div>
+
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>
   );
 }
@@ -878,6 +873,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
+  const [lightboxSrc2, setLightboxSrc2] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [currentStatus, setCurrentStatus] = useState(thread.status);
@@ -987,27 +983,10 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   }
 
   function renderParts(msg: OrgThreadMessage) {
-    if (msg.parts && Array.isArray(msg.parts) && msg.parts.length > 0) {
-      return msg.parts.map((p, i) => {
-        const content = p.content || '';
-        const part = p as Record<string, unknown>;
-        const url = (part.url as string) || content;
-        const filename = (part.filename as string) || (part.name as string) || '';
-        if (p.type === 'json') {
-          try {
-            return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{JSON.stringify(JSON.parse(content), null, 2)}</pre>;
-          } catch { return <pre key={i} className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1">{content}</pre>; }
-        }
-        if (p.type === 'file') return <div key={i} className="text-xs my-1">📎 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{filename || url}</a></div>;
-        if (p.type === 'image') return <div key={i} className="text-xs my-1">🖼 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{filename || 'Image'}</a></div>;
-        if (p.type === 'link') return <div key={i} className="text-xs my-1">🔗 <a href={safeHref(url)} target="_blank" rel="noopener noreferrer" className="text-hxa-accent hover:underline">{content || url}</a></div>;
-        if (p.type === 'markdown' || p.type === 'text') {
-          return <MarkdownContent key={i} content={content} />;
-        }
-        return <span key={i} className="whitespace-pre-wrap">{content}</span>;
-      });
-    }
-    return (msg as unknown as { content?: string }).content || '';
+    const parts = parseParts(msg.parts, msg.content);
+    return parts.map((p, i) => (
+      <PartRenderer key={i} part={p} onImageClick={setLightboxSrc2} />
+    ));
   }
 
   return (
@@ -1110,6 +1089,8 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
           </div>
         </div>
       )}
+
+      {lightboxSrc2 && <ImageLightbox src={lightboxSrc2} onClose={() => setLightboxSrc2(null)} />}
     </div>
   );
 }

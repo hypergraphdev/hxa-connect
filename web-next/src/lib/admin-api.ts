@@ -3,6 +3,8 @@
  * and Org Admin Dashboard (session cookie auth) helpers.
  */
 
+import type { MessagePart } from './types';
+
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 // ─── Super Admin (session cookie) ───
@@ -149,7 +151,7 @@ export interface OrgChannelMessage {
   sender_id: string;
   sender_name: string;
   content: string;
-  parts: string | null | Array<{ type: string; content?: string }>;
+  parts: string | null | MessagePart[];
   metadata?: Record<string, unknown>;
   created_at: string;
 }
@@ -160,7 +162,7 @@ export interface OrgThreadMessage {
   sender_id: string;
   sender_name: string;
   content?: string;
-  parts: Array<{ type: string; content?: string }>;
+  parts: MessagePart[];
   metadata?: Record<string, unknown>;
   created_at: string;
 }

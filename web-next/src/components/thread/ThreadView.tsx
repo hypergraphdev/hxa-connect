@@ -1,17 +1,17 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo, Component, type ReactNode, type ErrorInfo } from 'react';
-import { Loader2, ChevronUp, Send, FileText, ImageIcon, Reply, X, AlertTriangle } from 'lucide-react';
+import { Loader2, ChevronUp, Send, Reply, X, AlertTriangle } from 'lucide-react';
 import * as api from '@/lib/api';
 import type { Thread, ThreadMessage, MessagePart, ThreadStatus } from '@/lib/types';
-import { cn, formatTime, safeHref } from '@/lib/utils';
+import { cn, formatTime } from '@/lib/utils';
 import { useSession } from '@/hooks/useSession';
 import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/components/ui/MentionPopup';
-import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { PartRenderer } from '@/components/ui/PartRenderer';
+import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { useTranslations } from '@/i18n/context';
 import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
-import { ImageLightbox } from './ImageLightbox';
 
 // Error boundary for message parts — prevents malformed data from crashing entire thread
 class MessageErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { hasError: boolean }> {
@@ -702,6 +702,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
           {t('thread.readOnly', { status: t(`thread.status.${thread.status}`) })}
         </div>
       )}
+
     </div>
   );
 }
@@ -847,76 +848,3 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
   );
 }
 
-// ─── Part Renderer ───
-
-function PartRenderer({ part, onImageClick }: { part: MessagePart; onImageClick?: (src: string) => void }) {
-  const { t } = useTranslations();
-  switch (part.type) {
-    case 'text':
-    case 'markdown':
-      return <MarkdownContent content={part.content || ''} />;
-    case 'image':
-      return <ImagePart part={part} onImageClick={onImageClick} />;
-    case 'file':
-      return (
-        <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-hxa-accent hover:underline mt-1">
-          <FileText size={12} />
-          {part.name || part.filename || t('thread.file')}
-          {part.mime_type && <span className="text-hxa-text-muted">({part.mime_type})</span>}
-        </a>
-      );
-    case 'json': {
-      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
-      return (
-        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1 text-hxa-text">{raw}</pre>
-      );
-    }
-    case 'link':
-      return (
-        <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
-          {part.title || part.content || part.url}
-        </a>
-      );
-    default:
-      // Unknown part type — render content as text
-      return part.content ? (
-        <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div>
-      ) : null;
-  }
-}
-
-// ─── Image Part with Fallback ───
-
-const IMAGE_BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-
-function ImagePart({ part, onImageClick }: { part: MessagePart; onImageClick?: (src: string) => void }) {
-  const [failed, setFailed] = useState(false);
-  const { t } = useTranslations();
-  const src = part.url?.startsWith('/') ? `${IMAGE_BASE}${part.url}` : part.url;
-
-  if (failed || !src) {
-    return (
-      <a
-        href={safeHref(src || part.url)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-xs text-hxa-accent hover:underline inline-flex items-center gap-1 mt-1"
-      >
-        <ImageIcon size={12} /> {part.alt || part.filename || t('thread.image')}
-      </a>
-    );
-  }
-
-  return (
-    <div className="my-1">
-      <img
-        src={src}
-        alt={part.alt || t('thread.image')}
-        className="max-w-xs max-h-48 rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
-        loading="lazy"
-        onClick={() => onImageClick?.(src)}
-        onError={() => setFailed(true)}
-      />
-    </div>
-  );
-}
