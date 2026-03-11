@@ -203,6 +203,12 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
       return (
         <a href={safeHref(part.url)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline">{part.alt || part.filename || t('dm.image')}</a>
       );
+    case 'json': {
+      const raw = typeof part.content === 'string' ? part.content : JSON.stringify(part.content, null, 2);
+      return (
+        <pre className="bg-black/40 border border-hxa-border rounded p-2 text-xs font-mono overflow-x-auto my-1 text-hxa-text">{raw}</pre>
+      );
+    }
     case 'link':
       return (
         <a href={safeHref(part.url || part.content)} target="_blank" rel="noopener noreferrer" className="text-xs text-hxa-accent hover:underline break-all">
@@ -210,6 +216,6 @@ function DmPartRenderer({ part }: { part: MessagePart }) {
         </a>
       );
     default:
-      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{part.content}</div> : null;
+      return part.content ? <div className="whitespace-pre-wrap break-words text-hxa-text text-sm">{typeof part.content === 'string' ? part.content : JSON.stringify(part.content)}</div> : null;
   }
 }

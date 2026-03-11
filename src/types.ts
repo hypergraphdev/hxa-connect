@@ -489,6 +489,7 @@ export interface HubConfig {
 // ─── Shared Validation ──────────────────────────────────────
 
 const VALID_PART_TYPES = new Set(['text', 'markdown', 'json', 'file', 'image', 'link']);
+const MAX_PARTS_PER_MESSAGE = 50;
 
 /**
  * Validate an array of message parts. Returns an error string or null.
@@ -496,6 +497,7 @@ const VALID_PART_TYPES = new Set(['text', 'markdown', 'json', 'file', 'image', '
  */
 export function validateParts(parts: unknown): string | null {
   if (!Array.isArray(parts)) return 'parts must be an array';
+  if (parts.length > MAX_PARTS_PER_MESSAGE) return `parts exceeds maximum of ${MAX_PARTS_PER_MESSAGE} items`;
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
