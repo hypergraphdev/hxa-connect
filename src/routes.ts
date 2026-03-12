@@ -1111,6 +1111,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         return;
       }
 
+      // Quick pre-checks (non-atomic) for immediate, user-friendly error messages
       const ticket = await db.getOrgTicket(ticketId);
       if (!ticket) {
         res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
@@ -1129,34 +1130,57 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
         return;
       }
-      // Check for name conflict BEFORE consuming the ticket
-      const existingBot = await db.getBotByName(org_id, validated.name);
-      if (existingBot) {
-        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
-        return;
-      }
-      if (!ticket.reusable) {
-        const redeemed = await db.redeemOrgTicket(ticketId);
-        if (!redeemed) {
-          res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
-          return;
-        }
-      }
 
-      // Get org and check status
+      // Check org status before entering transaction
       const org = await db.getOrgById(org_id);
       if (!org) {
         res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
         return;
       }
       if (org.status !== 'active') {
-        const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
-        res.status(403).json({ error: `Organization is ${org.status}`, code });
+        const statusCode = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+        res.status(403).json({ error: `Organization is ${org.status}`, code: statusCode });
         return;
       }
+
+      // #178: Atomically consume ticket + insert bot to prevent TOCTOU race condition.
+      // Guarantees: either (bot created + ticket consumed) or (nothing changed).
+      const atomicResult = await db.atomicRegisterBotWithTicket(
+        org_id,
+        ticketId,
+        validated.name,
+        authRole,
+        validated.metadata,
+        validated.webhook_url,
+        validated.webhook_secret,
+        validated.profile,
+      );
+
+      if ('conflict' in atomicResult) {
+        if (atomicResult.conflict === 'NAME_CONFLICT') {
+          res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
+          return;
+        }
+        // Ticket was consumed concurrently between pre-check and transaction
+        res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
+        return;
+      }
+
+      // Ticket path success — audit + respond
+      const { bot: ticketBot, plaintextToken: ticketToken } = atomicResult;
+      await db.recordAudit(org_id, ticketBot.id, 'bot.register', 'bot', ticketBot.id, {
+        name: ticketBot.name, reregister: false, via: 'ticket', auth_role: authRole,
+      });
+      const ticketResponse: RegisterResponse = {
+        bot_id: ticketBot.id,
+        ...toBotResponse(ticketBot),
+        token: ticketToken,
+      };
+      res.json(ticketResponse);
+      return;
     }
 
-    // Register the bot
+    // org_secret path — register (or re-register) as admin bot
     const { bot, created, plaintextToken } = await db.registerBot(
       org_id,
       validated.name,
@@ -1168,9 +1192,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     );
 
     // Audit
-    const via = org_secret ? 'org_secret' : 'ticket';
     await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, {
-      name: bot.name, reregister: !created, via, auth_role: authRole,
+      name: bot.name, reregister: !created, via: 'org_secret', auth_role: authRole,
     });
 
     const response: RegisterResponse = {
@@ -1221,9 +1244,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   /**
    * DELETE /api/bots/:id — Remove a bot (org admin only)
    * Auth: Org ticket or admin bot token
+   * Security: Bot tokens may only delete themselves (prevent identity hijack via delete+re-register).
+   *           Human sessions (org_admin / super_admin) may delete any bot in the org.
    */
   auth.delete('/api/bots/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
+
+    // #199: Prevent admin bot from deleting other bots (identity hijack vector).
+    // A bot token may only delete itself; use DELETE /api/me for self-deregistration.
+    // Human sessions (org_admin/super_admin) retain full delete authority.
+    if (req.bot && req.bot.id !== (req.params.id as string)) {
+      res.status(403).json({
+        error: 'Bots may only delete themselves. Use DELETE /api/me to deregister.',
+        code: 'FORBIDDEN',
+      });
+      return;
+    }
 
     const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const bot = await db.getBotById(req.params.id as string);
@@ -1234,10 +1270,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     await db.deleteBot(bot.id);
 
-    // Audit
-    await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name });
+    // Audit — record who performed the deletion for traceability
+    const deletedBy = req.bot ? req.bot.id : 'session';
+    await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
-    // Broadcast bot offline
+    // Terminate the deleted bot's active WebSocket connection immediately.
+    // Without this, the victim bot's connection stays open and can still receive messages.
+    ws.disconnectByBotId(bot.id);
+
+    // Broadcast bot offline to remaining org members
     ws.broadcastToOrg(bot.org_id, {
       type: 'bot_offline',
       bot: { id: bot.id, name: bot.name },

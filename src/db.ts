@@ -1020,6 +1020,122 @@ export class HubDB {
     return { bot, created: true, plaintextToken };
   }
 
+  /**
+   * #178: Atomically validate + consume a ticket and register a bot in a single transaction.
+   *
+   * Guarantees:
+   *   - If bot name already exists → NAME_CONFLICT returned, ticket is NOT consumed.
+   *   - If ticket is already consumed/expired → TICKET_CONSUMED returned, no bot created.
+   *   - On any other error → transaction rolls back; neither ticket nor bot is modified.
+   *
+   * Only for the ticket registration path. The org_secret path uses registerBot() directly
+   * (no ticket to consume; re-registration is intentionally allowed for admin bots).
+   */
+  async atomicRegisterBotWithTicket(
+    orgId: string,
+    ticketId: string,
+    name: string,
+    authRole: AuthRole,
+    metadata: Record<string, unknown> | null | undefined,
+    webhookUrl: string | null | undefined,
+    webhookSecret: string | null | undefined,
+    profile: BotProfileInput | undefined,
+  ): Promise<
+    | { bot: Bot; plaintextToken: string }
+    | { conflict: 'NAME_CONFLICT' | 'TICKET_CONSUMED' }
+  > {
+    // Pre-compute all pure values outside the transaction (no DB side-effects)
+    const plaintextToken = `bot_${crypto.randomBytes(24).toString('hex')}`;
+    const tokenHash = HubDB.hashToken(plaintextToken);
+    const botId = crypto.randomUUID();
+    const now = Date.now();
+    const serializedProfile = this.serializeProfileFields(profile);
+
+    // Sentinel error class used to signal name conflict out of the transaction callback.
+    // Throwing (not returning) ensures PostgreSQL driver issues ROLLBACK before we handle
+    // the conflict — critical because a caught INSERT error leaves the PG transaction aborted,
+    // and returning from the callback would cause COMMIT to fail on the aborted transaction.
+    class NameConflictError extends Error {
+      constructor() { super('NAME_CONFLICT'); }
+    }
+
+    try {
+      return await this.driver.transaction(async (txn) => {
+        // Step 1: Re-validate ticket inside transaction (prevents TOCTOU on consumed flag)
+        const ticketRow = await txn.get<any>(
+          'SELECT * FROM org_tickets WHERE (id = ? OR code = ?) AND consumed = 0 AND (expires_at = 0 OR expires_at > ?)',
+          [ticketId, ticketId, Date.now()],
+        );
+        if (!ticketRow) {
+          return { conflict: 'TICKET_CONSUMED' as const };
+        }
+
+        // Step 2: INSERT bot — UNIQUE(org_id, name) will fire on name conflict.
+        // We do NOT catch here: letting the error propagate ensures PostgreSQL issues
+        // ROLLBACK (not COMMIT on an aborted transaction). We catch via NameConflictError below.
+        try {
+          await txn.run(
+            `INSERT INTO bots (
+              id, org_id, name, token, metadata, webhook_url, webhook_secret,
+              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
+              auth_role, online, last_seen_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              botId, orgId, name, tokenHash,
+              metadata === undefined ? null : (metadata === null ? null : JSON.stringify(metadata)),
+              webhookUrl ?? null,
+              webhookSecret ?? null,
+              serializedProfile.bio ?? null,
+              serializedProfile.role ?? null,
+              serializedProfile.function ?? null,
+              serializedProfile.team ?? null,
+              serializedProfile.tags ?? null,
+              serializedProfile.languages ?? null,
+              serializedProfile.protocols ?? null,
+              serializedProfile.status_text ?? null,
+              serializedProfile.timezone ?? null,
+              serializedProfile.active_hours ?? null,
+              serializedProfile.version ?? '1.0.0',
+              serializedProfile.runtime ?? null,
+              authRole,
+              0, // online = false
+              now,
+              now,
+            ],
+          );
+        } catch (err: any) {
+          // SQLite: SQLITE_CONSTRAINT_UNIQUE / PostgreSQL: error code 23505
+          if (
+            err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+            err?.code === '23505' ||
+            err?.message?.includes('UNIQUE constraint failed')
+          ) {
+            throw new NameConflictError(); // propagates out → transaction ROLLBACK → caught below
+          }
+          throw err;
+        }
+
+        // Step 3: Consume ticket (only if INSERT succeeded and ticket is non-reusable)
+        if (!ticketRow.reusable) {
+          await txn.run(
+            'UPDATE org_tickets SET consumed = 1 WHERE id = ? AND consumed = 0',
+            [ticketRow.id],
+          );
+        }
+
+        // Step 4: Read back the inserted bot within the same transaction
+        const botRow = await txn.get<any>('SELECT * FROM bots WHERE id = ?', [botId]);
+        if (!botRow) throw new Error('atomicRegisterBotWithTicket: bot row missing after INSERT');
+        return { bot: this.rowToBot(botRow), plaintextToken };
+      });
+    } catch (err) {
+      if (err instanceof NameConflictError) {
+        return { conflict: 'NAME_CONFLICT' as const };
+      }
+      throw err;
+    }
+  }
+
   async updateProfile(botId: string, fields: BotProfileInput): Promise<Bot | undefined> {
     const serialized = this.serializeProfileFields(fields);
     const updates: string[] = [];
