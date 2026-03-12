@@ -1361,7 +1361,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    await db.recordAudit(orgId, null, 'bot.tombstone_cleared', 'bot', name, { cleared_by: req.session.role });
+    await db.recordAudit(orgId, null, 'bot.tombstone_cleared', 'bot', name, {
+      cleared_by_session: req.session.id,
+      cleared_by_role: req.session.role,
+    });
 
     res.json({ ok: true, message: `Bot name "${name}" is now available for registration` });
   });

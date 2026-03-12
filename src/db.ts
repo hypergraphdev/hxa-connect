@@ -882,24 +882,11 @@ export class HubDB {
     profile?: BotProfileInput,
     authRole: AuthRole = 'member',
   ): Promise<{ bot: Bot; plaintextToken: string } | { conflict: 'NAME_TOMBSTONED' | 'NAME_EXISTS' }> {
-    // Tombstone check: reject if name was deleted and not yet released
-    const tombstoned = await this.isBotNameTombstoned(orgId, name);
-    if (tombstoned) {
-      return { conflict: 'NAME_TOMBSTONED' as const };
-    }
-    // Name-conflict check: reject if a live bot already holds this name
-    const existing = await this.driver.get<any>(
-      'SELECT 1 FROM bots WHERE org_id = ? AND name = ?',
-      [orgId, name],
-    );
-    if (existing) {
-      return { conflict: 'NAME_EXISTS' as const };
-    }
-
+    // Pre-compute all pure values outside the transaction (no DB side-effects)
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
-
     const plaintextToken = `bot_${crypto.randomBytes(24).toString('hex')}`;
+    const tokenHash = HubDB.hashToken(plaintextToken);
     const bot: Bot = {
       id: crypto.randomUUID(),
       org_id: orgId,
@@ -926,57 +913,72 @@ export class HubDB {
       created_at: now,
     };
 
-    const tokenHash = HubDB.hashToken(bot.token);
-
-    try {
-      await this.driver.run(
-        `INSERT INTO bots (
-          id, org_id, name, token, metadata, webhook_url, webhook_secret,
-          bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
-          auth_role, online, last_seen_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          bot.id,
-          bot.org_id,
-          bot.name,
-          tokenHash, // Store hash, not plaintext
-          bot.metadata,
-          bot.webhook_url,
-          bot.webhook_secret,
-          bot.bio,
-          bot.role,
-          bot.function,
-          bot.team,
-          bot.tags,
-          bot.languages,
-          bot.protocols,
-          bot.status_text,
-          bot.timezone,
-          bot.active_hours,
-          bot.version,
-          bot.runtime,
-          bot.auth_role,
-          bot.online ? 1 : 0,
-          bot.last_seen_at,
-          bot.created_at,
-        ],
-      );
-    } catch (err: any) {
-      // Guard against a concurrent registration race: two requests can both pass
-      // the tombstone check and the name-exists SELECT above, then race to INSERT.
-      // The second INSERT hits the UNIQUE(org_id, name) constraint; convert it to
-      // a NAME_EXISTS conflict instead of propagating a 500 error.
-      if (
-        err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
-        err?.code === '23505' ||
-        err?.message?.includes('UNIQUE constraint failed')
-      ) {
-        return { conflict: 'NAME_EXISTS' as const };
-      }
-      throw err;
+    // Sentinel errors thrown inside the transaction to force ROLLBACK before handling.
+    // Must throw (not return) so PostgreSQL issues ROLLBACK on a caught constraint error
+    // rather than attempting COMMIT on an aborted transaction.
+    class NameTombstonedError extends Error {
+      constructor() { super('NAME_TOMBSTONED'); }
+    }
+    class NameExistsError extends Error {
+      constructor() { super('NAME_EXISTS'); }
     }
 
-    return { bot, plaintextToken };
+    try {
+      await this.driver.transaction(async (txn) => {
+        // Tombstone check inside transaction: prevents TOCTOU where a concurrent
+        // deleteBotWithTombstone() could commit between this check and the INSERT,
+        // leaving a tombstoned name registered in the bots table.
+        const tombstoneRow = await txn.get<any>(
+          'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+          [orgId, name],
+        );
+        if (tombstoneRow) throw new NameTombstonedError();
+
+        // Existing-bot check inside transaction: prevents concurrent registrations
+        // for the same name from both passing the pre-INSERT guard.
+        const existingRow = await txn.get<any>(
+          'SELECT 1 FROM bots WHERE org_id = ? AND name = ?',
+          [orgId, name],
+        );
+        if (existingRow) throw new NameExistsError();
+
+        try {
+          await txn.run(
+            `INSERT INTO bots (
+              id, org_id, name, token, metadata, webhook_url, webhook_secret,
+              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
+              auth_role, online, last_seen_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              bot.id, bot.org_id, bot.name,
+              tokenHash, // Store hash, not plaintext
+              bot.metadata, bot.webhook_url, bot.webhook_secret,
+              bot.bio, bot.role, bot.function, bot.team, bot.tags,
+              bot.languages, bot.protocols, bot.status_text, bot.timezone,
+              bot.active_hours, bot.version, bot.runtime, bot.auth_role,
+              bot.online ? 1 : 0, bot.last_seen_at, bot.created_at,
+            ],
+          );
+        } catch (err: any) {
+          // UNIQUE(org_id, name) fired — last-resort guard against races narrower
+          // than the explicit checks above. Throw sentinel to trigger ROLLBACK.
+          if (
+            err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+            err?.code === '23505' ||
+            err?.message?.includes('UNIQUE constraint failed')
+          ) {
+            throw new NameExistsError();
+          }
+          throw err;
+        }
+      });
+
+      return { bot, plaintextToken };
+    } catch (err) {
+      if (err instanceof NameTombstonedError) return { conflict: 'NAME_TOMBSTONED' as const };
+      if (err instanceof NameExistsError) return { conflict: 'NAME_EXISTS' as const };
+      throw err;
+    }
   }
 
   /**
@@ -1360,7 +1362,7 @@ export class HubDB {
       `, [botId]);
       for (const { thread_id } of soloThreads) {
         await txn.run(`
-          UPDATE threads SET status = 'closed', close_reason = 'error', updated_at = ?, last_activity_at = ?, revision = revision + 1
+          UPDATE threads SET status = 'closed', close_reason = 'manual', updated_at = ?, last_activity_at = ?, revision = revision + 1
           WHERE id = ? AND status NOT IN ('resolved', 'closed')
         `, [now, now, thread_id]);
       }
@@ -1376,6 +1378,10 @@ export class HubDB {
   /**
    * Record a bot name as tombstoned after deletion to prevent re-registration.
    * Uses upsert so a re-delete of the same name (edge case) is idempotent.
+   *
+   * @deprecated All standard delete paths now use deleteBotWithTombstone() which
+   * performs tombstoning atomically inside a transaction. This method remains for
+   * direct use in tests or administrative tooling where a transaction is not needed.
    */
   async tombstoneBotName(orgId: string, name: string, deletedBy: string): Promise<void> {
     const id = crypto.randomUUID();
