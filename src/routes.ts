@@ -1157,6 +1157,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       );
 
       if ('conflict' in atomicResult) {
+        if (atomicResult.conflict === 'NAME_TOMBSTONED') {
+          res.status(409).json({
+            error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+            code: 'NAME_TOMBSTONED',
+          });
+          return;
+        }
         if (atomicResult.conflict === 'NAME_CONFLICT') {
           res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
           return;
@@ -1180,8 +1187,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    // org_secret path — register (or re-register) as admin bot
-    const { bot, created, plaintextToken } = await db.registerBot(
+    // org_secret path — register as admin bot
+    const result = await db.registerBot(
       org_id,
       validated.name,
       validated.metadata,
@@ -1191,18 +1198,30 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       authRole,
     );
 
+    if ('conflict' in result) {
+      if (result.conflict === 'NAME_TOMBSTONED') {
+        res.status(409).json({
+          error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+          code: 'NAME_TOMBSTONED',
+        });
+      } else {
+        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_EXISTS' });
+      }
+      return;
+    }
+
+    const { bot, plaintextToken } = result;
+
     // Audit
     await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, {
-      name: bot.name, reregister: !created, via: 'org_secret', auth_role: authRole,
+      name: bot.name, reregister: false, via: 'org_secret', auth_role: authRole,
     });
 
     const response: RegisterResponse = {
       bot_id: bot.id,
       ...toBotResponse(bot),
+      token: plaintextToken,
     };
-    if (created && plaintextToken !== null) {
-      response.token = plaintextToken;
-    }
     res.json(response);
   });
 
@@ -1244,22 +1263,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   /**
    * DELETE /api/bots/:id — Remove a bot (org admin only)
    * Auth: Org ticket or admin bot token
-   * Security: Bot tokens may only delete themselves (prevent identity hijack via delete+re-register).
-   *           Human sessions (org_admin / super_admin) may delete any bot in the org.
+   * Security: Bot name is tombstoned on deletion to prevent identity hijack via
+   *           delete + re-register (Issue #199 A1). Name can only be released by
+   *           a human org admin via DELETE /api/orgs/:org_id/tombstones/:name.
    */
   auth.delete('/api/bots/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-
-    // #199: Prevent admin bot from deleting other bots (identity hijack vector).
-    // A bot token may only delete itself; use DELETE /api/me for self-deregistration.
-    // Human sessions (org_admin/super_admin) retain full delete authority.
-    if (req.bot && req.bot.id !== (req.params.id as string)) {
-      res.status(403).json({
-        error: 'Bots may only delete themselves. Use DELETE /api/me to deregister.',
-        code: 'FORBIDDEN',
-      });
-      return;
-    }
 
     const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const bot = await db.getBotById(req.params.id as string);
@@ -1270,8 +1279,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     await db.deleteBot(bot.id);
 
-    // Audit — record who performed the deletion for traceability
+    // #199 A1: Tombstone the deleted bot's name so it cannot be re-registered
+    // (prevents identity hijack via delete + re-register).
     const deletedBy = req.bot ? req.bot.id : 'session';
+    await db.tombstoneBotName(orgId!, bot.name, deletedBy);
     await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
     // Terminate the deleted bot's active WebSocket connection immediately.
@@ -1294,6 +1305,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   auth.delete('/api/me', requireBot, requireScope('full'), async (req, res) => {
     const bot = req.bot!;
     await db.deleteBot(bot.id);
+    await db.tombstoneBotName(bot.org_id, bot.name, bot.id);
 
     // Audit
     await db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });
@@ -1305,6 +1317,48 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     });
 
     res.json({ ok: true, message: `Bot "${bot.name}" deregistered` });
+  });
+
+  /**
+   * DELETE /api/orgs/:org_id/tombstones/:name — Release a bot name tombstone
+   * Auth: Human session (org_admin or super_admin) only — bot tokens are not accepted.
+   * This allows org admins to re-enable a bot name after intentional deletion.
+   */
+  auth.delete('/api/orgs/:org_id/tombstones/:name', async (req, res) => {
+    // Require human session (org_admin or super_admin) — bot tokens cannot release tombstones.
+    if (!req.session || (req.session.role !== 'org_admin' && req.session.role !== 'super_admin')) {
+      res.status(403).json({
+        error: 'Human session required to release a bot name tombstone',
+        code: 'HUMAN_SESSION_REQUIRED',
+      });
+      return;
+    }
+
+    const orgId = req.params.org_id as string;
+    const name = req.params.name as string;
+
+    // Verify the org exists
+    const org = await db.getOrgById(orgId);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // org_admin may only manage their own org
+    if (req.session.role === 'org_admin' && req.session.org_id !== orgId) {
+      res.status(403).json({ error: 'Cannot manage tombstones for a different organization', code: 'FORBIDDEN' });
+      return;
+    }
+
+    const cleared = await db.clearBotNameTombstone(orgId, name);
+    if (!cleared) {
+      res.status(404).json({ error: 'No tombstone found for this bot name', code: 'NOT_FOUND' });
+      return;
+    }
+
+    await db.recordAudit(orgId, null, 'bot.tombstone_cleared', 'bot', name, { cleared_by: req.session.role });
+
+    res.json({ ok: true, message: `Bot name "${name}" is now available for registration` });
   });
 
   /**

@@ -439,6 +439,22 @@ export class HubDB {
         CREATE INDEX IF NOT EXISTS idx_thread_messages_reply_to ON thread_messages(reply_to_id);
       `);
     });
+
+    // Bot name tombstoning (Issue #199 A1): prevent deleted bot name re-registration
+    await this.runMigration('deleted_bot_names', async () => {
+      const ts2 = this.driver.dialect === 'postgres' ? 'BIGINT' : 'INTEGER';
+      await this.driver.exec(`
+        CREATE TABLE IF NOT EXISTS deleted_bot_names (
+          id TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          deleted_at ${ts2} NOT NULL,
+          deleted_by TEXT NOT NULL,
+          UNIQUE(org_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_deleted_bot_names_org ON deleted_bot_names(org_id);
+      `);
+    });
   }
 
   /**
@@ -865,95 +881,23 @@ export class HubDB {
     webhookSecret?: string | null,
     profile?: BotProfileInput,
     authRole: AuthRole = 'member',
-  ): Promise<{ bot: Bot; created: boolean; plaintextToken: string | null }> {
-    // Check if bot already exists → return existing token
+  ): Promise<{ bot: Bot; plaintextToken: string } | { conflict: 'NAME_TOMBSTONED' | 'NAME_EXISTS' }> {
+    // Tombstone check: reject if name was deleted and not yet released
+    const tombstoned = await this.isBotNameTombstoned(orgId, name);
+    if (tombstoned) {
+      return { conflict: 'NAME_TOMBSTONED' as const };
+    }
+    // Name-conflict check: reject if a live bot already holds this name
     const existing = await this.driver.get<any>(
-      'SELECT * FROM bots WHERE org_id = ? AND name = ?',
+      'SELECT 1 FROM bots WHERE org_id = ? AND name = ?',
       [orgId, name],
     );
+    if (existing) {
+      return { conflict: 'NAME_EXISTS' as const };
+    }
 
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
-
-    if (existing) {
-      const updates: string[] = ['last_seen_at = ?'];
-      const params: any[] = [now];
-
-      if (metadata !== undefined) {
-        updates.push('metadata = ?');
-        params.push(metadata === null ? null : JSON.stringify(metadata));
-      }
-      if (webhookUrl !== undefined) {
-        updates.push('webhook_url = ?');
-        params.push(webhookUrl);
-      }
-      if (webhookSecret !== undefined) {
-        updates.push('webhook_secret = ?');
-        params.push(webhookSecret);
-      }
-
-      if (serializedProfile.bio !== undefined) {
-        updates.push('bio = ?');
-        params.push(serializedProfile.bio);
-      }
-      if (serializedProfile.role !== undefined) {
-        updates.push('role = ?');
-        params.push(serializedProfile.role);
-      }
-      if (serializedProfile.function !== undefined) {
-        updates.push('"function" = ?');
-        params.push(serializedProfile.function);
-      }
-      if (serializedProfile.team !== undefined) {
-        updates.push('team = ?');
-        params.push(serializedProfile.team);
-      }
-      if (serializedProfile.tags !== undefined) {
-        updates.push('tags = ?');
-        params.push(serializedProfile.tags);
-      }
-      if (serializedProfile.languages !== undefined) {
-        updates.push('languages = ?');
-        params.push(serializedProfile.languages);
-      }
-      if (serializedProfile.protocols !== undefined) {
-        updates.push('protocols = ?');
-        params.push(serializedProfile.protocols);
-      }
-      if (serializedProfile.status_text !== undefined) {
-        updates.push('status_text = ?');
-        params.push(serializedProfile.status_text);
-      }
-      if (serializedProfile.timezone !== undefined) {
-        updates.push('timezone = ?');
-        params.push(serializedProfile.timezone);
-      }
-      if (serializedProfile.active_hours !== undefined) {
-        updates.push('active_hours = ?');
-        params.push(serializedProfile.active_hours);
-      }
-      if (serializedProfile.version !== undefined) {
-        updates.push('version = ?');
-        params.push(serializedProfile.version);
-      }
-      if (serializedProfile.runtime !== undefined) {
-        updates.push('runtime = ?');
-        params.push(serializedProfile.runtime);
-      }
-
-      params.push(existing.id);
-
-      await this.driver.run(
-        `UPDATE bots SET ${updates.join(', ')} WHERE id = ?`,
-        params,
-      );
-
-      const updated = await this.getBotById(existing.id);
-      if (!updated) {
-        throw new Error('Bot update failed');
-      }
-      return { bot: updated, created: false, plaintextToken: null };
-    }
 
     const plaintextToken = `bot_${crypto.randomBytes(24).toString('hex')}`;
     const bot: Bot = {
@@ -1017,7 +961,7 @@ export class HubDB {
       ],
     );
 
-    return { bot, created: true, plaintextToken };
+    return { bot, plaintextToken };
   }
 
   /**
@@ -1028,8 +972,7 @@ export class HubDB {
    *   - If ticket is already consumed/expired → TICKET_CONSUMED returned, no bot created.
    *   - On any other error → transaction rolls back; neither ticket nor bot is modified.
    *
-   * Only for the ticket registration path. The org_secret path uses registerBot() directly
-   * (no ticket to consume; re-registration is intentionally allowed for admin bots).
+   * Only for the ticket registration path. The org_secret path uses registerBot() directly.
    */
   async atomicRegisterBotWithTicket(
     orgId: string,
@@ -1042,7 +985,7 @@ export class HubDB {
     profile: BotProfileInput | undefined,
   ): Promise<
     | { bot: Bot; plaintextToken: string }
-    | { conflict: 'NAME_CONFLICT' | 'TICKET_CONSUMED' }
+    | { conflict: 'NAME_CONFLICT' | 'TICKET_CONSUMED' | 'NAME_TOMBSTONED' }
   > {
     // Pre-compute all pure values outside the transaction (no DB side-effects)
     const plaintextToken = `bot_${crypto.randomBytes(24).toString('hex')}`;
@@ -1051,12 +994,15 @@ export class HubDB {
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
 
-    // Sentinel error class used to signal name conflict out of the transaction callback.
+    // Sentinel error classes used to signal conflicts out of the transaction callback.
     // Throwing (not returning) ensures PostgreSQL driver issues ROLLBACK before we handle
     // the conflict — critical because a caught INSERT error leaves the PG transaction aborted,
     // and returning from the callback would cause COMMIT to fail on the aborted transaction.
     class NameConflictError extends Error {
       constructor() { super('NAME_CONFLICT'); }
+    }
+    class TombstonedError extends Error {
+      constructor() { super('NAME_TOMBSTONED'); }
     }
 
     try {
@@ -1068,6 +1014,15 @@ export class HubDB {
         );
         if (!ticketRow) {
           return { conflict: 'TICKET_CONSUMED' as const };
+        }
+
+        // Step 1b: Check tombstone inside transaction to avoid TOCTOU on name reservation
+        const tombstoneRow = await txn.get<any>(
+          'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+          [orgId, name],
+        );
+        if (tombstoneRow) {
+          throw new TombstonedError();
         }
 
         // Step 2: INSERT bot — UNIQUE(org_id, name) will fire on name conflict.
@@ -1131,6 +1086,9 @@ export class HubDB {
     } catch (err) {
       if (err instanceof NameConflictError) {
         return { conflict: 'NAME_CONFLICT' as const };
+      }
+      if (err instanceof TombstonedError) {
+        return { conflict: 'NAME_TOMBSTONED' as const };
       }
       throw err;
     }
@@ -1349,6 +1307,41 @@ export class HubDB {
 
     await this.driver.run('DELETE FROM channel_members WHERE bot_id = ?', [botId]);
     await this.driver.run('DELETE FROM bots WHERE id = ?', [botId]);
+  }
+
+  /**
+   * Record a bot name as tombstoned after deletion to prevent re-registration.
+   * Uses upsert so a re-delete of the same name (edge case) is idempotent.
+   */
+  async tombstoneBotName(orgId: string, name: string, deletedBy: string): Promise<void> {
+    const id = crypto.randomUUID();
+    await this.driver.run(
+      `INSERT INTO deleted_bot_names (id, org_id, name, deleted_at, deleted_by)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(org_id, name) DO UPDATE SET deleted_at = excluded.deleted_at, deleted_by = excluded.deleted_by`,
+      [id, orgId, name, Date.now(), deletedBy],
+    );
+  }
+
+  /** Returns true if the given (org_id, name) is tombstoned. */
+  async isBotNameTombstoned(orgId: string, name: string): Promise<boolean> {
+    const row = await this.driver.get<any>(
+      'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+      [orgId, name],
+    );
+    return !!row;
+  }
+
+  /**
+   * Release a tombstone so the name can be re-registered.
+   * Returns true if a tombstone was found and cleared, false if none existed.
+   */
+  async clearBotNameTombstone(orgId: string, name: string): Promise<boolean> {
+    const result = await this.driver.run(
+      'DELETE FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+      [orgId, name],
+    );
+    return result.changes > 0;
   }
 
   // ─── Bot Token Operations (Scoped Tokens) ─────────────
