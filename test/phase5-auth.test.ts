@@ -1366,7 +1366,7 @@ describe('Bot Name Tombstone (#199 A1)', () => {
       body: { org_id: orgId, org_secret: orgSecret, name: 'tombstone-live' },
     });
     expect(status).toBe(409);
-    expect(body.code).toBe('NAME_EXISTS');
+    expect(body.code).toBe('NAME_CONFLICT');
 
     // Clean up
     await api(env.baseUrl, 'DELETE', `/api/bots/${liveBot.bot_id}`, { token: adminToken });
@@ -1479,5 +1479,73 @@ describe('Bot Name Tombstone (#199 A1)', () => {
     });
     expect(status).toBe(404);
     expect(body.code).toBe('NOT_FOUND');
+  });
+
+  it('rename to tombstoned name is rejected with NAME_TOMBSTONED', async () => {
+    // Register two bots: victim (to be deleted) and attacker (the renamer)
+    const victimRes = await fetch(`${env.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, org_secret: orgSecret, name: 'tombstone-rename-victim' }),
+    });
+    expect(victimRes.status).toBe(200);
+    const victim = await victimRes.json() as any;
+
+    const { body: attackerBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, org_secret: orgSecret, name: 'tombstone-rename-attacker' },
+    });
+    const attackerToken = attackerBody.token;
+
+    // Admin bot deletes victim → tombstone created for 'tombstone-rename-victim'
+    await api(env.baseUrl, 'DELETE', `/api/bots/${victim.bot_id}`, { token: adminToken });
+
+    // Attacker tries to rename to the tombstoned name → should be blocked
+    const { status, body } = await api(env.baseUrl, 'PATCH', '/api/me/name', {
+      token: attackerToken,
+      body: { name: 'tombstone-rename-victim' },
+    });
+    expect(status).toBe(409);
+    expect(body.code).toBe('NAME_TOMBSTONED');
+  });
+
+  it('rename to tombstoned name succeeds after tombstone is released', async () => {
+    // Register two bots
+    const victimRes = await fetch(`${env.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, org_secret: orgSecret, name: 'tombstone-rename-v2-victim' }),
+    });
+    expect(victimRes.status).toBe(200);
+    const victim2 = await victimRes.json() as any;
+
+    const { body: renamerBody } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, org_secret: orgSecret, name: 'tombstone-rename-v2-renamer' },
+    });
+    const renamerToken = renamerBody.token;
+
+    // Admin deletes victim → tombstone created
+    await api(env.baseUrl, 'DELETE', `/api/bots/${victim2.bot_id}`, { token: adminToken });
+
+    // Verify rename is blocked
+    const { status: blockedStatus } = await api(env.baseUrl, 'PATCH', '/api/me/name', {
+      token: renamerToken,
+      body: { name: 'tombstone-rename-v2-victim' },
+    });
+    expect(blockedStatus).toBe(409);
+
+    // Admin releases the tombstone
+    const sessionCookie = await env.loginAsOrg(orgSecret);
+    const { status: releaseStatus } = await api(env.baseUrl, 'DELETE', `/api/orgs/${orgId}/tombstones/tombstone-rename-v2-victim`, {
+      cookie: sessionCookie,
+    });
+    expect(releaseStatus).toBe(200);
+
+    // Now rename should succeed
+    const { status: renamedStatus, body: renamedBody } = await api(env.baseUrl, 'PATCH', '/api/me/name', {
+      token: renamerToken,
+      body: { name: 'tombstone-rename-v2-victim' },
+    });
+    expect(renamedStatus).toBe(200);
+    expect(renamedBody.name).toBe('tombstone-rename-v2-victim');
   });
 });

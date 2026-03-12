@@ -1205,7 +1205,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
           code: 'NAME_TOMBSTONED',
         });
       } else {
-        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_EXISTS' });
+        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
       }
       return;
     }
@@ -1535,7 +1535,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const result = await db.renameBot(req.bot!.id, name);
 
     if (result.conflict) {
-      res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
+      if (result.conflict === 'NAME_TOMBSTONED') {
+        res.status(409).json({
+          error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+          code: 'NAME_TOMBSTONED',
+        });
+      } else {
+        res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
+      }
       return;
     }
 

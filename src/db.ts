@@ -1191,14 +1191,32 @@ export class HubDB {
     return this.getBotById(botId);
   }
 
-  async renameBot(botId: string, newName: string): Promise<{ bot: Bot; conflict: false } | { bot: undefined; conflict: true }> {
+  async renameBot(botId: string, newName: string): Promise<{ bot: Bot; conflict: false } | { bot: undefined; conflict: 'NAME_CONFLICT' | 'NAME_TOMBSTONED' }> {
+    class NameTombstonedError extends Error { constructor() { super('NAME_TOMBSTONED'); } }
+    class NameConflictError extends Error { constructor() { super('NAME_CONFLICT'); } }
+
     try {
-      await this.driver.run('UPDATE bots SET name = ? WHERE id = ?', [newName, botId]);
-    } catch (err: any) {
-      // SQLite: SQLITE_CONSTRAINT_UNIQUE, PostgreSQL: 23505 (unique_violation)
-      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === '23505') {
-        return { bot: undefined, conflict: true };
-      }
+      await this.driver.transaction(async (txn) => {
+        const botRow = await txn.get<any>('SELECT org_id FROM bots WHERE id = ?', [botId]);
+        // botRow should always exist since the caller has already fetched the bot
+        const tombstoneRow = botRow
+          ? await txn.get<any>(
+              'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+              [botRow.org_id, newName],
+            )
+          : null;
+        if (tombstoneRow) throw new NameTombstonedError();
+        try {
+          await txn.run('UPDATE bots SET name = ? WHERE id = ?', [newName, botId]);
+        } catch (err: any) {
+          // SQLite: SQLITE_CONSTRAINT_UNIQUE, PostgreSQL: 23505 (unique_violation)
+          if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === '23505') throw new NameConflictError();
+          throw err;
+        }
+      });
+    } catch (err) {
+      if (err instanceof NameTombstonedError) return { bot: undefined, conflict: 'NAME_TOMBSTONED' };
+      if (err instanceof NameConflictError) return { bot: undefined, conflict: 'NAME_CONFLICT' };
       throw err;
     }
     const bot = await this.getBotById(botId);
