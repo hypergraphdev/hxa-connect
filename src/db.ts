@@ -1325,6 +1325,55 @@ export class HubDB {
   }
 
   /**
+   * Atomically tombstone a bot's name and delete the bot in a single transaction.
+   *
+   * All four steps execute inside one transaction:
+   *   1. INSERT tombstone (deleted_bot_names) — name reserved immediately
+   *   2. Close any threads where this bot is the sole participant
+   *   3. Delete channel memberships
+   *   4. Delete the bot row
+   *
+   * Either all steps succeed or the transaction rolls back, leaving the bot
+   * and tombstone state unchanged. This eliminates the race window that would
+   * exist if tombstone and delete were separate sequential operations (#199 A1).
+   */
+  async deleteBotWithTombstone(botId: string, name: string, orgId: string, deletedBy: string): Promise<void> {
+    await this.driver.transaction(async (txn) => {
+      const now = Date.now();
+
+      // Step 1: Tombstone name first so concurrent registrations are blocked
+      // immediately. UPSERT is idempotent if the name was already tombstoned.
+      const tombstoneId = crypto.randomUUID();
+      await txn.run(
+        `INSERT INTO deleted_bot_names (id, org_id, name, deleted_at, deleted_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(org_id, name) DO UPDATE SET deleted_at = excluded.deleted_at, deleted_by = excluded.deleted_by`,
+        [tombstoneId, orgId, name, now, deletedBy],
+      );
+
+      // Step 2: Auto-close threads where this bot is the sole remaining participant
+      // (ON DELETE CASCADE would orphan them, making them inaccessible via API)
+      const soloThreads = await txn.all<{ thread_id: string }>(`
+        SELECT tp.thread_id FROM thread_participants tp
+        WHERE tp.bot_id = ?
+          AND (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = tp.thread_id) = 1
+      `, [botId]);
+      for (const { thread_id } of soloThreads) {
+        await txn.run(`
+          UPDATE threads SET status = 'closed', close_reason = 'error', updated_at = ?, last_activity_at = ?, revision = revision + 1
+          WHERE id = ? AND status NOT IN ('resolved', 'closed')
+        `, [now, now, thread_id]);
+      }
+
+      // Step 3: Remove channel memberships
+      await txn.run('DELETE FROM channel_members WHERE bot_id = ?', [botId]);
+
+      // Step 4: Delete the bot row
+      await txn.run('DELETE FROM bots WHERE id = ?', [botId]);
+    });
+  }
+
+  /**
    * Record a bot name as tombstoned after deletion to prevent re-registration.
    * Uses upsert so a re-delete of the same name (edge case) is idempotent.
    */

@@ -1277,14 +1277,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    // #199 A1: Tombstone the deleted bot's name BEFORE deleting the bot row.
-    // This closes the race window where a concurrent org_secret registration
-    // could slip in between deleteBot() and tombstoneBotName() and claim the
-    // freed name before the tombstone is in place.
+    // #199 A1: Atomically tombstone the bot's name and delete the bot row in
+    // a single transaction. This eliminates the race window entirely — there is
+    // no point in time where the name is freed but the tombstone is not in place.
     const deletedBy = req.bot ? req.bot.id : 'session';
-    await db.tombstoneBotName(orgId!, bot.name, deletedBy);
-
-    await db.deleteBot(bot.id);
+    await db.deleteBotWithTombstone(bot.id, bot.name, orgId!, deletedBy);
     await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
     // Terminate the deleted bot's active WebSocket connection immediately.
@@ -1307,11 +1304,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   auth.delete('/api/me', requireBot, requireScope('full'), async (req, res) => {
     const bot = req.bot!;
 
-    // #199 A1: Tombstone the bot's name BEFORE deleting the bot row to close
-    // the race window (same reasoning as DELETE /api/bots/:id above).
-    await db.tombstoneBotName(bot.org_id, bot.name, bot.id);
-
-    await db.deleteBot(bot.id);
+    // #199 A1: Atomically tombstone the bot's name and delete the bot row in
+    // a single transaction (same reasoning as DELETE /api/bots/:id above).
+    await db.deleteBotWithTombstone(bot.id, bot.name, bot.org_id, bot.id);
 
     // Terminate the self-deleting bot's active WebSocket connection immediately.
     // Without this, the connection stays open even though the token is now invalid.
