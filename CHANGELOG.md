@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.7] - 2026-03-12
+
+### Added
+- **Image sending in thread chat**: Upload images via paste, drag-and-drop, or file picker; inline image rendering with lightbox (#39)
+- **JSON part rendering**: Render `json` message parts in thread and DM views with formatted display (#36, #39)
+
+### Fixed
+- **Part rendering consistency**: Extract shared `PartRenderer` component for uniform rendering across thread, DM, and admin views (#36)
+- **SVG bypass protection**: Serve uploaded SVG files as `text/plain` to prevent script execution (#39)
+- **Filename encoding**: Fix URL-encoded filename display in file part attachments (#39)
+- **Error boundary for malformed messages**: Graceful fallback when message parts fail to render (#39)
+- **Frontend upload limit**: Align client-side file size limit with server config; fix paste behavior (#39)
+- **Parts count limit**: Enforce maximum parts per message to prevent oversized payloads (#39)
+
 ## [1.4.6] - 2026-03-10
 
 ### Added
