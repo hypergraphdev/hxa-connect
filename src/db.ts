@@ -881,7 +881,7 @@ export class HubDB {
     webhookSecret?: string | null,
     profile?: BotProfileInput,
     authRole: AuthRole = 'member',
-  ): Promise<{ bot: Bot; plaintextToken: string } | { conflict: 'NAME_TOMBSTONED' | 'NAME_EXISTS' }> {
+  ): Promise<{ bot: Bot; plaintextToken: string } | { conflict: 'NAME_TOMBSTONED' | 'NAME_CONFLICT' }> {
     // Pre-compute all pure values outside the transaction (no DB side-effects)
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
@@ -919,8 +919,8 @@ export class HubDB {
     class NameTombstonedError extends Error {
       constructor() { super('NAME_TOMBSTONED'); }
     }
-    class NameExistsError extends Error {
-      constructor() { super('NAME_EXISTS'); }
+    class NameConflictError extends Error {
+      constructor() { super('NAME_CONFLICT'); }
     }
 
     try {
@@ -940,7 +940,7 @@ export class HubDB {
           'SELECT 1 FROM bots WHERE org_id = ? AND name = ?',
           [orgId, name],
         );
-        if (existingRow) throw new NameExistsError();
+        if (existingRow) throw new NameConflictError();
 
         try {
           await txn.run(
@@ -967,7 +967,7 @@ export class HubDB {
             err?.code === '23505' ||
             err?.message?.includes('UNIQUE constraint failed')
           ) {
-            throw new NameExistsError();
+            throw new NameConflictError();
           }
           throw err;
         }
@@ -976,7 +976,7 @@ export class HubDB {
       return { bot, plaintextToken };
     } catch (err) {
       if (err instanceof NameTombstonedError) return { conflict: 'NAME_TOMBSTONED' as const };
-      if (err instanceof NameExistsError) return { conflict: 'NAME_EXISTS' as const };
+      if (err instanceof NameConflictError) return { conflict: 'NAME_CONFLICT' as const };
       throw err;
     }
   }
@@ -1198,19 +1198,24 @@ export class HubDB {
     try {
       await this.driver.transaction(async (txn) => {
         const botRow = await txn.get<any>('SELECT org_id FROM bots WHERE id = ?', [botId]);
-        // botRow should always exist since the caller has already fetched the bot
-        const tombstoneRow = botRow
-          ? await txn.get<any>(
-              'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
-              [botRow.org_id, newName],
-            )
-          : null;
+        // If the bot was concurrently deleted, abort rather than silently skip tombstone check
+        if (!botRow) throw new Error('BOT_NOT_FOUND');
+        const tombstoneRow = await txn.get<any>(
+          'SELECT 1 FROM deleted_bot_names WHERE org_id = ? AND name = ?',
+          [botRow.org_id, newName],
+        );
         if (tombstoneRow) throw new NameTombstonedError();
         try {
-          await txn.run('UPDATE bots SET name = ? WHERE id = ?', [newName, botId]);
+          // Include org_id in WHERE for defense-in-depth (ensures we only rename the bot
+          // within its own org even if botId is somehow wrong)
+          await txn.run('UPDATE bots SET name = ? WHERE id = ? AND org_id = ?', [newName, botId, botRow.org_id]);
         } catch (err: any) {
           // SQLite: SQLITE_CONSTRAINT_UNIQUE, PostgreSQL: 23505 (unique_violation)
-          if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === '23505') throw new NameConflictError();
+          if (
+            err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+            err?.code === '23505' ||
+            err?.message?.includes('UNIQUE constraint failed')
+          ) throw new NameConflictError();
           throw err;
         }
       });
