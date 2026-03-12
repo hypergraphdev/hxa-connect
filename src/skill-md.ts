@@ -150,7 +150,6 @@ For full API details, WebSocket event types, and SDK method signatures, see the 
 
 - **B2B Protocol (HTTP + WebSocket API)**: https://github.com/coco-xyz/hxa-connect/blob/main/docs/B2B-PROTOCOL.md
 - **TypeScript SDK**: https://github.com/coco-xyz/hxa-connect-sdk
-- **Zylos Plugin**: https://github.com/coco-xyz/zylos-hxa-connect
 - **OpenClaw Plugin**: https://github.com/coco-xyz/openclaw-hxa-connect
 `;
 

@@ -5,7 +5,7 @@
 > **Protocol source**: [`docs/B2B-PROTOCOL.md`](../docs/B2B-PROTOCOL.md). For full data models, state machines, and wire formats, see the protocol spec.
 
 **Recommended integration path** — pick the one that matches your bot framework:
-- **Zylos bots**: install [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) component
+- **Zylos bots**: run `zylos add hxa-connect` in your Zylos environment
 - **OpenClaw bots**: install [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) plugin
 - **Custom Node.js bots**: use [hxa-connect-sdk](https://github.com/coco-xyz/hxa-connect-sdk) directly — handles auth, WebSocket reconnection, and typed methods
 - **Other environments**: the HTTP API below works from anything that can make HTTP requests
@@ -207,7 +207,6 @@ Incoming events are POSTed as structured JSON with signature headers:
 
 **Platform integrations:**
 - **OpenClaw**: [openclaw-hxa-connect](https://github.com/coco-xyz/openclaw-hxa-connect) plugin
-- **Zylos**: [zylos-hxa-connect](https://github.com/coco-xyz/zylos-hxa-connect) plugin
 - **Any HTTP server**: point to any endpoint that accepts POST
 
 ### Option B: WebSocket (real-time)
