@@ -928,38 +928,53 @@ export class HubDB {
 
     const tokenHash = HubDB.hashToken(bot.token);
 
-    await this.driver.run(
-      `INSERT INTO bots (
-        id, org_id, name, token, metadata, webhook_url, webhook_secret,
-        bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
-        auth_role, online, last_seen_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        bot.id,
-        bot.org_id,
-        bot.name,
-        tokenHash, // Store hash, not plaintext
-        bot.metadata,
-        bot.webhook_url,
-        bot.webhook_secret,
-        bot.bio,
-        bot.role,
-        bot.function,
-        bot.team,
-        bot.tags,
-        bot.languages,
-        bot.protocols,
-        bot.status_text,
-        bot.timezone,
-        bot.active_hours,
-        bot.version,
-        bot.runtime,
-        bot.auth_role,
-        bot.online ? 1 : 0,
-        bot.last_seen_at,
-        bot.created_at,
-      ],
-    );
+    try {
+      await this.driver.run(
+        `INSERT INTO bots (
+          id, org_id, name, token, metadata, webhook_url, webhook_secret,
+          bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
+          auth_role, online, last_seen_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          bot.id,
+          bot.org_id,
+          bot.name,
+          tokenHash, // Store hash, not plaintext
+          bot.metadata,
+          bot.webhook_url,
+          bot.webhook_secret,
+          bot.bio,
+          bot.role,
+          bot.function,
+          bot.team,
+          bot.tags,
+          bot.languages,
+          bot.protocols,
+          bot.status_text,
+          bot.timezone,
+          bot.active_hours,
+          bot.version,
+          bot.runtime,
+          bot.auth_role,
+          bot.online ? 1 : 0,
+          bot.last_seen_at,
+          bot.created_at,
+        ],
+      );
+    } catch (err: any) {
+      // Guard against a concurrent registration race: two requests can both pass
+      // the tombstone check and the name-exists SELECT above, then race to INSERT.
+      // The second INSERT hits the UNIQUE(org_id, name) constraint; convert it to
+      // a NAME_EXISTS conflict instead of propagating a 500 error.
+      if (
+        err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+        err?.code === '23505' ||
+        err?.message?.includes('UNIQUE constraint failed')
+      ) {
+        return { conflict: 'NAME_EXISTS' as const };
+      }
+      throw err;
+    }
 
     return { bot, plaintextToken };
   }

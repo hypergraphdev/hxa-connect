@@ -1277,12 +1277,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    await db.deleteBot(bot.id);
-
-    // #199 A1: Tombstone the deleted bot's name so it cannot be re-registered
-    // (prevents identity hijack via delete + re-register).
+    // #199 A1: Tombstone the deleted bot's name BEFORE deleting the bot row.
+    // This closes the race window where a concurrent org_secret registration
+    // could slip in between deleteBot() and tombstoneBotName() and claim the
+    // freed name before the tombstone is in place.
     const deletedBy = req.bot ? req.bot.id : 'session';
     await db.tombstoneBotName(orgId!, bot.name, deletedBy);
+
+    await db.deleteBot(bot.id);
     await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
     // Terminate the deleted bot's active WebSocket connection immediately.
@@ -1304,8 +1306,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.delete('/api/me', requireBot, requireScope('full'), async (req, res) => {
     const bot = req.bot!;
-    await db.deleteBot(bot.id);
+
+    // #199 A1: Tombstone the bot's name BEFORE deleting the bot row to close
+    // the race window (same reasoning as DELETE /api/bots/:id above).
     await db.tombstoneBotName(bot.org_id, bot.name, bot.id);
+
+    await db.deleteBot(bot.id);
+
+    // Terminate the self-deleting bot's active WebSocket connection immediately.
+    // Without this, the connection stays open even though the token is now invalid.
+    ws.disconnectByBotId(bot.id);
 
     // Audit
     await db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });
