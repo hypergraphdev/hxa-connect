@@ -1111,6 +1111,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         return;
       }
 
+      // Quick pre-checks (non-atomic) for immediate, user-friendly error messages
       const ticket = await db.getOrgTicket(ticketId);
       if (!ticket) {
         res.status(401).json({ error: 'Invalid ticket', code: 'INVALID_TICKET' });
@@ -1129,35 +1130,65 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
         return;
       }
-      // Check for name conflict BEFORE consuming the ticket
-      const existingBot = await db.getBotByName(org_id, validated.name);
-      if (existingBot) {
-        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
-        return;
-      }
-      if (!ticket.reusable) {
-        const redeemed = await db.redeemOrgTicket(ticketId);
-        if (!redeemed) {
-          res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
-          return;
-        }
-      }
 
-      // Get org and check status
+      // Check org status before entering transaction
       const org = await db.getOrgById(org_id);
       if (!org) {
         res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
         return;
       }
       if (org.status !== 'active') {
-        const code = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
-        res.status(403).json({ error: `Organization is ${org.status}`, code });
+        const statusCode = org.status === 'suspended' ? 'ORG_SUSPENDED' : 'ORG_DESTROYED';
+        res.status(403).json({ error: `Organization is ${org.status}`, code: statusCode });
         return;
       }
+
+      // #178: Atomically consume ticket + insert bot to prevent TOCTOU race condition.
+      // Guarantees: either (bot created + ticket consumed) or (nothing changed).
+      const atomicResult = await db.atomicRegisterBotWithTicket(
+        org_id,
+        ticketId,
+        validated.name,
+        authRole,
+        validated.metadata,
+        validated.webhook_url,
+        validated.webhook_secret,
+        validated.profile,
+      );
+
+      if ('conflict' in atomicResult) {
+        if (atomicResult.conflict === 'NAME_TOMBSTONED') {
+          res.status(409).json({
+            error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+            code: 'NAME_TOMBSTONED',
+          });
+          return;
+        }
+        if (atomicResult.conflict === 'NAME_CONFLICT') {
+          res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
+          return;
+        }
+        // Ticket was consumed concurrently between pre-check and transaction
+        res.status(401).json({ error: 'Ticket already consumed', code: 'TICKET_CONSUMED' });
+        return;
+      }
+
+      // Ticket path success — audit + respond
+      const { bot: ticketBot, plaintextToken: ticketToken } = atomicResult;
+      await db.recordAudit(org_id, ticketBot.id, 'bot.register', 'bot', ticketBot.id, {
+        name: ticketBot.name, reregister: false, via: 'ticket', auth_role: authRole,
+      });
+      const ticketResponse: RegisterResponse = {
+        bot_id: ticketBot.id,
+        ...toBotResponse(ticketBot),
+        token: ticketToken,
+      };
+      res.json(ticketResponse);
+      return;
     }
 
-    // Register the bot
-    const { bot, created, plaintextToken } = await db.registerBot(
+    // org_secret path — register as admin bot
+    const result = await db.registerBot(
       org_id,
       validated.name,
       validated.metadata,
@@ -1167,19 +1198,30 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       authRole,
     );
 
+    if ('conflict' in result) {
+      if (result.conflict === 'NAME_TOMBSTONED') {
+        res.status(409).json({
+          error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+          code: 'NAME_TOMBSTONED',
+        });
+      } else {
+        res.status(409).json({ error: 'A bot with this name already exists', code: 'NAME_CONFLICT' });
+      }
+      return;
+    }
+
+    const { bot, plaintextToken } = result;
+
     // Audit
-    const via = org_secret ? 'org_secret' : 'ticket';
     await db.recordAudit(org_id, bot.id, 'bot.register', 'bot', bot.id, {
-      name: bot.name, reregister: !created, via, auth_role: authRole,
+      name: bot.name, reregister: false, via: 'org_secret', auth_role: authRole,
     });
 
     const response: RegisterResponse = {
       bot_id: bot.id,
       ...toBotResponse(bot),
+      token: plaintextToken,
     };
-    if (created && plaintextToken !== null) {
-      response.token = plaintextToken;
-    }
     res.json(response);
   });
 
@@ -1221,6 +1263,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   /**
    * DELETE /api/bots/:id — Remove a bot (org admin only)
    * Auth: Org ticket or admin bot token
+   * Security: Bot name is tombstoned on deletion to prevent identity hijack via
+   *           delete + re-register (Issue #199 A1). Name can only be released by
+   *           a human org admin via DELETE /api/orgs/:org_id/tombstones/:name.
    */
   auth.delete('/api/bots/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
@@ -1232,12 +1277,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    await db.deleteBot(bot.id);
+    // #199 A1: Atomically tombstone the bot's name and delete the bot row in
+    // a single transaction. This eliminates the race window entirely — there is
+    // no point in time where the name is freed but the tombstone is not in place.
+    const deletedBy = req.bot ? req.bot.id : 'session';
+    await db.deleteBotWithTombstone(bot.id, bot.name, orgId!, deletedBy);
+    await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
-    // Audit
-    await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name });
+    // Terminate the deleted bot's active WebSocket connection immediately.
+    // Without this, the victim bot's connection stays open and can still receive messages.
+    ws.disconnectByBotId(bot.id);
 
-    // Broadcast bot offline
+    // Broadcast bot offline to remaining org members
     ws.broadcastToOrg(bot.org_id, {
       type: 'bot_offline',
       bot: { id: bot.id, name: bot.name },
@@ -1252,7 +1303,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.delete('/api/me', requireBot, requireScope('full'), async (req, res) => {
     const bot = req.bot!;
-    await db.deleteBot(bot.id);
+
+    // #199 A1: Atomically tombstone the bot's name and delete the bot row in
+    // a single transaction (same reasoning as DELETE /api/bots/:id above).
+    await db.deleteBotWithTombstone(bot.id, bot.name, bot.org_id, bot.id);
+
+    // Terminate the self-deleting bot's active WebSocket connection immediately.
+    // Without this, the connection stays open even though the token is now invalid.
+    ws.disconnectByBotId(bot.id);
 
     // Audit
     await db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });
@@ -1264,6 +1322,51 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     });
 
     res.json({ ok: true, message: `Bot "${bot.name}" deregistered` });
+  });
+
+  /**
+   * DELETE /api/orgs/:org_id/tombstones/:name — Release a bot name tombstone
+   * Auth: Human session (org_admin or super_admin) only — bot tokens are not accepted.
+   * This allows org admins to re-enable a bot name after intentional deletion.
+   */
+  auth.delete('/api/orgs/:org_id/tombstones/:name', async (req, res) => {
+    // Require human session (org_admin or super_admin) — bot tokens cannot release tombstones.
+    if (!req.session || (req.session.role !== 'org_admin' && req.session.role !== 'super_admin')) {
+      res.status(403).json({
+        error: 'Human session required to release a bot name tombstone',
+        code: 'HUMAN_SESSION_REQUIRED',
+      });
+      return;
+    }
+
+    const orgId = req.params.org_id as string;
+    const name = req.params.name as string;
+
+    // Verify the org exists
+    const org = await db.getOrgById(orgId);
+    if (!org) {
+      res.status(404).json({ error: 'Organization not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // org_admin may only manage their own org
+    if (req.session.role === 'org_admin' && req.session.org_id !== orgId) {
+      res.status(403).json({ error: 'Cannot manage tombstones for a different organization', code: 'FORBIDDEN' });
+      return;
+    }
+
+    const cleared = await db.clearBotNameTombstone(orgId, name);
+    if (!cleared) {
+      res.status(404).json({ error: 'No tombstone found for this bot name', code: 'NOT_FOUND' });
+      return;
+    }
+
+    await db.recordAudit(orgId, null, 'bot.tombstone_cleared', 'bot', name, {
+      cleared_by_session: req.session.id,
+      cleared_by_role: req.session.role,
+    });
+
+    res.json({ ok: true, message: `Bot name "${name}" is now available for registration` });
   });
 
   /**
@@ -1432,7 +1535,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const result = await db.renameBot(req.bot!.id, name);
 
     if (result.conflict) {
-      res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
+      if (result.conflict === 'NAME_TOMBSTONED') {
+        res.status(409).json({
+          error: 'Bot name is reserved. An org admin must release it via DELETE /api/orgs/:org_id/tombstones/:name.',
+          code: 'NAME_TOMBSTONED',
+        });
+      } else {
+        res.status(409).json({ error: 'A bot with that name already exists in this org', code: 'NAME_CONFLICT' });
+      }
       return;
     }
 

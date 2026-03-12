@@ -307,7 +307,8 @@ export type AuditAction =
   | 'file.upload'
   | 'settings.update'
   | 'lifecycle.cleanup'
-  | 'auth.login' | 'auth.login_failed' | 'auth.logout' | 'auth.session_revoked';
+  | 'auth.login' | 'auth.login_failed' | 'auth.logout' | 'auth.session_revoked'
+  | 'bot.tombstone_cleared';
 
 export interface AuditEntry {
   id: string;
