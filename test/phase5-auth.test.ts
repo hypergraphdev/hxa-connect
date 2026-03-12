@@ -1422,4 +1422,62 @@ describe('Bot Name Tombstone (#199 A1)', () => {
     expect(status).toBe(403);
     expect(body.code).toBe('HUMAN_SESSION_REQUIRED');
   });
+
+  it('self-deletion (DELETE /api/me) also tombstones the bot name', async () => {
+    // Register a bot via org_secret
+    const regRes = await fetch(`${env.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, org_secret: orgSecret, name: 'tombstone-self' }),
+    });
+    expect(regRes.status).toBe(200);
+    const selfBot = await regRes.json() as any;
+
+    // Bot self-deletes
+    const { status: delStatus } = await api(env.baseUrl, 'DELETE', '/api/me', {
+      token: selfBot.token,
+    });
+    expect(delStatus).toBe(200);
+
+    // Name should be tombstoned — re-registration blocked
+    const { status, body } = await api(env.baseUrl, 'POST', '/api/auth/register', {
+      body: { org_id: orgId, org_secret: orgSecret, name: 'tombstone-self' },
+    });
+    expect(status).toBe(409);
+    expect(body.code).toBe('NAME_TOMBSTONED');
+  });
+
+  it('org_admin cannot release tombstone for a different org', async () => {
+    // Create a second org with a tombstoned name
+    const org2 = await env.createOrg('tombstone-org2');
+    const regRes = await fetch(`${env.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id: org2.id, org_secret: org2.org_secret, name: 'cross-org-victim' }),
+    });
+    expect(regRes.status).toBe(200);
+    const crossVictim = await regRes.json() as any;
+
+    // Register an admin bot in org2 to delete the victim
+    const { bot: org2Admin, token: org2AdminToken } = await env.registerBot(org2.org_secret, 'org2-admin');
+    await env.promoteBot(org2.org_secret, org2Admin.bot_id);
+    await api(env.baseUrl, 'DELETE', `/api/bots/${crossVictim.bot_id}`, { token: org2AdminToken });
+
+    // Tombstone now exists in org2. Org1 admin tries to release it — should be rejected.
+    const org1AdminCookie = await env.loginAsOrg(orgSecret);
+    const { status, body } = await api(env.baseUrl, 'DELETE', `/api/orgs/${org2.id}/tombstones/cross-org-victim`, {
+      cookie: org1AdminCookie,
+    });
+    expect(status).toBe(403);
+    expect(body.code).toBe('FORBIDDEN');
+  });
+
+  it('releasing a non-existent tombstone returns 404', async () => {
+    const sessionCookie = await env.loginAsOrg(orgSecret);
+    const { status, body } = await api(env.baseUrl, 'DELETE', `/api/orgs/${orgId}/tombstones/does-not-exist`, {
+      cookie: sessionCookie,
+    });
+    expect(status).toBe(404);
+    expect(body.code).toBe('NOT_FOUND');
+  });
 });
