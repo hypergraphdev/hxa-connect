@@ -1011,26 +1011,59 @@ export class HubDB {
     const now = Date.now();
     const serializedProfile = this.serializeProfileFields(profile);
 
-    // Sentinel error classes used to signal conflicts out of the transaction callback.
-    // Throwing (not returning) ensures PostgreSQL driver issues ROLLBACK before we handle
-    // the conflict — critical because a caught INSERT error leaves the PG transaction aborted,
-    // and returning from the callback would cause COMMIT to fail on the aborted transaction.
+    // Pre-construct the Bot object from local values so the returned bot.token is
+    // the plaintext token — consistent with registerBot(). This also eliminates
+    // the unnecessary SELECT * readback that rowToBot() would require.
+    const botObj: Bot = {
+      id: botId,
+      org_id: orgId,
+      name,
+      token: plaintextToken, // caller receives plaintext; DB stores hash
+      metadata: metadata === undefined ? null : (metadata === null ? null : JSON.stringify(metadata)),
+      webhook_url: webhookUrl ?? null,
+      webhook_secret: webhookSecret ?? null,
+      bio: serializedProfile.bio ?? null,
+      role: serializedProfile.role ?? null,
+      function: serializedProfile.function ?? null,
+      team: serializedProfile.team ?? null,
+      tags: serializedProfile.tags ?? null,
+      languages: serializedProfile.languages ?? null,
+      protocols: serializedProfile.protocols ?? null,
+      status_text: serializedProfile.status_text ?? null,
+      timezone: serializedProfile.timezone ?? null,
+      active_hours: serializedProfile.active_hours ?? null,
+      version: serializedProfile.version ?? '1.0.0',
+      runtime: serializedProfile.runtime ?? null,
+      auth_role: authRole,
+      online: false,
+      last_seen_at: now,
+      created_at: now,
+    };
+
+    // Sentinel error classes — all conflicts are thrown (not returned) from the
+    // transaction callback so the PostgreSQL driver always issues ROLLBACK before
+    // we handle the conflict. Returning from inside the transaction would issue
+    // COMMIT, which fails if a prior statement aborted the PG transaction.
     class NameConflictError extends Error {
       constructor() { super('NAME_CONFLICT'); }
     }
     class TombstonedError extends Error {
       constructor() { super('NAME_TOMBSTONED'); }
     }
+    class TicketConsumedError extends Error {
+      constructor() { super('TICKET_CONSUMED'); }
+    }
 
     try {
-      return await this.driver.transaction(async (txn) => {
+      await this.driver.transaction(async (txn) => {
         // Step 1: Re-validate ticket inside transaction (prevents TOCTOU on consumed flag)
         const ticketRow = await txn.get<any>(
           'SELECT * FROM org_tickets WHERE (id = ? OR code = ?) AND consumed = 0 AND (expires_at = 0 OR expires_at > ?)',
           [ticketId, ticketId, Date.now()],
         );
         if (!ticketRow) {
-          return { conflict: 'TICKET_CONSUMED' as const };
+          // Throw (not return) so the driver issues ROLLBACK before we handle the conflict.
+          throw new TicketConsumedError();
         }
 
         // Step 1b: Check tombstone inside transaction to avoid TOCTOU on name reservation
@@ -1053,26 +1086,13 @@ export class HubDB {
               auth_role, online, last_seen_at, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              botId, orgId, name, tokenHash,
-              metadata === undefined ? null : (metadata === null ? null : JSON.stringify(metadata)),
-              webhookUrl ?? null,
-              webhookSecret ?? null,
-              serializedProfile.bio ?? null,
-              serializedProfile.role ?? null,
-              serializedProfile.function ?? null,
-              serializedProfile.team ?? null,
-              serializedProfile.tags ?? null,
-              serializedProfile.languages ?? null,
-              serializedProfile.protocols ?? null,
-              serializedProfile.status_text ?? null,
-              serializedProfile.timezone ?? null,
-              serializedProfile.active_hours ?? null,
-              serializedProfile.version ?? '1.0.0',
-              serializedProfile.runtime ?? null,
-              authRole,
-              0, // online = false
-              now,
-              now,
+              botObj.id, botObj.org_id, botObj.name,
+              tokenHash, // Store hash, not plaintext
+              botObj.metadata, botObj.webhook_url, botObj.webhook_secret,
+              botObj.bio, botObj.role, botObj.function, botObj.team, botObj.tags,
+              botObj.languages, botObj.protocols, botObj.status_text, botObj.timezone,
+              botObj.active_hours, botObj.version, botObj.runtime, botObj.auth_role,
+              botObj.online ? 1 : 0, botObj.last_seen_at, botObj.created_at,
             ],
           );
         } catch (err: any) {
@@ -1094,19 +1114,15 @@ export class HubDB {
             [ticketRow.id],
           );
         }
-
-        // Step 4: Read back the inserted bot within the same transaction
-        const botRow = await txn.get<any>('SELECT * FROM bots WHERE id = ?', [botId]);
-        if (!botRow) throw new Error('atomicRegisterBotWithTicket: bot row missing after INSERT');
-        return { bot: this.rowToBot(botRow), plaintextToken };
+        // No step 4 readback needed — botObj was pre-constructed from the same values
+        // passed to the INSERT, so the DB state is already reflected in botObj.
       });
+
+      return { bot: botObj, plaintextToken };
     } catch (err) {
-      if (err instanceof NameConflictError) {
-        return { conflict: 'NAME_CONFLICT' as const };
-      }
-      if (err instanceof TombstonedError) {
-        return { conflict: 'NAME_TOMBSTONED' as const };
-      }
+      if (err instanceof NameConflictError) return { conflict: 'NAME_CONFLICT' as const };
+      if (err instanceof TombstonedError) return { conflict: 'NAME_TOMBSTONED' as const };
+      if (err instanceof TicketConsumedError) return { conflict: 'TICKET_CONSUMED' as const };
       throw err;
     }
   }
