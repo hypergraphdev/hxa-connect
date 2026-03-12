@@ -47,7 +47,12 @@ export function MentionPopup({ candidates, query, selectedIndex, onSelect, onClo
       {filtered.map((c, i) => (
         <button
           key={c.id}
-          onPointerDown={(e) => { e.preventDefault(); onSelect(c.name); }}
+          // Prevent the textarea from losing focus on mouse click (desktop only).
+          // Do NOT use onPointerDown/onTouchStart for selection — those fire before
+          // the browser can distinguish a tap from a scroll, making the list
+          // impossible to scroll on touch devices (issue #191).
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onSelect(c.name)}
           onMouseEnter={() => onHover?.(i)}
           className={cn(
             'w-full text-left px-3 py-2.5 sm:py-1.5 text-sm flex items-center gap-2 transition-colors',
