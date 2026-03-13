@@ -506,7 +506,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         setMentionIndex((i) => (i - 1 + filteredMentions.length) % filteredMentions.length);
         return;
       }
-      if (e.key === 'Enter' || e.key === 'Tab') {
+      if ((e.key === 'Enter' || e.key === 'Tab') && !e.nativeEvent.isComposing) {
         e.preventDefault();
         handleMentionSelect(filteredMentions[mentionIndex].name);
         return;
@@ -518,7 +518,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       }
     }
 
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -718,6 +718,7 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
   const ownerName = isHuman ? (provenance?.owner_name as string | undefined) : undefined;
   const reply = message.reply_to_message;
   const { t } = useTranslations();
+  const mentionNames = useMemo(() => message.mentions?.map(m => m.name), [message.mentions]);
 
   // Swipe & long-press state for mobile reply
   const touchRef = useRef<{ startX: number; startY: number; ts: number } | null>(null);
@@ -839,7 +840,7 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
         )}>
           <MessageErrorBoundary>
             {message.parts.map((part, i) => (
-              <PartRenderer key={i} part={part} onImageClick={onImageClick} />
+              <PartRenderer key={i} part={part} mentionNames={mentionNames} mentionAll={message.mention_all} onImageClick={onImageClick} />
             ))}
           </MessageErrorBoundary>
         </div>

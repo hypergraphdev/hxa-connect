@@ -76,12 +76,19 @@ export interface ReplyToMessage {
   created_at: number;
 }
 
+export interface MentionRef {
+  bot_id: string;
+  name: string;
+}
+
 export interface ThreadMessage {
   id: string;
   thread_id: string;
   sender_id: string;
   sender_name: string;
   parts: MessagePart[];
+  mentions?: MentionRef[];
+  mention_all?: boolean;
   metadata?: Record<string, unknown>;
   reply_to_id?: string | null;
   reply_to_message?: ReplyToMessage | null;

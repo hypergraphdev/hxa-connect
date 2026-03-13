@@ -9,15 +9,17 @@ import { useTranslations } from '@/i18n/context';
 
 interface PartRendererProps {
   part: MessagePart;
+  mentionNames?: string[];
+  mentionAll?: boolean;
   onImageClick?: (url: string) => void;
 }
 
-export function PartRenderer({ part, onImageClick }: PartRendererProps) {
+export function PartRenderer({ part, mentionNames, mentionAll, onImageClick }: PartRendererProps) {
   const { t } = useTranslations();
   switch (part.type) {
     case 'text':
     case 'markdown':
-      return <MarkdownContent content={part.content || ''} />;
+      return <MarkdownContent content={part.content || ''} mentionNames={mentionNames} mentionAll={mentionAll} />;
     case 'image':
       return (
         <ImagePart
