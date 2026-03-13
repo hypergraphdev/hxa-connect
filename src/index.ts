@@ -117,9 +117,27 @@ async function main() {
     console.log('  Sessions: SQLite');
   }
 
-  // Ensure files directory exists
+  // Ensure files directory exists (hierarchical: files/<org>/<uploader>/<shard>/, staging: files/_tmp/)
   const filesDir = path.join(config.data_dir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
+  const filesTmpDir = path.join(filesDir, '_tmp');
+  fs.mkdirSync(filesTmpDir, { recursive: true });
+  // Sweep orphaned temp files older than 1 hour (shared by startup + periodic cleanup)
+  function sweepTmpFiles() {
+    try {
+      const ONE_HOUR = 60 * 60 * 1000;
+      for (const entry of fs.readdirSync(filesTmpDir)) {
+        const fp = path.join(filesTmpDir, entry);
+        try {
+          const stat = fs.statSync(fp);
+          if (stat.isFile() && Date.now() - stat.mtimeMs > ONE_HOUR) {
+            fs.unlinkSync(fp);
+          }
+        } catch { /* ignore per-file errors */ }
+      }
+    } catch { /* ignore if dir read fails */ }
+  }
+  sweepTmpFiles();
   console.log(`  Files:    ${path.resolve(filesDir)}`);
 
   // Create Express app
@@ -241,6 +259,7 @@ async function main() {
     db.runLifecycleCleanup().catch(err => {
       logger.error({ err }, 'Lifecycle cleanup error');
     });
+    sweepTmpFiles();
   }, 6 * 60 * 60 * 1000);
 
   // Session purge: every 15 minutes (ADR-002)

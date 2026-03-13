@@ -43,6 +43,7 @@ export async function createTestEnv(configOverrides?: Partial<HubConfig>): Promi
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hxa-connect-test-'));
   const filesDir = path.join(dataDir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
+  fs.mkdirSync(path.join(filesDir, '_tmp'), { recursive: true });
 
   const config: HubConfig = {
     port: 0, // random port

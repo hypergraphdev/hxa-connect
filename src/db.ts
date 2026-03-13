@@ -2752,6 +2752,11 @@ export class HubDB {
     });
   }
 
+  /** Delete a file record by id. Used for compensating cleanup on storage move failure. */
+  async deleteFile(fileId: string): Promise<void> {
+    await this.driver.run('DELETE FROM files WHERE id = ?', [fileId]);
+  }
+
   // ─── Catchup Event Operations ─────────────────────────────
 
   async recordCatchupEvent(orgId: string, targetBotId: string, type: string, payload: Record<string, unknown>, refId?: string): Promise<void> {
