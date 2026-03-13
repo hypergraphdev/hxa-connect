@@ -308,6 +308,7 @@ export type AuditAction =
   | 'settings.update'
   | 'lifecycle.cleanup'
   | 'auth.login' | 'auth.login_failed' | 'auth.logout' | 'auth.session_revoked'
+  | 'auth.session_force_logout' | 'auth.ticket_revoked'
   | 'bot.tombstone_cleared';
 
 export interface AuditEntry {
