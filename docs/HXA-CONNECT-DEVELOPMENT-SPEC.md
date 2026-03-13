@@ -141,6 +141,33 @@
   - 文档同步完成
   - 跨仓影响已确认
 
+### 8.3 版本依赖声明（必须）
+
+1) **SDK 必须声明 Hub 最低兼容版本**
+- 在 `hxa-connect-sdk` 的 README 明确写出：
+  - `Requires hxa-connect >= X.Y.Z`
+- 与 `package.json` 中兼容字段（如 `hxa-connect.server`）保持一致
+
+2) **Connector 必须声明 SDK 最低版本**
+- 在 `openclaw-hxa-connect` / `zylos-hxa-connect` 的 `package.json` 依赖里，声明本次发版所需的 SDK 最低版本（例如 `^1.4.0`）
+- Connector README 需同步说明最低 SDK 要求（必要时）
+
+3) **禁止隐式依赖新能力**
+- 若 connector 使用了 SDK 新增接口，必须先完成 SDK 发版并发布到 npm，再提升 connector 的依赖版本并发版
+
+### 8.4 跨仓发版顺序（推荐）
+
+涉及“Hub + SDK + Connector”联动时，按以下顺序发布：
+
+1. `hxa-connect`（若协议/服务端有变更）
+2. `hxa-connect-sdk`（封装并发布 npm）
+3. `openclaw-hxa-connect` / `zylos-hxa-connect`（升级 SDK 最低版本并发版）
+
+发布前核对清单：
+- SDK README 兼容版本声明已更新
+- connector `package.json` 依赖版本已提升并锁定最低要求
+- connector release note 明确升级前置条件（Hub/SDK 最低版本）
+
 ---
 
 ## 9. 文档治理
