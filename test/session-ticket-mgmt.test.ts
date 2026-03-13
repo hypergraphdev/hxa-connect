@@ -327,12 +327,21 @@ describe('Session Management Endpoints', () => {
       expect(status).toBe(401);
     });
 
-    it('supports limit and offset', async () => {
-      const { status, body } = await api(env.baseUrl, 'GET', '/api/org/sessions?limit=1&offset=0', {
+    it('supports limit and offset with has_more', async () => {
+      // There should be at least 2 sessions (org_admin + admin bot)
+      const page1 = await api(env.baseUrl, 'GET', '/api/org/sessions?limit=1&offset=0', {
         cookie: sessionCookie,
       });
-      expect(status).toBe(200);
-      expect(body.items.length).toBeLessThanOrEqual(1);
+      expect(page1.status).toBe(200);
+      expect(page1.body.items.length).toBe(1);
+      expect(page1.body.has_more).toBe(true);
+
+      // Fetch all — has_more should be false
+      const all = await api(env.baseUrl, 'GET', '/api/org/sessions?limit=100&offset=0', {
+        cookie: sessionCookie,
+      });
+      expect(all.status).toBe(200);
+      expect(all.body.has_more).toBe(false);
     });
 
     it('does not show sessions from other orgs', async () => {
@@ -430,6 +439,29 @@ describe('Session Management Endpoints', () => {
       });
       expect(status).toBe(404);
       expect(body.code).toBe('NOT_FOUND');
+    });
+
+    it('rejects invalid ref format', async () => {
+      // Too short
+      const r1 = await api(env.baseUrl, 'DELETE', '/api/org/sessions/abc', {
+        cookie: sessionCookie,
+      });
+      expect(r1.status).toBe(400);
+      expect(r1.body.code).toBe('INVALID_REF');
+
+      // Non-hex characters
+      const r2 = await api(env.baseUrl, 'DELETE', '/api/org/sessions/zzzzzzzzzzzzzzzz', {
+        cookie: sessionCookie,
+      });
+      expect(r2.status).toBe(400);
+      expect(r2.body.code).toBe('INVALID_REF');
+
+      // Too long
+      const r3 = await api(env.baseUrl, 'DELETE', '/api/org/sessions/00000000000000001', {
+        cookie: sessionCookie,
+      });
+      expect(r3.status).toBe(400);
+      expect(r3.body.code).toBe('INVALID_REF');
     });
 
     it('returns 404 for session from another org', async () => {
@@ -601,30 +633,34 @@ describe('Super Admin Cross-Org Access', () => {
 
   afterAll(() => env.cleanup());
 
-  it('super_admin can list tickets for any org', async () => {
-    // Create a ticket in the org first
-    const orgCookie = await env.loginAsOrg(orgSecret);
-    await api(env.baseUrl, 'POST', '/api/org/tickets', {
-      cookie: orgCookie,
-      body: { expires_in: 3600 },
-    });
-
-    // Super admin lists — needs org context
-    // super_admin session has no org_id, so this should still work
-    // because requireOrgAdmin returns true for super_admin
-    const { status } = await api(env.baseUrl, 'GET', '/api/org/tickets', {
+  it('super_admin without org context gets 400', async () => {
+    // super_admin session has no org_id — should get a clear error, not empty results
+    const ticketRes = await api(env.baseUrl, 'GET', '/api/org/tickets', {
       cookie: superAdminCookie,
     });
-    // super_admin has no org_id → orgId would be undefined
-    // This is expected — super_admin needs to specify org context
-    // For now just verify auth passes (not 403)
-    expect(status).not.toBe(403);
+    expect(ticketRes.status).toBe(400);
+    expect(ticketRes.body.code).toBe('ORG_CONTEXT_REQUIRED');
+
+    const sessionRes = await api(env.baseUrl, 'GET', '/api/org/sessions', {
+      cookie: superAdminCookie,
+    });
+    expect(sessionRes.status).toBe(400);
+    expect(sessionRes.body.code).toBe('ORG_CONTEXT_REQUIRED');
   });
 
-  it('super_admin can list sessions', async () => {
-    const { status } = await api(env.baseUrl, 'GET', '/api/org/sessions', {
+  it('super_admin cannot delete ticket without org context', async () => {
+    const { status, body } = await api(env.baseUrl, 'DELETE', '/api/org/tickets/some-id', {
       cookie: superAdminCookie,
     });
-    expect(status).not.toBe(403);
+    expect(status).toBe(400);
+    expect(body.code).toBe('ORG_CONTEXT_REQUIRED');
+  });
+
+  it('super_admin cannot force-logout session without org context', async () => {
+    const { status, body } = await api(env.baseUrl, 'DELETE', '/api/org/sessions/0000000000000000', {
+      cookie: superAdminCookie,
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe('ORG_CONTEXT_REQUIRED');
   });
 });

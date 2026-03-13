@@ -133,7 +133,7 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   async listByOrg(orgId: string, opts?: { limit?: number; offset?: number }): Promise<Session[]> {
-    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 100);
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 101);
     const offset = opts?.offset ?? 0;
     const rows = await this.driver.all(
       'SELECT * FROM sessions WHERE org_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
@@ -401,7 +401,7 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async listByOrg(orgId: string, opts?: { limit?: number; offset?: number }): Promise<Session[]> {
-    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 100);
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 101);
     const offset = opts?.offset ?? 0;
     const ids = await this.redis.smembers(this.key(`idx:org:${orgId}`));
     if (ids.length === 0) return [];

@@ -282,6 +282,28 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     return false;
   }
 
+  // HMAC-based session reference: derives a non-reversible ref from a session ID.
+  // Uses admin_secret (per-deployment) as key for defense-in-depth; falls back to a static key.
+  const sessionRefKey = config.admin_secret
+    ? crypto.createHmac('sha256', config.admin_secret).update('session-ref').digest()
+    : Buffer.from('hxa-session-ref-default-key-0000');
+  function sessionRef(sessionId: string): string {
+    return crypto.createHmac('sha256', sessionRefKey).update(sessionId).digest('hex').slice(0, 16);
+  }
+
+  /** Extract and validate orgId from the authenticated request. Returns orgId or sends 400 and returns undefined. */
+  function requireOrgContext(req: import('express').Request, res: import('express').Response): string | undefined {
+    const orgId = req.session?.org_id || req.org?.id || req.bot?.org_id;
+    if (!orgId) {
+      res.status(400).json({
+        error: 'Organization context required. Super admin sessions must specify an org-scoped endpoint.',
+        code: 'ORG_CONTEXT_REQUIRED',
+      });
+      return undefined;
+    }
+    return orgId;
+  }
+
   async function checkMessageRateLimit(req: import('express').Request, res: import('express').Response): Promise<boolean> {
     if (!req.bot) return true; // org-level requests don't have per-bot rate limits
     const result = await db.checkAndRecordRateLimit(req.bot.org_id, req.bot.id, 'message');
@@ -3727,7 +3749,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.get('/api/org/tickets', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+    const orgId = requireOrgContext(req, res);
+    if (!orgId) return;
 
     const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 20;
     const limit = Math.min(Math.max(limitRaw, 1), 100);
@@ -3755,7 +3778,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.delete('/api/org/tickets/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+    const orgId = requireOrgContext(req, res);
+    if (!orgId) return;
     const ticketId = req.params.id;
 
     const deleted = await db.deleteOrgTicket(ticketId, orgId);
@@ -3778,19 +3802,23 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.get('/api/org/sessions', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+    const orgId = requireOrgContext(req, res);
+    if (!orgId) return;
 
     const limitRaw = parseInt(getQueryString(req.query.limit) || '') || 20;
     const limit = Math.min(Math.max(limitRaw, 1), 100);
     const offsetRaw = parseInt(getQueryString(req.query.offset) || '') || 0;
     const offset = Math.max(offsetRaw, 0);
 
-    const sessions = await sessionStore.listByOrg(orgId, { limit, offset });
+    // Fetch limit+1 to detect if more pages exist
+    const sessions = await sessionStore.listByOrg(orgId, { limit: limit + 1, offset });
+    const hasMore = sessions.length > limit;
+    const page = hasMore ? sessions.slice(0, limit) : sessions;
 
     // Sanitize: use HMAC-based reference ID instead of exposing the secret session ID.
     // The ref is a deterministic, non-reversible identifier derived from the session ID.
-    const items = sessions.map(s => ({
-      ref: crypto.createHmac('sha256', 'hxa-session-ref').update(s.id).digest('hex').slice(0, 16),
+    const items = page.map(s => ({
+      ref: sessionRef(s.id),
       role: s.role,
       bot_id: s.bot_id,
       owner_name: s.owner_name,
@@ -3798,7 +3826,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       expires_at: s.expires_at,
     }));
 
-    res.json({ items });
+    res.json({ items, has_more: hasMore });
   });
 
   /**
@@ -3809,8 +3837,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    */
   auth.delete('/api/org/sessions/:ref', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
-    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+    const orgId = requireOrgContext(req, res);
+    if (!orgId) return;
     const targetRef = req.params.ref;
+
+    // Validate ref format (16-char hex from HMAC)
+    if (!/^[a-f0-9]{16}$/.test(targetRef)) {
+      res.status(400).json({ error: 'Invalid session ref format', code: 'INVALID_REF' });
+      return;
+    }
 
     // Look up the session by iterating org sessions and matching the HMAC ref.
     // We must paginate through all sessions, not just the first page, because
@@ -3823,7 +3858,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       const page = await sessionStore.listByOrg(orgId, { limit: PAGE_SIZE, offset });
       if (page.length === 0) break;
       targetSession = page.find(s =>
-        crypto.createHmac('sha256', 'hxa-session-ref').update(s.id).digest('hex').slice(0, 16) === targetRef,
+        sessionRef(s.id) === targetRef,
       );
       if (targetSession) break;
       if (page.length < PAGE_SIZE) break;
