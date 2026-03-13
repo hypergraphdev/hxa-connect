@@ -13,6 +13,8 @@ export interface SessionStore {
   deleteByRole(role: string, orgId?: string): Promise<number>;
   countByRole(role: string, orgId?: string, botId?: string): Promise<number>;
   purgeExpired(): Promise<void>;
+  /** List active sessions for an org, ordered by created_at DESC. */
+  listByOrg(orgId: string, opts?: { limit?: number; offset?: number }): Promise<Session[]>;
 }
 
 // ─── Session Helpers ─────────────────────────────────────────
@@ -128,6 +130,16 @@ export class SqliteSessionStore implements SessionStore {
       'DELETE FROM sessions WHERE expires_at < ?',
       [Date.now()],
     );
+  }
+
+  async listByOrg(orgId: string, opts?: { limit?: number; offset?: number }): Promise<Session[]> {
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 101);
+    const offset = opts?.offset ?? 0;
+    const rows = await this.driver.all(
+      'SELECT * FROM sessions WHERE org_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+      [orgId, Date.now(), limit, offset],
+    );
+    return rows.map((r: any) => this.rowToSession(r));
   }
 
   private rowToSession(row: any): Session {
@@ -386,6 +398,49 @@ export class RedisSessionStore implements SessionStore {
         }
       } while (cursor !== '0');
     }
+  }
+
+  async listByOrg(orgId: string, opts?: { limit?: number; offset?: number }): Promise<Session[]> {
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 101);
+    const offset = opts?.offset ?? 0;
+    const ids = await this.redis.smembers(this.key(`idx:org:${orgId}`));
+    if (ids.length === 0) return [];
+
+    const now = Date.now();
+    const sessions: Session[] = [];
+    const stale: string[] = [];
+
+    // Fetch all sessions in pipeline
+    const pipeline = this.redis.pipeline();
+    for (const id of ids) {
+      pipeline.get(this.key(`sess:${id}`));
+    }
+    const results = await pipeline.exec();
+
+    for (let i = 0; i < ids.length; i++) {
+      const [err, raw] = results![i];
+      if (err || !raw) {
+        stale.push(ids[i]);
+        continue;
+      }
+      const session: Session = JSON.parse(raw as string);
+      if (session.expires_at > now) {
+        sessions.push(session);
+      } else {
+        stale.push(ids[i]);
+      }
+    }
+
+    // Lazy cleanup of stale entries
+    if (stale.length > 0) {
+      for (const id of stale) {
+        this.cleanStaleFromAllIndexes(id).catch(() => {});
+      }
+    }
+
+    // Sort by created_at DESC and apply offset/limit
+    sessions.sort((a, b) => b.created_at - a.created_at);
+    return sessions.slice(offset, offset + limit);
   }
 
   async purgeExpired(): Promise<void> {

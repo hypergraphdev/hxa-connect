@@ -776,6 +776,52 @@ export class HubDB {
     return result.changes;
   }
 
+  /**
+   * List active (unredeemed, unexpired) org tickets for an org.
+   * Returns tickets ordered by created_at DESC.
+   */
+  async listOrgTickets(orgId: string, opts?: { limit?: number; cursor?: string }): Promise<{ items: OrgTicket[]; cursor?: string }> {
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 100);
+    const now = Date.now();
+    let sql: string;
+    let params: unknown[];
+
+    if (opts?.cursor) {
+      const decoded = decodeCursor(opts.cursor);
+      if (!decoded) {
+        return { items: [] };
+      }
+      sql = `SELECT * FROM org_tickets WHERE org_id = ? AND consumed = 0
+             AND (expires_at = 0 OR expires_at > ?)
+             AND (created_at < ? OR (created_at = ? AND id < ?))
+             ORDER BY created_at DESC, id DESC LIMIT ?`;
+      params = [orgId, now, decoded.t, decoded.t, decoded.id, limit + 1];
+    } else {
+      sql = `SELECT * FROM org_tickets WHERE org_id = ? AND consumed = 0
+             AND (expires_at = 0 OR expires_at > ?)
+             ORDER BY created_at DESC, id DESC LIMIT ?`;
+      params = [orgId, now, limit + 1];
+    }
+
+    const rows = await this.driver.all<any>(sql, params);
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map((r: any) => this.rowToOrgTicket(r));
+    const nextCursor = hasMore ? encodeCursor(items[items.length - 1].created_at, items[items.length - 1].id) : undefined;
+    return { items, cursor: nextCursor };
+  }
+
+  /**
+   * Delete (revoke) a specific org ticket by ID.
+   * Returns true if deleted, false if not found.
+   */
+  async deleteOrgTicket(ticketId: string, orgId: string): Promise<boolean> {
+    const result = await this.driver.run(
+      'DELETE FROM org_tickets WHERE (id = ? OR code = ?) AND org_id = ?',
+      [ticketId, ticketId, orgId],
+    );
+    return result.changes > 0;
+  }
+
   // ─── Platform Invite Codes ────────────────────────────────
 
   private rowToInviteCode(row: any): PlatformInviteCode {
