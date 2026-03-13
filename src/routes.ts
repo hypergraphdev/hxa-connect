@@ -3813,12 +3813,22 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const targetRef = req.params.ref;
 
     // Look up the session by iterating org sessions and matching the HMAC ref.
-    // This avoids exposing the real session ID in the API.
-    // SESSION_LIMIT caps concurrency (5 org_admin + 5 per bot), so 100 is more than enough.
-    const sessions = await sessionStore.listByOrg(orgId, { limit: 100 });
-    const targetSession = sessions.find(s =>
-      crypto.createHmac('sha256', 'hxa-session-ref').update(s.id).digest('hex').slice(0, 16) === targetRef
-    );
+    // We must paginate through all sessions, not just the first page, because
+    // large orgs can exceed 100 active sessions.
+    const PAGE_SIZE = 100;
+    let offset = 0;
+    let targetSession: any | undefined;
+
+    while (!targetSession) {
+      const page = await sessionStore.listByOrg(orgId, { limit: PAGE_SIZE, offset });
+      if (page.length === 0) break;
+      targetSession = page.find(s =>
+        crypto.createHmac('sha256', 'hxa-session-ref').update(s.id).digest('hex').slice(0, 16) === targetRef,
+      );
+      if (targetSession) break;
+      if (page.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
 
     if (!targetSession) {
       res.status(404).json({ error: 'Session not found', code: 'NOT_FOUND' });

@@ -483,6 +483,56 @@ describe('Session Management Endpoints', () => {
       expect(verifyRes.status).toBe(401);
     });
 
+    it('can force-logout sessions beyond the first 100 listed', async () => {
+      let targetCookie = '';
+
+      // Create >100 bot_owner sessions in this org
+      for (let i = 0; i < 105; i++) {
+        const botName = `bulk-logout-bot-${Date.now()}-${i}`;
+        const ownerName = `bulk-target-${i}`;
+        const { token } = await env.registerBot(orgSecret, botName);
+        const loginRes = await fetch(`${env.baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'bot', token, owner_name: ownerName }),
+        });
+        expect(loginRes.status).toBe(200);
+        if (i === 0) {
+          const setCookie = loginRes.headers.get('set-cookie') || '';
+          targetCookie = setCookie.match(/hxa_session=([^;]+)/)![1];
+        }
+      }
+
+      // Find an older session ref from later pages (offset >= 100)
+      let targetRef: string | undefined;
+      for (let offset = 100; offset <= 300; offset += 20) {
+        const page = await api(env.baseUrl, 'GET', `/api/org/sessions?limit=20&offset=${offset}`, {
+          cookie: sessionCookie,
+        });
+        expect(page.status).toBe(200);
+        const match = page.body.items.find((s: any) => s.owner_name === 'bulk-target-0');
+        if (match) {
+          targetRef = match.ref;
+          break;
+        }
+        if (!page.body.items?.length) break;
+      }
+      expect(targetRef).toBeDefined();
+
+      // Force logout must work even when the target is not in the first 100 sessions
+      const del = await api(env.baseUrl, 'DELETE', `/api/org/sessions/${targetRef}`, {
+        cookie: sessionCookie,
+      });
+      expect(del.status).toBe(200);
+      expect(del.body.deleted).toBe(true);
+
+      // Verify target session is invalidated
+      const verifyRes = await api(env.baseUrl, 'GET', '/api/auth/session', {
+        cookie: targetCookie,
+      });
+      expect(verifyRes.status).toBe(401);
+    });
+
     it('rejects member bot', async () => {
       const { token: memberToken } = await env.registerBot(orgSecret, 'member-sess-del');
       const { status, body } = await api(env.baseUrl, 'DELETE', '/api/org/sessions/0000000000000000', {
