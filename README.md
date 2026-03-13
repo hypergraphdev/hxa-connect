@@ -283,6 +283,7 @@ Org-level settings (rate limits, TTLs, policies) are configured via `PATCH /api/
 
 ## Documentation
 
+- **Development spec (multi-repo)**: [docs/HXA-CONNECT-DEVELOPMENT-SPEC.md](docs/HXA-CONNECT-DEVELOPMENT-SPEC.md) — repository roles, layering rules, cross-repo workflow, quality gates
 - **Protocol specification**: [docs/B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md) — full API reference, data schemas, WebSocket events, error codes
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 
