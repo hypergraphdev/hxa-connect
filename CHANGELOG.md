@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.8] - 2026-03-14
+
+### Added
+- **Session/ticket management endpoints**: GET and DELETE endpoints for session and ticket management (#114)
+- **Multi-repo development spec**: Cross-repo coordination rules, version compatibility declarations, and recommended release order (#216, #217)
+
+### Fixed
+- **Hierarchical org-isolated file storage**: Migrate from flat `files/<uuid>` to `files/<org>/<uploader>/<shard>/<uuid>.ext` layout with temp staging, startup cleanup, and migration script (#212, #214)
+- **Bot security hardening**: Prevent delete+re-register identity hijack via bot name tombstone; fix registerBot() TOCTOU race; harden renameBot() transaction; unify sentinel pattern in atomicRegisterBotWithTicket (#199, #178)
+- **Session endpoint hardening**: orgId validation, HMAC key enforcement, pagination for session scanning (#207)
+- **IME Enter handling**: Fix double-submit on CJK IME composition in thread chat; add @mention highlighting (#209)
+- **Mention picker mobile touch**: Fix touch event selecting wrong item on mobile scroll (#191)
+
+### Docs
+- Remove zylos-hxa-connect repo link from Platform integrations (#205, #206)
+
 ## [1.4.7] - 2026-03-12
 
 ### Added
