@@ -1,6 +1,6 @@
 import { validateParts } from '../types.js';
 import type { ThreadStatus, CloseReason, ArtifactType } from '../types.js';
-import { buildReplyContext } from '../routes.js';
+import { buildReplyContext, injectReplyMention } from '../routes.js';
 import type { WsClient, WsHub } from './protocol.js';
 import {
   contentFromParts,
@@ -261,12 +261,13 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
   }
 
   // Validate reply_to if provided
+  let parentMsg: Awaited<ReturnType<typeof hub.db.getThreadMessageById>> | undefined;
   if (reply_to !== undefined && reply_to !== null) {
     if (typeof reply_to !== 'string') {
       hub.sendError(client, 'reply_to must be a string (message ID)', { ref });
       return;
     }
-    const parentMsg = await hub.db.getThreadMessageById(reply_to);
+    parentMsg = await hub.db.getThreadMessageById(reply_to) ?? undefined;
     if (!parentMsg || parentMsg.thread_id !== thread.id) {
       hub.sendError(client, 'reply_to message not found in this thread', { ref, code: 'NOT_FOUND' });
       return;
@@ -274,11 +275,16 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
   }
 
   const threadParticipants = await hub.db.getParticipants(thread.id);
-  const { mentions: mentionRefs, mentionAll } = await wsParseMentions(
+  let { mentions: mentionRefs, mentionAll } = await wsParseMentions(
     resolvedContent,
     threadParticipants,
     (id) => hub.db.getBotById(id),
   );
+
+  // #219: Implicit mention — reply_to a message implies mentioning its sender
+  if (parentMsg) {
+    mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, client.botId!, (id) => hub.db.getBotById(id));
+  }
 
   const message = await hub.db.createThreadMessage(
     thread.id,
