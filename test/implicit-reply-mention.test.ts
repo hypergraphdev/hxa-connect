@@ -87,22 +87,14 @@ describe('Implicit Reply Mention (#219)', () => {
   });
 
   it('reply to own message does NOT self-mention', async () => {
-    // bot1 replies to its own message
     const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
       token: botToken1,
       body: { content: 'follow-up on my own message', reply_to: msgFromBot1 },
     });
 
     expect(status).toBe(200);
-    // bot1 should not appear in mentions (sender == parent sender)
-    // Actually, our implementation DOES add it. Let me reconsider...
-    // The feature is about the connector checking "am I mentioned?" — self-mention
-    // is harmless and can be useful (bot sees it's mentioned, processes it).
-    // But the more natural behavior: the sender already knows they're replying.
-    // Let's verify the actual behavior and document it.
-    expect(body.mentions).toEqual(
-      expect.arrayContaining([{ bot_id: bot1Id, name: 'alpha' }]),
-    );
+    // Sender replying to own message — no implicit mention (you don't @-mention yourself)
+    expect(body.mentions).toEqual([]);
   });
 
   it('message without reply_to has no implicit mentions', async () => {
@@ -204,5 +196,19 @@ describe('Implicit Reply Mention (#219)', () => {
     // bot1 (alpha) should NOT be mentioned (grandparent, only 1 level)
     const alphaRef = chainReply.mentions.find((m: any) => m.bot_id === bot1Id);
     expect(alphaRef).toBeUndefined();
+  });
+
+  it('reply to null-sender message injects no mention', async () => {
+    // Insert a message with null sender_id directly via DB (simulates system message)
+    const sysMsg = await env.db.createThreadMessage(threadId, null as any, 'system notification', 'text');
+
+    const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/messages`, {
+      token: botToken1,
+      body: { content: 'replying to system message', reply_to: sysMsg.id },
+    });
+
+    expect(status).toBe(200);
+    // No implicit mention — parent has no sender
+    expect(body.mentions).toEqual([]);
   });
 });

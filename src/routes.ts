@@ -197,14 +197,17 @@ export async function buildReplyContext(db: any, msg: ThreadMessage): Promise<Re
  * Inject an implicit mention for the sender of the replied-to message.
  * When a message has reply_to and the parent message has a sender,
  * that sender is added to mentions (if not already present).
+ * Skips when the current sender is replying to their own message.
  * This enables "reply = implicit @mention" behavior (issue #219).
  */
 export async function injectReplyMention(
   mentions: MentionRef[] | null,
   parentSenderId: string | null | undefined,
+  currentSenderId: string,
   getBotById: (id: string) => Promise<Bot | undefined>,
 ): Promise<MentionRef[] | null> {
   if (!parentSenderId) return mentions;
+  if (parentSenderId === currentSenderId) return mentions;
   const arr = mentions || [];
   if (arr.some(m => m.bot_id === parentSenderId)) return mentions;
   const bot = await getBotById(parentSenderId);
@@ -2853,7 +2856,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     // #219: Implicit mention — reply_to a message implies mentioning its sender
     if (parentMsg) {
-      mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, async (id) => await db.getBotById(id));
+      mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, req.bot!.id, async (id) => await db.getBotById(id));
     }
 
     const message = await db.createThreadMessage(

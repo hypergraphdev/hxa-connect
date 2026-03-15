@@ -267,7 +267,7 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
       hub.sendError(client, 'reply_to must be a string (message ID)', { ref });
       return;
     }
-    parentMsg = await hub.db.getThreadMessageById(reply_to);
+    parentMsg = await hub.db.getThreadMessageById(reply_to) ?? undefined;
     if (!parentMsg || parentMsg.thread_id !== thread.id) {
       hub.sendError(client, 'reply_to message not found in this thread', { ref, code: 'NOT_FOUND' });
       return;
@@ -283,7 +283,7 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
 
   // #219: Implicit mention — reply_to a message implies mentioning its sender
   if (parentMsg) {
-    mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, (id) => hub.db.getBotById(id));
+    mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, client.botId!, (id) => hub.db.getBotById(id));
   }
 
   const message = await hub.db.createThreadMessage(
