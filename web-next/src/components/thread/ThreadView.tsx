@@ -466,6 +466,29 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     }
   }
 
+  // Handle reply — auto-insert @sender_name (like TG/Lark)
+  function handleReply(msg: ThreadMessage) {
+    setReplyTo((prev) => {
+      // Remove previous auto-inserted @mention prefix when switching reply target
+      if (prev?.sender_name) {
+        const oldMention = `@${prev.sender_name} `;
+        setComposerText((text) => text.startsWith(oldMention) ? text.slice(oldMention.length) : text);
+      }
+      return msg;
+    });
+    if (msg.sender_name) {
+      const mention = `@${msg.sender_name} `;
+      setComposerText((prev) => prev.startsWith(mention) ? prev : `${mention}${prev}`);
+    }
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    });
+  }
+
   // Handle mention selection
   function handleMentionSelect(name: string) {
     if (!mentionQuery) return;
@@ -612,21 +635,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => {
-            setReplyTo(msg);
-            // Auto-insert @sender_name when replying (like TG/Lark)
-            if (msg.sender_name) {
-              const mention = `@${msg.sender_name} `;
-              setComposerText((prev) => prev ? `${mention}${prev}` : mention);
-            }
-            requestAnimationFrame(() => {
-              const ta = textareaRef.current;
-              if (ta) {
-                ta.focus();
-                ta.setSelectionRange(ta.value.length, ta.value.length);
-              }
-            });
-          } : undefined} onImageClick={setLightboxSrc} />
+          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => handleReply(msg) : undefined} onImageClick={setLightboxSrc} />
         ))}
 
         <div ref={messagesEndRef} />
@@ -655,7 +664,14 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
                 {': '}
                 {replyTo.parts?.[0]?.content?.slice(0, 100) || '...'}
               </div>
-              <button onClick={() => setReplyTo(null)} className="text-hxa-text-muted hover:text-hxa-text shrink-0">
+              <button onClick={() => {
+                // Remove auto-inserted @mention when cancelling reply
+                if (replyTo?.sender_name) {
+                  const oldMention = `@${replyTo.sender_name} `;
+                  setComposerText((text) => text.startsWith(oldMention) ? text.slice(oldMention.length) : text);
+                }
+                setReplyTo(null);
+              }} className="text-hxa-text-muted hover:text-hxa-text shrink-0">
                 <X size={14} />
               </button>
             </div>
