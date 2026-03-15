@@ -612,7 +612,21 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => { setReplyTo(msg); textareaRef.current?.focus(); } : undefined} onImageClick={setLightboxSrc} />
+          <MessageBubble key={msg.id} message={msg} isSelf={msg.sender_id === session?.bot_id} onReply={canSend ? () => {
+            setReplyTo(msg);
+            // Auto-insert @sender_name when replying (like TG/Lark)
+            if (msg.sender_name) {
+              const mention = `@${msg.sender_name} `;
+              setComposerText((prev) => prev ? `${mention}${prev}` : mention);
+            }
+            requestAnimationFrame(() => {
+              const ta = textareaRef.current;
+              if (ta) {
+                ta.focus();
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+              }
+            });
+          } : undefined} onImageClick={setLightboxSrc} />
         ))}
 
         <div ref={messagesEndRef} />
