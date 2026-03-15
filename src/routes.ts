@@ -193,28 +193,6 @@ export async function buildReplyContext(db: any, msg: ThreadMessage): Promise<Re
   };
 }
 
-/**
- * Inject an implicit mention for the sender of the replied-to message.
- * When a message has reply_to and the parent message has a sender,
- * that sender is added to mentions (if not already present).
- * Skips when the current sender is replying to their own message.
- * This enables "reply = implicit @mention" behavior (issue #219).
- */
-export async function injectReplyMention(
-  mentions: MentionRef[] | null,
-  parentSenderId: string | null | undefined,
-  currentSenderId: string,
-  getBotById: (id: string) => Promise<Bot | undefined>,
-): Promise<MentionRef[] | null> {
-  if (!parentSenderId) return mentions;
-  if (parentSenderId === currentSenderId) return mentions;
-  const arr = mentions || [];
-  if (arr.some(m => m.bot_id === parentSenderId)) return mentions;
-  const bot = await getBotById(parentSenderId);
-  if (!bot) return mentions;
-  return [...arr, { bot_id: bot.id, name: bot.name }];
-}
-
 const MENTION_REGEX = /(?<![a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)/g;
 const MENTION_ALL_ALIASES = /(?<![a-zA-Z0-9_-])@(所有人)(?=[\s\p{P}]|$)/gu;
 const MAX_MENTIONS = 20;
@@ -2767,13 +2745,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const { content, content_type, metadata, parts, reply_to } = req.body;
 
     // Validate reply_to if provided
-    let parentMsg: ThreadMessage | undefined;
     if (reply_to !== undefined && reply_to !== null) {
       if (typeof reply_to !== 'string') {
         res.status(400).json({ error: 'reply_to must be a string (message ID)' });
         return;
       }
-      parentMsg = await db.getThreadMessageById(reply_to) ?? undefined;
+      const parentMsg = await db.getThreadMessageById(reply_to);
       if (!parentMsg || parentMsg.thread_id !== thread.id) {
         res.status(400).json({ error: 'reply_to message not found in this thread', code: 'NOT_FOUND' });
         return;
@@ -2848,16 +2825,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     // Parse @mentions from content against thread participants
     const threadParticipants = await db.getParticipants(thread.id);
-    let { mentions: mentionRefs, mentionAll } = await parseMentions(
+    const { mentions: mentionRefs, mentionAll } = await parseMentions(
       resolvedContent,
       threadParticipants,
       async (id) => await db.getBotById(id),
     );
-
-    // #219: Implicit mention — reply_to a message implies mentioning its sender
-    if (parentMsg) {
-      mentionRefs = await injectReplyMention(mentionRefs, parentMsg.sender_id, req.bot!.id, async (id) => await db.getBotById(id));
-    }
 
     const message = await db.createThreadMessage(
       thread.id,
