@@ -83,6 +83,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [mentionQuery, setMentionQuery] = useState<{ query: string; startIndex: number } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [replyTo, setReplyTo] = useState<ThreadMessage | null>(null);
+  const autoMentionRef = useRef<string | null>(null); // tracks auto-inserted @mention prefix
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -114,6 +115,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     setCursor(undefined);
     setHasOlder(false);
     setReplyTo(null);
+    autoMentionRef.current = null;
     // Abort any in-flight uploads and clear timers
     uploadAborts.current.forEach((abort) => abort());
     uploadAborts.current.clear();
@@ -452,6 +454,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
       });
       setComposerText('');
       setReplyTo(null);
+      autoMentionRef.current = null;
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
       requestAnimationFrame(() => scrollToBottom());
 
@@ -468,17 +471,20 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
   // Handle reply — auto-insert @sender_name (like TG/Lark)
   function handleReply(msg: ThreadMessage) {
-    setReplyTo((prev) => {
-      // Remove previous auto-inserted @mention prefix when switching reply target
-      if (prev?.sender_name) {
-        const oldMention = `@${prev.sender_name} `;
-        setComposerText((text) => text.startsWith(oldMention) ? text.slice(oldMention.length) : text);
-      }
-      return msg;
-    });
+    // Remove previous auto-inserted @mention (only if it was auto-inserted, not user-typed)
+    if (autoMentionRef.current) {
+      const old = autoMentionRef.current;
+      setComposerText((text) => text.startsWith(old) ? text.slice(old.length) : text);
+      autoMentionRef.current = null;
+    }
+    setReplyTo(msg);
     if (msg.sender_name) {
       const mention = `@${msg.sender_name} `;
-      setComposerText((prev) => prev.startsWith(mention) ? prev : `${mention}${prev}`);
+      setComposerText((prev) => {
+        if (prev.startsWith(mention)) return prev; // already present, skip
+        autoMentionRef.current = mention;
+        return `${mention}${prev}`;
+      });
     }
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
@@ -665,10 +671,11 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
                 {replyTo.parts?.[0]?.content?.slice(0, 100) || '...'}
               </div>
               <button onClick={() => {
-                // Remove auto-inserted @mention when cancelling reply
-                if (replyTo?.sender_name) {
-                  const oldMention = `@${replyTo.sender_name} `;
-                  setComposerText((text) => text.startsWith(oldMention) ? text.slice(oldMention.length) : text);
+                // Remove auto-inserted @mention when cancelling reply (only if auto-inserted)
+                if (autoMentionRef.current) {
+                  const old = autoMentionRef.current;
+                  setComposerText((text) => text.startsWith(old) ? text.slice(old.length) : text);
+                  autoMentionRef.current = null;
                 }
                 setReplyTo(null);
               }} className="text-hxa-text-muted hover:text-hxa-text shrink-0">
