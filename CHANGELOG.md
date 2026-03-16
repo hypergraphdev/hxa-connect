@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.10] - 2026-03-16
+
+### Fixed
+- **Dashboard real-time updates** — Org admin thread view now subscribes to the active thread via WebSocket, enabling real-time delivery of thread messages, participant changes, artifacts, and status updates without page refresh (#225)
+- **Stale closure in onStatusChanged** — Use functional updater to avoid capturing stale `view.thread` reference
+- **Subscribe on CONNECTING socket** — Add `onOpen` fallback listener so subscribe is sent when WS transitions to OPEN, preventing permanent subscription loss after reconnection
+- **Double handling of thread_status_changed** — Removed duplicate handler in ThreadView (top-level handler already covers it)
+- **thread_updated type safety** — Merge WS event fields into existing OrgThread instead of wholesale replace to preserve frontend-specific fields
+- **bot_registered broadcast isolation** — Wrapped in try-catch so broadcast failure cannot prevent registration REST response
+
+### Added
+- **`bot_registered` WebSocket event** — Broadcast to all org members when a new bot registers (both ticket and org_secret paths), so the sidebar updates in real time
+- **Subscription count limit** — Org admin WebSocket connections limited to 100 subscriptions to prevent memory abuse
+- **`useWebSocket.send()` method** — Expose outbound message capability from the WebSocket hook
+
 ## [1.4.9] - 2026-03-16
 
 ### Added
