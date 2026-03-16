@@ -296,9 +296,26 @@ export default function OrgDashboard() {
         }
       });
     }
+    if (evt.type === 'bot_registered') {
+      const botData = evt.bot as { id: string; name: string };
+      setBots(prev => {
+        if (prev.some(b => b.id === botData.id)) return prev;
+        return [...prev, {
+          id: botData.id,
+          name: botData.name,
+          auth_role: 'member',
+          online: false,
+          created_at: new Date().toISOString(),
+        } as OrgBot];
+      });
+    }
     if (evt.type === 'thread_created') {
       const thread = evt.thread as OrgThread;
       setThreads(prev => [thread, ...prev]);
+    }
+    if (evt.type === 'thread_updated') {
+      const thread = evt.thread as OrgThread;
+      updateThread(thread.id, () => thread);
     }
     if (evt.type === 'thread_status_changed') {
       const tid = evt.thread_id as string;
@@ -918,20 +935,34 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   }, [thread.id, artifactsOpen]);
 
   // Real-time messages via WS — poll wsRef.current to rebind after reconnect
+  // Subscribe to the thread so org_admin clients receive thread events
   useEffect(() => {
     let currentWs = wsRef.current;
     let interval: ReturnType<typeof setInterval>;
+    const tid = thread.id;
+
+    function subscribe(ws: WebSocket) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'subscribe', thread_id: tid }));
+      }
+    }
+
+    function unsubscribe(ws: WebSocket) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'unsubscribe', thread_id: tid }));
+      }
+    }
 
     function onMessage(e: MessageEvent) {
       try {
         const evt = JSON.parse(e.data);
-        if (evt.type === 'thread_message' && evt.thread_id === thread.id) {
+        if (evt.type === 'thread_message' && evt.thread_id === tid) {
           setMessages(prev => {
             if (prev.some(m => m.id === evt.message.id)) return prev;
             return [...prev, evt.message];
           });
         }
-        if (evt.type === 'thread_artifact' && evt.thread_id === thread.id) {
+        if (evt.type === 'thread_artifact' && evt.thread_id === tid) {
           setArtifacts(prev => {
             const existing = prev.findIndex(a => a.artifact_key === evt.artifact.artifact_key);
             if (existing >= 0) {
@@ -942,19 +973,26 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
             return [...prev, evt.artifact];
           });
         }
+        if (evt.type === 'thread_status_changed' && evt.thread_id === tid) {
+          onStatusChanged(evt.to as string);
+        }
       } catch { /* ignore */ }
     }
 
     function bind(ws: WebSocket) {
       ws.addEventListener('message', onMessage);
+      subscribe(ws);
     }
 
     if (currentWs) bind(currentWs);
 
-    // Check for reconnected socket every 2s
+    // Check for reconnected socket every 2s — re-subscribe on reconnect
     interval = setInterval(() => {
       if (wsRef.current !== currentWs) {
-        if (currentWs) currentWs.removeEventListener('message', onMessage);
+        if (currentWs) {
+          currentWs.removeEventListener('message', onMessage);
+          unsubscribe(currentWs);
+        }
         currentWs = wsRef.current;
         if (currentWs) bind(currentWs);
       }
@@ -962,7 +1000,10 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
 
     return () => {
       clearInterval(interval);
-      if (currentWs) currentWs.removeEventListener('message', onMessage);
+      if (currentWs) {
+        currentWs.removeEventListener('message', onMessage);
+        unsubscribe(currentWs);
+      }
     };
   }, [thread.id]);
 

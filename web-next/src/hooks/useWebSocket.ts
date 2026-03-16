@@ -111,6 +111,13 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
     }
   }, []);
 
+  // Expose send() so callers can send messages (e.g. subscribe/unsubscribe)
+  const send = useCallback((data: Record<string, unknown>) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(data));
+    }
+  }, []);
+
   useEffect(() => {
     if (enabled) {
       connect();
@@ -127,4 +134,6 @@ export function useWebSocket({ onEvent, onStatusChange, onSessionExpired, enable
       onStatusRef.current?.(false);
     };
   }, [enabled, connect]);
+
+  return { send };
 }

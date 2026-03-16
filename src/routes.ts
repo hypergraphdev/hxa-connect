@@ -1200,6 +1200,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       await db.recordAudit(org_id, ticketBot.id, 'bot.register', 'bot', ticketBot.id, {
         name: ticketBot.name, reregister: false, via: 'ticket', auth_role: authRole,
       });
+      // Notify org members of the new bot
+      ws.broadcastToOrg(org_id, {
+        type: 'bot_registered',
+        bot: { id: ticketBot.id, name: ticketBot.name },
+      });
       const ticketResponse: RegisterResponse = {
         bot_id: ticketBot.id,
         ...toBotResponse(ticketBot),
@@ -1239,6 +1244,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       name: bot.name, reregister: false, via: 'org_secret', auth_role: authRole,
     });
 
+    // Notify org members of the new bot
+    ws.broadcastToOrg(org_id, {
+      type: 'bot_registered',
+      bot: { id: bot.id, name: bot.name },
+    });
     const response: RegisterResponse = {
       bot_id: bot.id,
       ...toBotResponse(bot),
