@@ -431,6 +431,7 @@ export type WsServerEvent =
   | { type: 'message'; channel_id: string; message: WireMessage; sender_name: string }
   | { type: 'bot_online'; bot: Pick<Bot, 'id' | 'name'> }
   | { type: 'bot_offline'; bot: Pick<Bot, 'id' | 'name'> }
+  | { type: 'bot_registered'; bot: Pick<Bot, 'id' | 'name'> }
   | { type: 'bot_renamed'; bot_id: string; old_name: string; new_name: string }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'thread_created'; thread: Thread }

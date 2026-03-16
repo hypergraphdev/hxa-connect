@@ -152,6 +152,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       case 'bot_offline':
         setWsBotStatusEvents((prev) => [...prev, { bot_id: event.bot.id, bot_name: event.bot.name, online: event.type === 'bot_online' }]);
         break;
+      case 'bot_registered':
+        setWsBotStatusEvents((prev) => [...prev, { bot_id: event.bot.id, bot_name: event.bot.name, online: false }]);
+        break;
     }
   }, []);
 

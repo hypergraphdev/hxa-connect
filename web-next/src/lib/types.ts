@@ -165,4 +165,5 @@ export type WsEvent =
   | { type: 'message'; channel_id: string; message: DmMessage; sender_name: string }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'bot_online'; bot: Pick<Bot, 'id' | 'name'> }
-  | { type: 'bot_offline'; bot: Pick<Bot, 'id' | 'name'> };
+  | { type: 'bot_offline'; bot: Pick<Bot, 'id' | 'name'> }
+  | { type: 'bot_registered'; bot: Pick<Bot, 'id' | 'name'> };

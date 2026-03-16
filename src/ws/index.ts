@@ -267,6 +267,10 @@ export class HubWS implements WsHub {
             this.send(client, { type: 'error', message: 'subscribe is only available for org admin connections' });
             return;
           }
+          if (client.subscriptions.size >= 100) {
+            this.send(client, { type: 'error', message: 'Maximum subscription limit reached (100)' });
+            return;
+          }
           if (data.channel_id) client.subscriptions.add(data.channel_id);
           if (data.thread_id) client.subscriptions.add(data.thread_id);
           return;
