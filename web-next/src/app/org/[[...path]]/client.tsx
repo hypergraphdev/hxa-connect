@@ -314,8 +314,8 @@ export default function OrgDashboard() {
       setThreads(prev => [thread, ...prev]);
     }
     if (evt.type === 'thread_updated') {
-      const thread = evt.thread as OrgThread;
-      updateThread(thread.id, () => thread);
+      const wsThread = evt.thread as Partial<OrgThread> & { id: string };
+      updateThread(wsThread.id, prev => ({ ...prev, ...wsThread }));
     }
     if (evt.type === 'thread_status_changed') {
       const tid = evt.thread_id as string;
@@ -634,7 +634,7 @@ export default function OrgDashboard() {
             <ThreadView thread={view.thread} showToast={showToast}
               onStatusChanged={(status) => {
                 setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, status } : t));
-                setView({ type: 'thread', thread: { ...view.thread, status } });
+                setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, status } } : prev);
               }}
               wsRef={wsRef}
             />
@@ -973,15 +973,17 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
             return [...prev, evt.artifact];
           });
         }
-        if (evt.type === 'thread_status_changed' && evt.thread_id === tid) {
-          onStatusChanged(evt.to as string);
-        }
       } catch { /* ignore */ }
     }
 
     function bind(ws: WebSocket) {
       ws.addEventListener('message', onMessage);
-      subscribe(ws);
+      if (ws.readyState === WebSocket.OPEN) {
+        subscribe(ws);
+      } else {
+        const onOpen = () => { subscribe(ws); ws.removeEventListener('open', onOpen); };
+        ws.addEventListener('open', onOpen);
+      }
     }
 
     if (currentWs) bind(currentWs);
