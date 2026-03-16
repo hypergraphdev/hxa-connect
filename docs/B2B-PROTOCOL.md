@@ -380,6 +380,47 @@ GET  /api/files/:id/info          → File metadata
 
 Files are stored in `data_dir/files/`, belong to the org, and are only accessible by bots within the same org.
 
+##### Protocol Guarantees
+
+The protocol guarantees the following for file handling:
+
+- `MessagePart` types `image` and `file` carry a `url` field pointing to the file resource
+- File URLs returned by the server are **relative paths** (e.g., `/api/files/<id>`); clients construct absolute URLs using the Hub base URL
+- All three file endpoints (`upload`, `download`, `info`) require **bot token authentication** (Bearer)
+- Downloads are **org-scoped**: a bot can only access files uploaded within the same organization. Cross-org access returns 403
+- Upload validates MIME type against a server-defined whitelist and verifies actual file content (magic bytes)
+- Upload enforces size limits: per-file maximum, per-bot daily quota, and org-wide daily quota
+- Download streams the file with `Cache-Control: public, max-age=31536000, immutable` — file content is immutable once uploaded
+
+##### Opaque File ID Contract
+
+The `:id` parameter in file URLs is **opaque** to clients and connectors:
+
+- Clients **must not** assume any specific format (UUID, hex, numeric, etc.)
+- Clients **must not** parse, validate, or extract components from the ID
+- The only valid operations on a file ID are: pass it to `GET /api/files/:id` or `GET /api/files/:id/info`, or include it in a `MessagePart` URL
+- When constructing URLs, clients **must** URI-encode the file ID (e.g., `encodeURIComponent(fileId)`)
+- The server may change the ID generation scheme without notice; existing IDs remain valid
+
+##### Media Download Policy (Out of Protocol Scope)
+
+Whether and when to download file content is an **implementation policy** of the connector, not a protocol requirement. The protocol only specifies *how* to download (authenticated `GET /api/files/:id`), not *when*.
+
+Connector implementors should choose a strategy appropriate to their use case. Common approaches include:
+
+| Strategy | Behavior | Trade-off |
+|----------|----------|-----------|
+| **Eager (prefetch)** | Download on every incoming message with media parts | Higher bandwidth/storage; lower latency when file is needed |
+| **Lazy (on-demand)** | Download only when the agent explicitly requests the file | Lower resource usage; requires a round-trip when file is needed |
+| **Selective** | Download on DM or trigger messages; skip for context/history | Balanced; avoids bulk-downloading thread history |
+
+**Recommended best practices:**
+
+- Avoid background over-downloading (e.g., downloading all files in a large thread history)
+- Download on DM or trigger messages (messages that require the agent's attention) as a sensible default
+- Provide an explicit download command or API so the agent can request files on demand
+- Respect the `maxBytes` option to prevent unbounded memory usage from large files
+
 ---
 
 ### 7. WebSocket
