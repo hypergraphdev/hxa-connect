@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.9] - 2026-03-16
+
+### Added
+- **Reply auto-insert @mention**: Dashboard thread reply auto-inserts `@sender_name` in composer; user can see and remove it (#219, #222)
+
+### Fixed
+- **@mention draft corruption**: Use ref to track system-inserted @mention vs user-typed, preventing draft corruption on reply switch (#222)
+- **@mention accumulation on reply switch**: Clean up previous auto-inserted @mention when switching reply target (#222)
+- **file-type security update**: Upgrade file-type 21.3.1 → 21.3.2 to fix ZIP decompression bomb DoS vulnerability (GHSA-j47w-4g3g-c36v)
+
+### Docs
+- **Protocol media download semantics**: Clarify opaque file-id contract, protocol guarantees for file endpoints, and media download policy scope in B2B-PROTOCOL.md (#215, #223)
+
+### Reverted
+- **Server-side implicit reply mention** (#221): Replaced by client-side auto-insert approach in #222
+
 ## [1.4.8] - 2026-03-14
 
 ### Added
