@@ -2053,6 +2053,56 @@ export class HubDB {
     });
   }
 
+  /**
+   * Search all threads in an org by topic (bot-facing, scope=org).
+   * Unlike listThreadsForBotPaginated, this does NOT require the bot to be a participant.
+   * Includes is_participant flag so the caller knows whether it has already joined.
+   * Cursor key: (last_activity_at DESC, id DESC), opaque-encoded. Returns limit+1 rows for has_more.
+   */
+  async searchThreadsInOrg(
+    orgId: string,
+    botId: string,
+    opts: { search: string; status?: ThreadStatus; cursor?: string; limit: number },
+  ): Promise<(Thread & { participant_count: number; is_participant: boolean })[]> {
+    // botId must be first: the EXISTS subquery ? appears in SELECT (before WHERE in SQL text)
+    const params: any[] = [botId];
+
+    const conditions = ['org_id = ?'];
+    params.push(orgId);
+
+    conditions.push('topic LIKE ?');
+    params.push(`%${opts.search}%`);
+
+    if (opts.status) { conditions.push('status = ?'); params.push(opts.status); }
+
+    if (opts.cursor) {
+      const c = decodeCursor(opts.cursor);
+      if (c) {
+        conditions.push('(last_activity_at < ? OR (last_activity_at = ? AND id < ?))');
+        params.push(c.t, c.t, c.id);
+      }
+    }
+
+    params.push(opts.limit + 1);
+    const rows = await this.driver.all<any>(
+      `SELECT *,
+        (SELECT COUNT(*) FROM thread_participants tp WHERE tp.thread_id = threads.id) AS _pc,
+        EXISTS(SELECT 1 FROM thread_participants tp2 WHERE tp2.thread_id = threads.id AND tp2.bot_id = ?) AS _ip
+      FROM threads
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY last_activity_at DESC, id DESC
+      LIMIT ?`,
+      params,
+    );
+    return rows.map((row: any) => {
+      const count = Number(row._pc);
+      const isParticipant = !!row._ip;
+      delete row._pc;
+      delete row._ip;
+      return { ...this.rowToThread(row), participant_count: count, is_participant: isParticipant };
+    });
+  }
+
   async listThreadsForBot(botId: string, status?: ThreadStatus, limit = 200): Promise<(Thread & { participant_count: number })[]> {
     const base = `
       SELECT t.*, (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = t.id) AS participant_count

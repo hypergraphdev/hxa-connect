@@ -2333,6 +2333,32 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const cursor = getQueryString(req.query.cursor);
     const limitParam = getQueryString(req.query.limit);
     const search = getQueryString(req.query.q)?.trim();
+    const scope = getQueryString(req.query.scope);
+
+    // scope=org: search all threads in bot's org (not just joined)
+    if (scope === 'org') {
+      if (!search) {
+        res.status(400).json({ error: 'q parameter required when scope=org' });
+        return;
+      }
+      if (search.length > 200) {
+        res.status(400).json({ error: 'q too long (max 200 chars)' });
+        return;
+      }
+      const limit = Math.min(Math.max(parseInt(limitParam || '') || 20, 1), 50);
+      const rows = await db.searchThreadsInOrg(req.bot!.org_id, req.bot!.id, { search, status, cursor, limit });
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const response: Record<string, unknown> = {
+        items,
+        has_more: hasMore,
+      };
+      if (hasMore && items.length > 0) {
+        response.next_cursor = encodeCursor(items[items.length - 1].last_activity_at, items[items.length - 1].id);
+      }
+      res.json(response);
+      return;
+    }
 
     // When cursor, search, or limit specified → paginated response
     if (cursor || search || limitParam) {
