@@ -275,11 +275,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     return undefined;
   }
 
+  // Check if the request is from an admin (session or bot)
+  function isAdminRequest(req: import('express').Request): boolean {
+    const role = req.session?.role as string | undefined;
+    if (role === 'org_admin' || role === 'super_admin') return true;
+    if (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active') return true;
+    return false;
+  }
+
   // Org admin check: session (org_admin/super_admin) or admin bot Bearer token
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
-    if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') return true;
-    // #133: Admin bots must also be active (not pending/rejected)
-    if (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active') return true;
+    if (isAdminRequest(req)) return true;
     res.status(403).json({ error: 'Organization admin authentication required', code: 'FORBIDDEN' });
     return false;
   }
@@ -1310,9 +1316,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
     // #133: Non-admin callers cannot see pending/rejected bots
-    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
-      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
-    if (bot.join_status !== 'active' && !isAdmin) {
+    if (bot.join_status !== 'active' && !isAdminRequest(req)) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
@@ -1758,9 +1762,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     const bots = await db.listBots(orgId, { role, tag, status, q });
     // #133: Non-admin callers only see active bots; admins see all (including pending/rejected)
-    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
-      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
-    const filteredBots = isAdmin ? bots : bots.filter(b => b.join_status === 'active');
+    const filteredBots = isAdminRequest(req) ? bots : bots.filter(b => b.join_status === 'active');
     res.json(filteredBots.map(bot => toBotResponse(bot)));
   });
 
@@ -1810,9 +1812,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     }
 
     // #133: Non-admin callers cannot see pending/rejected bots
-    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
-      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
-    if (bot.join_status !== 'active' && !isAdmin) {
+    if (bot.join_status !== 'active' && !isAdminRequest(req)) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
