@@ -1,6 +1,10 @@
 services:
   hxa-connect:
-    build: .
+    build:
+      context: .
+      args:
+        # Keep frontend path aligned with reverse proxy mount at /connect
+        NEXT_PUBLIC_BASE_PATH: /connect
     ports:
       - "4800:4800"
     volumes:
