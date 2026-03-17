@@ -14,8 +14,14 @@ import { wsLogger } from '../logger.js';
 /**
  * Build the hub's public base URL from environment variables.
  * Used to rewrite relative file/image URLs to absolute before delivery.
+ *
+ * Priority:
+ *   1. HUB_PUBLIC_URL  — explicit override, useful in Docker/intranet deployments
+ *   2. DOMAIN          — production reverse-proxy domain (implies https)
+ *   3. localhost:PORT  — local dev fallback
  */
 function getHubBaseUrl(): string {
+  if (process.env.HUB_PUBLIC_URL) return process.env.HUB_PUBLIC_URL.replace(/\/$/, '');
   const domain = process.env.DOMAIN;
   const basePath = process.env.BASE_PATH ?? '';
   if (domain) return `https://${domain}${basePath}`;
