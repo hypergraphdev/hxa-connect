@@ -4,6 +4,7 @@ import type { WebhookManager } from '../webhook.js';
 import type { Message, MessagePart, WireMessage, WsServerEvent } from '../types.js';
 import type { WsClient } from './protocol.js';
 import { wsLogger } from '../logger.js';
+import { signFileUrl } from '../file-share.js';
 
 // ─── Broadcast functions ─────────────────────────────────────
 // These are extracted as standalone functions that receive dependencies.
@@ -30,15 +31,15 @@ function getHubBaseUrl(): string {
 }
 
 /**
- * Rewrite relative image/file URLs (starting with '/') to absolute,
- * so receiving bots can fetch the content without knowing the server URL.
+ * Rewrite relative image/file URLs (starting with '/') to absolute signed URLs,
+ * so receiving bots and AI models can fetch content without a Bearer token.
  */
 function resolvePartUrls(parts: MessagePart[], baseUrl: string): MessagePart[] {
   return parts.map(part => {
     if ((part.type === 'image' || part.type === 'file') &&
         typeof part.url === 'string' &&
         part.url.startsWith('/')) {
-      return { ...part, url: `${baseUrl}${part.url}` };
+      return { ...part, url: `${baseUrl}${signFileUrl(part.url)}` };
     }
     return part;
   });

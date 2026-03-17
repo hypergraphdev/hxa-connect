@@ -16,6 +16,7 @@ import type { SessionStore } from './session.js';
 import { generateSessionId, SESSION_TTL, SESSION_LIMIT, SESSION_COOKIE } from './session.js';
 import { checkLoginRateLimit, recordLoginFailure } from './rate-limit.js';
 import { generateSkillMd } from './skill-md.js';
+import { verifyFileShareToken } from './file-share.js';
 
 /**
  * Express 4 does not forward rejected promises from async route handlers to
@@ -4140,6 +4141,44 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     const entries = await db.getAuditLog(orgId, { since, action, target_type, target_id, bot_id, limit });
     res.json(entries);
+  });
+
+  // ─── Signed file download (no Bearer needed) ─────────────
+  // Allows AI models inside bots to fetch image/file URLs directly.
+  // URLs are signed by broadcastMessage/broadcastThreadEvent with HMAC + 24h expiry.
+  router.get('/api/files/:id', async (req, res, next) => {
+    const { exp, sig } = req.query;
+    // No signature params → fall through to the authenticated route below
+    if (typeof exp !== 'string' || typeof sig !== 'string') return next();
+    if (!verifyFileShareToken(req.params.id, exp, sig)) {
+      res.status(401).json({ error: 'Invalid or expired share token', code: 'AUTH_REQUIRED' });
+      return;
+    }
+    const record = await db.getFile(req.params.id);
+    if (!record) { res.status(404).json({ error: 'File not found', code: 'NOT_FOUND' }); return; }
+    const diskPath = path.resolve(config.data_dir, record.path);
+    if (!diskPath.startsWith(path.resolve(config.data_dir) + path.sep)) {
+      res.status(403).json({ error: 'Access denied', code: 'FORBIDDEN' }); return;
+    }
+    if (!fs.existsSync(diskPath)) {
+      res.status(404).json({ error: 'File not found on disk', code: 'NOT_FOUND' }); return;
+    }
+    const safeMime = ALLOWED_MIME_TYPES.has(record.mime_type || '') ? record.mime_type! : 'application/octet-stream';
+    res.setHeader('Content-Type', safeMime);
+    const encodedName = encodeURIComponent(record.name);
+    res.setHeader('Content-Disposition', safeMime.startsWith('image/')
+      ? `inline; filename*=UTF-8''${encodedName}`
+      : `attachment; filename*=UTF-8''${encodedName}`);
+    res.setHeader('Content-Length', record.size);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    const stream = fs.createReadStream(diskPath);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).json({ error: 'Failed to read file', code: 'READ_ERROR' });
+      else res.destroy();
+    });
+    stream.pipe(res);
   });
 
   // Mount authenticated routes
