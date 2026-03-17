@@ -16,6 +16,7 @@ services:
       - HXA_CONNECT_PERSIST=true
       - DEV_MODE=false
       - HXA_CONNECT_ADMIN_SECRET=changeme_local_please_reset
+      - BASE_PATH=/connect
       # - HXA_CONNECT_CORS_ORIGINS=https://your-domain.com
     restart: unless-stopped
 

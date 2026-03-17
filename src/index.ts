@@ -150,6 +150,19 @@ async function main() {
   }));
   app.use(express.json({ limit: '1mb' }));
 
+  // Optional URL base path compatibility (e.g. '/connect').
+  // Keep API/UI both accessible both at root and under the base prefix.
+  const uiBasePath = (process.env.BASE_PATH || process.env.NEXT_PUBLIC_BASE_PATH || '')
+    .trim()
+    .replace(/\/$/, '');
+  const normalizedBasePath = uiBasePath && uiBasePath.startsWith('/') ? uiBasePath : uiBasePath ? `/${uiBasePath}` : '';
+  app.use((req, _res, next) => {
+    if (normalizedBasePath && (req.path === normalizedBasePath || req.path.startsWith(`${normalizedBasePath}/`))) {
+      req.url = req.url.slice(normalizedBasePath.length) || '/';
+    }
+    next();
+  });
+
   // Request ID correlation
   app.use((req, _res, next) => {
     req.requestId = (req.headers['x-request-id'] as string) || generateRequestId();
