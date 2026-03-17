@@ -139,7 +139,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
   const navigate = useCallback((path: string) => {
     const resolved = path.startsWith('/') ? path : `/${path}`;
-    window.history.pushState(null, '', `${DASHBOARD_BASE}#${resolved}`);
+    window.history.pushState(null, '', `#${resolved}`);
     syncFromCurrentLocation();
 
     // Clear transient WS state to prevent stale messages
