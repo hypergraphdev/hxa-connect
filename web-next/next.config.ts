@@ -5,12 +5,28 @@ import { resolve } from 'path';
 // Leave empty when serving from root.
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
+// Set NEXT_DEV_REMOTE=true to proxy /api/* to the remote production server
+// instead of running a local backend. Useful for local UI debugging.
+const devRemote = process.env.NEXT_DEV_REMOTE === 'true';
+const REMOTE_API = 'https://www.ucai.net/connect';
+
 const nextConfig: NextConfig = {
-  output: 'export',
+  // Static export for production; disabled in remote-dev mode (rewrites require server runtime)
+  ...(!devRemote ? { output: 'export' } : {}),
   trailingSlash: true,
   images: { unoptimized: true },
-  outputFileTracingRoot: resolve(import.meta.dirname),
+  ...(!devRemote ? { outputFileTracingRoot: resolve(import.meta.dirname) } : {}),
   ...(basePath ? { basePath } : {}),
+  ...(devRemote
+    ? {
+        async rewrites() {
+          return [
+            { source: '/api/:path*', destination: `${REMOTE_API}/api/:path*` },
+            { source: '/files/:path*', destination: `${REMOTE_API}/files/:path*` },
+          ];
+        },
+      }
+    : {}),
 };
 
 export default nextConfig;
