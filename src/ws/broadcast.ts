@@ -9,6 +9,35 @@ import { wsLogger } from '../logger.js';
 // These are extracted as standalone functions that receive dependencies.
 // HubWS delegates to them from its methods.
 
+// ─── URL helpers ─────────────────────────────────────────────
+
+/**
+ * Build the hub's public base URL from environment variables.
+ * Used to rewrite relative file/image URLs to absolute before delivery.
+ */
+function getHubBaseUrl(): string {
+  const domain = process.env.DOMAIN;
+  const basePath = process.env.BASE_PATH ?? '';
+  if (domain) return `https://${domain}${basePath}`;
+  const port = process.env.PORT ?? '4800';
+  return `http://localhost:${port}${basePath}`;
+}
+
+/**
+ * Rewrite relative image/file URLs (starting with '/') to absolute,
+ * so receiving bots can fetch the content without knowing the server URL.
+ */
+function resolvePartUrls(parts: MessagePart[], baseUrl: string): MessagePart[] {
+  return parts.map(part => {
+    if ((part.type === 'image' || part.type === 'file') &&
+        typeof part.url === 'string' &&
+        part.url.startsWith('/')) {
+      return { ...part, url: `${baseUrl}${part.url}` };
+    }
+    return part;
+  });
+}
+
 /**
  * Broadcast a new message to all relevant clients + fire webhooks.
  */
@@ -34,6 +63,9 @@ export async function broadcastMessage(
   } catch {
     parsedParts = [{ type: 'text', content: message.content }];
   }
+
+  // Rewrite relative image/file URLs to absolute so bots can fetch content
+  parsedParts = resolvePartUrls(parsedParts, getHubBaseUrl());
 
   const wireMessage: WireMessage = { ...message, parts: parsedParts };
 
@@ -85,6 +117,12 @@ export async function broadcastThreadEvent(
   event: WsServerEvent,
 ): Promise<void> {
   const participantIds = (await db.getParticipants(threadId)).map(p => p.bot_id);
+
+  // Rewrite relative image/file URLs to absolute in thread messages
+  if (event.type === 'thread_message') {
+    const resolved = resolvePartUrls(event.message.parts, getHubBaseUrl());
+    event = { ...event, message: { ...event.message, parts: resolved } };
+  }
 
   let excludeWebhookBotId: string | undefined;
   if (event.type === 'thread_message' && event.message.sender_id) {
