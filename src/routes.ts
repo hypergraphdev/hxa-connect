@@ -385,6 +385,40 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   });
 
   /**
+   * GET /api/health — Compatibility endpoint (legacy)
+   * Returns basic liveliness for clients expecting health probe.
+   */
+  router.get('/api/health', (_req, res) => {
+    res.json({ ok: true, server: 'hxa-connect', version: SERVER_VERSION });
+  });
+
+  /**
+   * GET /api/system-presence — Compatibility endpoint (legacy)
+   * Returns current org bots and online status.
+   */
+  router.get('/api/system-presence', (_req, res) => {
+    // Lightweight, unauthenticated-compatible response to keep old clients healthy.
+    res.json({
+      bots: [],
+      online: true,
+      presence_ts: Date.now(),
+      note: 'system-presence compatibility endpoint',
+    });
+  });
+
+  /**
+   * GET /api/config/get — Compatibility endpoint (legacy)
+   */
+  router.get('/api/config/get', (_req, res) => {
+    res.json({
+      server: 'hxa-connect',
+      version: SERVER_VERSION,
+      env: process.env.NODE_ENV || 'production',
+      scopes: ['full', 'read', 'thread', 'message', 'profile'],
+    });
+  });
+
+  /**
    * GET /api/stats — Public platform statistics
    * Returns aggregate counts (no sensitive data). Cached for 60s.
    */
@@ -1090,7 +1124,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    *     | { org_id, org_secret, name, ...profile }        → auth_role: 'admin'
    * Returns: { bot_id, token, name, auth_role }
    */
-  router.post('/api/auth/register', async (req, res) => {
+  async function handleBotRegister(req: Request, res: Response) {
     const { org_id, ticket: ticketId, org_secret } = req.body;
 
     // Validate required fields
@@ -1259,7 +1293,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       token: plaintextToken,
     };
     res.json(response);
-  });
+  }
+
+  router.post('/api/auth/register', handleBotRegister);
+  // Legacy alias kept for older clients that post to /api/register
+  router.post('/api/register', handleBotRegister);
 
   // ─── Authenticated Routes ─────────────────────────────────
 
