@@ -142,6 +142,43 @@ export function sendToClient(client: WsClient, event: WsServerEvent): void {
 }
 
 /**
+ * Notify admin bots of a pending bot join request (#133 Plan B+C).
+ * Plan B: Fire webhooks to admin bots with webhook_url.
+ * Plan C: Send dedicated bot_join_request WS event to admin WS clients only.
+ */
+export async function notifyAdminsOfJoinRequest(
+  clients: Set<WsClient>,
+  db: HubDB,
+  webhookManager: WebhookManager,
+  orgId: string,
+  bot: { id: string; name: string },
+): Promise<void> {
+  const event: WsServerEvent = {
+    type: 'bot_join_request',
+    bot: { id: bot.id, name: bot.name },
+    org_id: orgId,
+  };
+
+  // Plan C: Send WS event to admin clients only
+  for (const client of clients) {
+    if (client.orgId !== orgId) continue;
+    if (!client.isOrgAdmin) continue;
+    sendToClient(client, event);
+  }
+
+  // Plan B: Fire webhooks to admin bots with webhook_url
+  const allBots = await db.listBots(orgId);
+  const adminBots = allBots.filter(
+    b => b.auth_role === 'admin' && b.join_status === 'active' && b.webhook_url,
+  );
+  const webhookPayload = { webhook_version: '1' as const, ...event };
+  for (const adminBot of adminBots) {
+    wsLogger.info({ botName: adminBot.name, pendingBot: bot.name }, 'Webhook dispatch for bot_join_request');
+    void webhookManager.deliver(adminBot.id, adminBot.webhook_url!, adminBot.webhook_secret, webhookPayload);
+  }
+}
+
+/**
  * Fire webhooks for thread participants.
  */
 async function fireThreadWebhooks(

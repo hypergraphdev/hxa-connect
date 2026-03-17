@@ -103,6 +103,7 @@ function toBotResponse(bot: Bot) {
     active_hours: bot.active_hours,
     version: bot.version,
     runtime: bot.runtime,
+    join_status: bot.join_status,
   };
 }
 
@@ -277,7 +278,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   // Org admin check: session (org_admin/super_admin) or admin bot Bearer token
   function requireOrgAdmin(req: import('express').Request, res: import('express').Response): boolean {
     if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') return true;
-    if (req.bot?.auth_role === 'admin') return true;
+    // #133: Admin bots must also be active (not pending/rejected)
+    if (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active') return true;
     res.status(403).json({ error: 'Organization admin authentication required', code: 'FORBIDDEN' });
     return false;
   }
@@ -1165,6 +1167,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         return;
       }
 
+      // #133: Determine join_status based on org's approval setting
+      const joinApprovalRequired = await db.getOrgJoinApproval(org_id);
+      const joinStatus: 'pending' | 'active' = joinApprovalRequired ? 'pending' : 'active';
+
       // #178: Atomically consume ticket + insert bot to prevent TOCTOU race condition.
       // Guarantees: either (bot created + ticket consumed) or (nothing changed).
       const atomicResult = await db.atomicRegisterBotWithTicket(
@@ -1176,6 +1182,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         validated.webhook_url,
         validated.webhook_secret,
         validated.profile,
+        joinStatus,
       );
 
       if ('conflict' in atomicResult) {
@@ -1204,13 +1211,18 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       try {
         ws.broadcastToOrg(org_id, {
           type: 'bot_registered',
-          bot: { id: ticketBot.id, name: ticketBot.name },
+          bot: { id: ticketBot.id, name: ticketBot.name, join_status: ticketBot.join_status },
         });
+        // #133 B+C: If pending, notify admins via dedicated WS event + webhook
+        if (ticketBot.join_status === 'pending') {
+          ws.notifyAdminsOfJoinRequest(org_id, { id: ticketBot.id, name: ticketBot.name }).catch(() => {});
+        }
       } catch { /* broadcast failure must not prevent registration response */ }
       const ticketResponse: RegisterResponse = {
         bot_id: ticketBot.id,
         ...toBotResponse(ticketBot),
         token: ticketToken,
+        ...(ticketBot.join_status === 'pending' ? { message: 'Awaiting org admin approval' } : {}),
       };
       res.json(ticketResponse);
       return;
@@ -1250,8 +1262,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     try {
       ws.broadcastToOrg(org_id, {
         type: 'bot_registered',
-        bot: { id: bot.id, name: bot.name },
+        bot: { id: bot.id, name: bot.name, join_status: bot.join_status },
       });
+      // #133 B+C: If pending, notify admins via dedicated WS event + webhook
+      if (bot.join_status === 'pending') {
+        ws.notifyAdminsOfJoinRequest(org_id, { id: bot.id, name: bot.name }).catch(() => {});
+      }
     } catch { /* broadcast failure must not prevent registration response */ }
     const response: RegisterResponse = {
       bot_id: bot.id,
@@ -1290,6 +1306,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     if (!orgId) return;
     const bot = await db.getBotById(req.params.id as string);
     if (!bot || bot.org_id !== orgId) {
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
+      return;
+    }
+    // #133: Non-admin callers cannot see pending/rejected bots
+    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
+      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
+    if (bot.join_status !== 'active' && !isAdmin) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
@@ -1734,7 +1757,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const q = getQueryString(req.query.q);
 
     const bots = await db.listBots(orgId, { role, tag, status, q });
-    res.json(bots.map(bot => toBotResponse(bot)));
+    // #133: Non-admin callers only see active bots; admins see all (including pending/rejected)
+    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
+      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
+    const filteredBots = isAdmin ? bots : bots.filter(b => b.join_status === 'active');
+    res.json(filteredBots.map(bot => toBotResponse(bot)));
   });
 
   /**
@@ -1778,6 +1805,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     const bot = await db.getBotByName(orgId, req.params.name as string);
     if (!bot) {
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // #133: Non-admin callers cannot see pending/rejected bots
+    const isAdmin = req.session?.role === 'org_admin' || req.session?.role === 'super_admin' ||
+      (req.bot?.auth_role === 'admin' && req.bot?.join_status === 'active');
+    if (bot.join_status !== 'active' && !isAdmin) {
       res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
       return;
     }
@@ -2639,6 +2674,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const bot = await resolveBot(thread.org_id, bot_id);
     if (!bot) {
       res.status(404).json({ error: `Bot not found: ${bot_id}` });
+      return;
+    }
+
+    // #133: Cannot invite pending/rejected bots to threads
+    if (bot.join_status !== 'active') {
+      res.status(400).json({ error: 'Cannot invite unapproved bot to thread', code: 'BOT_NOT_ACTIVE' });
       return;
     }
 
@@ -3665,7 +3706,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   auth.get('/api/org/settings', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
     const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
-    res.json(await db.getOrgSettings(orgId));
+    const settings = await db.getOrgSettings(orgId);
+    const joinApprovalRequired = await db.getOrgJoinApproval(orgId);
+    res.json({ ...settings, join_approval_required: joinApprovalRequired });
   });
 
   /**
@@ -3685,6 +3728,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       thread_auto_close_days,
       artifact_retention_days,
       default_thread_permission_policy,
+      join_approval_required,
     } = req.body;
 
     // Validate numeric fields (reject NaN, Infinity, non-integers)
@@ -3740,17 +3784,35 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     if (artifact_retention_days !== undefined) updates.artifact_retention_days = artifact_retention_days;
     if (default_thread_permission_policy !== undefined) updates.default_thread_permission_policy = default_thread_permission_policy;
 
-    if (Object.keys(updates).length === 0) {
+    // #133: Handle join_approval_required (stored on orgs table, not org_settings)
+    let joinApprovalChanged = false;
+    if (join_approval_required !== undefined) {
+      if (typeof join_approval_required !== 'boolean') {
+        res.status(400).json({ error: 'join_approval_required must be a boolean', code: 'VALIDATION_ERROR' });
+        return;
+      }
+      await db.setOrgJoinApproval(orgId, join_approval_required);
+      joinApprovalChanged = true;
+    }
+
+    if (Object.keys(updates).length === 0 && !joinApprovalChanged) {
       res.status(400).json({ error: 'No settings fields provided', code: 'VALIDATION_ERROR' });
       return;
     }
 
-    const settings = await db.updateOrgSettings(orgId, updates);
+    let settings: any = {};
+    if (Object.keys(updates).length > 0) {
+      settings = await db.updateOrgSettings(orgId, updates);
+    } else {
+      settings = await db.getOrgSettings(orgId);
+    }
 
     // Audit
-    await db.recordAudit(orgId, null, 'settings.update', 'org_settings', orgId, updates);
+    const auditDetails = { ...updates, ...(joinApprovalChanged ? { join_approval_required } : {}) };
+    await db.recordAudit(orgId, null, 'settings.update', 'org_settings', orgId, auditDetails);
 
-    res.json(settings);
+    const joinApproval = await db.getOrgJoinApproval(orgId);
+    res.json({ ...settings, join_approval_required: joinApproval });
   });
 
   // ─── Org Auth Management (Admin Bot) ─────────────────────
@@ -4029,6 +4091,93 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     await db.recordAudit(orgId!, actorId, 'bot.role_change', 'bot', targetBotId, { auth_role });
 
     res.json({ bot_id: targetBotId, auth_role });
+  });
+
+  /**
+   * PATCH /api/org/bots/:bot_id/status — Approve or reject a bot's join request (#133)
+   * Auth: Org admin (session or admin bot)
+   * Body: { status: 'active' | 'rejected', reason?: string }
+   * Returns: { bot_id, name, join_status, previous_status, ... }
+   */
+  auth.patch('/api/org/bots/:bot_id/status', async (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+
+    const { status, reason } = req.body;
+
+    // Validate status
+    if (status !== 'active' && status !== 'rejected') {
+      res.status(400).json({ error: "status must be 'active' or 'rejected'", code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
+      res.status(400).json({ error: 'reason must be a string (max 500 chars)', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
+    const targetBotId = req.params.bot_id as string;
+    const targetBot = await db.getBotById(targetBotId);
+    if (!targetBot || targetBot.org_id !== orgId) {
+      res.status(404).json({ error: 'Bot not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    const previousStatus = targetBot.join_status;
+
+    // Idempotent: same status → return current state, no audit log
+    if (previousStatus === status) {
+      res.json({
+        bot_id: targetBot.id,
+        name: targetBot.name,
+        join_status: status,
+        previous_status: previousStatus,
+        join_status_changed_by: targetBot.join_status_changed_by,
+        join_status_changed_at: targetBot.join_status_changed_at,
+        join_status_reason: targetBot.join_status_reason,
+      });
+      return;
+    }
+
+    const changedBy = req.session
+      ? `session:${req.session.id}`
+      : `bot:${req.bot!.id}`;
+
+    const updated = await db.updateBotJoinStatus(targetBotId, status, changedBy, reason);
+
+    // Audit log
+    const actorId = req.bot?.id || 'org_admin';
+    await db.recordAudit(orgId!, actorId, 'bot.join_status_changed', 'bot', targetBotId, {
+      old_status: previousStatus,
+      new_status: status,
+      reason: reason || null,
+    });
+
+    // WebSocket broadcast to org
+    try {
+      ws.broadcastToOrg(orgId!, {
+        type: 'bot_status_changed',
+        bot_id: targetBot.id,
+        name: targetBot.name,
+        join_status: status,
+        previous_status: previousStatus,
+        reason: reason || null,
+      });
+    } catch { /* broadcast failure must not block response */ }
+
+    // If transitioning to rejected, close any active WS connections
+    if (status === 'rejected' && previousStatus !== 'rejected') {
+      try { ws.disconnectBot(targetBotId, 4403, 'bot_rejected'); } catch { /* best-effort */ }
+    }
+
+    res.json({
+      bot_id: targetBot.id,
+      name: targetBot.name,
+      join_status: status,
+      previous_status: previousStatus,
+      join_status_changed_by: changedBy,
+      join_status_changed_at: updated?.join_status_changed_at ?? null,
+      join_status_reason: reason || null,
+    });
   });
 
   // ─── WS Ticket Exchange ──────────────────────────────────

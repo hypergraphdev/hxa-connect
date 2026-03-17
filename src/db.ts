@@ -455,6 +455,18 @@ export class HubDB {
         CREATE INDEX IF NOT EXISTS idx_deleted_bot_names_org ON deleted_bot_names(org_id);
       `);
     });
+
+    // #133: Bot join approval mechanism
+    await this.runMigration('bot_join_approval', async () => {
+      const ts2 = this.driver.dialect === 'postgres' ? 'BIGINT' : 'INTEGER';
+      await this.driver.exec(`
+        ALTER TABLE bots ADD COLUMN join_status TEXT NOT NULL DEFAULT 'active';
+        ALTER TABLE bots ADD COLUMN join_status_changed_by TEXT;
+        ALTER TABLE bots ADD COLUMN join_status_changed_at ${ts2};
+        ALTER TABLE bots ADD COLUMN join_status_reason TEXT;
+        ALTER TABLE orgs ADD COLUMN join_approval_required INTEGER NOT NULL DEFAULT 0;
+      `);
+    });
   }
 
   /**
@@ -512,6 +524,10 @@ export class HubDB {
       runtime: row.runtime ?? null,
       auth_role: row.auth_role ?? 'member',
       online: !!row.online,
+      join_status: row.join_status ?? 'active',
+      join_status_changed_by: row.join_status_changed_by ?? null,
+      join_status_changed_at: row.join_status_changed_at ?? null,
+      join_status_reason: row.join_status_reason ?? null,
     };
   }
 
@@ -668,6 +684,39 @@ export class HubDB {
    */
   async setBotAuthRole(botId: string, role: 'admin' | 'member'): Promise<void> {
     await this.driver.run('UPDATE bots SET auth_role = ? WHERE id = ?', [role, botId]);
+  }
+
+  // ── Bot Join Approval (#133) ───────────────────────────────────────
+
+  async updateBotJoinStatus(
+    botId: string,
+    status: 'active' | 'rejected',
+    changedBy: string,
+    reason?: string,
+  ): Promise<Bot | undefined> {
+    const now = Date.now();
+    await this.driver.run(
+      `UPDATE bots SET join_status = ?, join_status_changed_by = ?, join_status_changed_at = ?, join_status_reason = ? WHERE id = ?`,
+      [status, changedBy, now, reason ?? null, botId],
+    );
+    return this.getBotById(botId);
+  }
+
+  async getOrgJoinApproval(orgId: string): Promise<boolean> {
+    const row = await this.driver.get<any>('SELECT join_approval_required FROM orgs WHERE id = ?', [orgId]);
+    return !!row?.join_approval_required;
+  }
+
+  async setOrgJoinApproval(orgId: string, required: boolean): Promise<void> {
+    await this.driver.run('UPDATE orgs SET join_approval_required = ? WHERE id = ?', [required ? 1 : 0, orgId]);
+  }
+
+  async countPendingBots(orgId: string): Promise<number> {
+    const row = await this.driver.get<any>(
+      "SELECT COUNT(*) as count FROM bots WHERE org_id = ? AND join_status = 'pending'",
+      [orgId],
+    );
+    return row?.count ?? 0;
   }
 
   /**
@@ -957,6 +1006,10 @@ export class HubDB {
       online: false,
       last_seen_at: now,
       created_at: now,
+      join_status: 'active', // org_secret path always creates active bots
+      join_status_changed_by: null,
+      join_status_changed_at: null,
+      join_status_reason: null,
     };
 
     // Sentinel errors thrown inside the transaction to force ROLLBACK before handling.
@@ -1046,6 +1099,7 @@ export class HubDB {
     webhookUrl: string | null | undefined,
     webhookSecret: string | null | undefined,
     profile: BotProfileInput | undefined,
+    joinStatus: 'pending' | 'active' = 'active',
   ): Promise<
     | { bot: Bot; plaintextToken: string }
     | { conflict: 'NAME_CONFLICT' | 'TICKET_CONSUMED' | 'NAME_TOMBSTONED' }
@@ -1084,6 +1138,10 @@ export class HubDB {
       online: false,
       last_seen_at: now,
       created_at: now,
+      join_status: joinStatus,
+      join_status_changed_by: null,
+      join_status_changed_at: null,
+      join_status_reason: null,
     };
 
     // Sentinel error classes — all conflicts are thrown (not returned) from the
@@ -1129,8 +1187,8 @@ export class HubDB {
             `INSERT INTO bots (
               id, org_id, name, token, metadata, webhook_url, webhook_secret,
               bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
-              auth_role, online, last_seen_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              auth_role, online, last_seen_at, created_at, join_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               botObj.id, botObj.org_id, botObj.name,
               tokenHash, // Store hash, not plaintext
@@ -1138,7 +1196,7 @@ export class HubDB {
               botObj.bio, botObj.role, botObj.function, botObj.team, botObj.tags,
               botObj.languages, botObj.protocols, botObj.status_text, botObj.timezone,
               botObj.active_hours, botObj.version, botObj.runtime, botObj.auth_role,
-              botObj.online ? 1 : 0, botObj.last_seen_at, botObj.created_at,
+              botObj.online ? 1 : 0, botObj.last_seen_at, botObj.created_at, botObj.join_status,
             ],
           );
         } catch (err: any) {

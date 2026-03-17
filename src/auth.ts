@@ -88,6 +88,18 @@ export function authMiddleware(db: HubDB) {
     // Try primary bot token first
     const bot = await db.getBotByToken(token);
     if (bot) {
+      // #133: Check join_status — pending/rejected bots cannot access any API
+      if (bot.join_status !== 'active') {
+        res.status(403).json({
+          error: 'bot_not_active',
+          code: 'BOT_NOT_ACTIVE',
+          join_status: bot.join_status,
+          message: bot.join_status === 'pending'
+            ? 'Bot is awaiting org admin approval'
+            : 'Bot registration was rejected',
+        });
+        return;
+      }
       // Phase 3: Validate X-Org-Id header if present
       const requestedOrgId = req.headers['x-org-id'] as string | undefined;
       if (requestedOrgId) {
@@ -134,6 +146,18 @@ export function authMiddleware(db: HubDB) {
       }
       const scopedBot = await db.getBotById(scopedToken.bot_id);
       if (scopedBot) {
+        // #133: Check join_status for scoped tokens too
+        if (scopedBot.join_status !== 'active') {
+          res.status(403).json({
+            error: 'bot_not_active',
+            code: 'BOT_NOT_ACTIVE',
+            join_status: scopedBot.join_status,
+            message: scopedBot.join_status === 'pending'
+              ? 'Bot is awaiting org admin approval'
+              : 'Bot registration was rejected',
+          });
+          return;
+        }
         // Phase 3: Validate X-Org-Id header if present
         const requestedOrgId = req.headers['x-org-id'] as string | undefined;
         if (requestedOrgId) {
