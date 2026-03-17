@@ -1,14 +1,14 @@
 'use client';
 
 import { useEffect, useState, useCallback, createContext, useContext } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { SessionContext, useSessionState } from '@/hooks/useSession';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Header } from '@/components/layout/Header';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { ThreadList } from '@/components/thread/ThreadList';
 import { DMList } from '@/components/dm/DMList';
-import type { WsEvent, Thread, ThreadMessage, ThreadStatus, Artifact, DmMessage, Channel, Bot } from '@/lib/types';
+import type { WsEvent, Thread, ThreadMessage, ThreadStatus, Artifact, DmMessage, Channel } from '@/lib/types';
 
 type Tab = 'threads' | 'dms';
 
@@ -69,32 +69,52 @@ export function useWsEvents(): WsEventState {
   return useContext(WsEventContext);
 }
 
-// ─── Shell ───
+// ─── Route helpers (hash-first) ───
 
 function parseRoute(p: string): { section: string; id?: string } {
-  const parts = p.replace(/^\/dashboard\/?/, '').split('/').filter(Boolean);
-  return { section: parts[0] ?? '', id: parts[1] };
+  let pathname = p;
+  if (!pathname.startsWith('/')) pathname = `/${pathname}`;
+
+  const clean = pathname.split('?')[0];
+  const parts = clean
+    .replace(/^\/+/, '')
+    .split('/')
+    .filter(Boolean);
+
+  const body = parts[0] === 'dashboard' ? parts.slice(1) : parts;
+  return { section: body[0] ?? '', id: body[1] };
 }
+
+function getLocationRoute(): { path: string; section: string; id?: string } {
+  const rawHash = window.location.hash || '';
+  const rawPath = rawHash.startsWith('#') && rawHash.length > 1
+    ? rawHash.slice(1)
+    : window.location.pathname;
+
+  let path = rawPath;
+  if (DASHBOARD_BASE && path.startsWith(DASHBOARD_BASE)) {
+    path = path.slice(DASHBOARD_BASE.length);
+  }
+  if (!path) path = '/';
+  if (!path.startsWith('/')) path = `/${path}`;
+
+  const { section, id } = parseRoute(path);
+  return { path, section, id };
+}
+
+// ─── Shell ───
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const sessionState = useSessionState();
   const router = useRouter();
-  const pathname = usePathname();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<Tab>(() => tabFromPath(pathname));
-  const [navRoute, setNavRoute] = useState(() => parseRoute(pathname));
 
-  const navigate = useCallback((path: string) => {
-    const url = `${DASHBOARD_BASE}${path}`;
-    window.history.pushState(null, '', url);
-    setNavRoute(parseRoute(path));
-    setActiveTab(tabFromPath(path));
-    // Clear transient WS state to prevent stale messages
-    // from appearing out of order after HTTP reload
-    setWsMessages([]);
-    setWsDmMessages([]);
-    setWsArtifacts([]);
-  }, []);
+  const route = getLocationRoute();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>(() => tabFromPath(route.path));
+  const [navRoute, setNavRoute] = useState<{ section: string; id?: string }>(() => ({
+    section: route.section,
+    id: route.id,
+  }));
 
   // WS event state
   const [wsConnected, setWsConnected] = useState(false);
@@ -107,6 +127,27 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   const [wsParticipantEvents, setWsParticipantEvents] = useState<WsEventState['wsParticipantEvents']>([]);
   const [wsBotStatusEvents, setWsBotStatusEvents] = useState<WsEventState['wsBotStatusEvents']>([]);
   const [wsNewChannels, setWsNewChannels] = useState<Channel[]>([]);
+
+  const syncFromCurrentLocation = useCallback(() => {
+    const next = getLocationRoute();
+    setNavRoute({ section: next.section, id: next.id });
+    setActiveTab(tabFromPath(next.path));
+    setWsMessages([]);
+    setWsDmMessages([]);
+    setWsArtifacts([]);
+  }, []);
+
+  const navigate = useCallback((path: string) => {
+    const resolved = path.startsWith('/') ? path : `/${path}`;
+    window.history.pushState(null, '', `${DASHBOARD_BASE}#${resolved}`);
+    syncFromCurrentLocation();
+
+    // Clear transient WS state to prevent stale messages
+    // from appearing out of order after HTTP reload
+    setWsMessages([]);
+    setWsDmMessages([]);
+    setWsArtifacts([]);
+  }, [syncFromCurrentLocation]);
 
   const handleWsEvent = useCallback((event: WsEvent) => {
     switch (event.type) {
@@ -179,28 +220,20 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     }
   }, [sessionState.loading, sessionState.session, router]);
 
-  // Sync tab with path
+  // Sync tab with current URL (supports history back/forward and deep link hash)
   useEffect(() => {
-    setActiveTab(tabFromPath(pathname));
-  }, [pathname]);
+    syncFromCurrentLocation();
+    window.addEventListener('popstate', syncFromCurrentLocation);
+    window.addEventListener('hashchange', syncFromCurrentLocation);
+    return () => {
+      window.removeEventListener('popstate', syncFromCurrentLocation);
+      window.removeEventListener('hashchange', syncFromCurrentLocation);
+    };
+  }, [syncFromCurrentLocation]);
 
   function handleTabChange(tab: Tab) {
     navigate(tab === 'dms' ? '/dashboard/dms/' : '/dashboard/');
   }
-
-  // Handle browser back/forward
-  useEffect(() => {
-    function onPopState() {
-      const p = window.location.pathname.replace(DASHBOARD_BASE, '');
-      setNavRoute(parseRoute(p));
-      setActiveTab(tabFromPath(p));
-      setWsMessages([]);
-      setWsDmMessages([]);
-      setWsArtifacts([]);
-    }
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
 
   if (sessionState.loading) {
     return (
