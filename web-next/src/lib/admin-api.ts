@@ -109,6 +109,8 @@ export interface OrgBot {
   version?: string;
   tags?: string[];
   auth_role: 'admin' | 'member';
+  join_status?: 'active' | 'pending' | 'rejected';
+  join_status_reason?: string | null;
   online: boolean;
   created_at: string | number;
   last_seen_at?: string | number;
@@ -244,6 +246,12 @@ export const orgAdmin = {
     orgRequest<void>(`/api/org/bots/${botId}/role`, {
       method: 'PATCH',
       body: JSON.stringify({ auth_role: role }),
+    }),
+
+  updateBotStatus: (botId: string, status: 'active' | 'rejected', reason?: string) =>
+    orgRequest<{ bot_id: string; name: string; join_status: string; previous_status: string }>(`/api/org/bots/${botId}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, ...(reason ? { reason } : {}) }),
     }),
 
   getBotChannels: (botId: string) =>

@@ -369,16 +369,28 @@ export default function OrgDashboard() {
       });
     }
     if (evt.type === 'bot_registered') {
-      const botData = evt.bot as { id: string; name: string };
+      const botData = evt.bot as { id: string; name: string; join_status?: string };
       setBots(prev => {
         if (prev.some(b => b.id === botData.id)) return prev;
         return [...prev, {
           id: botData.id,
           name: botData.name,
           auth_role: 'member',
+          join_status: (botData.join_status as OrgBot['join_status']) ?? 'active',
           online: false,
           created_at: new Date().toISOString(),
         } as OrgBot];
+      });
+    }
+    if (evt.type === 'bot_status_changed') {
+      const botId = evt.bot_id as string;
+      const joinStatus = evt.join_status as 'active' | 'pending' | 'rejected';
+      setBots(prev => prev.map(b => b.id === botId ? { ...b, join_status: joinStatus } : b));
+      setView(prev => {
+        if (prev.type === 'bot' && prev.bot.id === botId) {
+          return { type: 'bot', bot: { ...prev.bot, join_status: joinStatus } };
+        }
+        return prev;
       });
     }
     if (evt.type === 'thread_created') {
@@ -602,6 +614,11 @@ export default function OrgDashboard() {
                       <div className="flex items-center gap-2.5">
                         <Circle size={8} className={`shrink-0 ${bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'}`} />
                         <span className="text-sm font-medium truncate">{bot.name}</span>
+                        {bot.join_status && bot.join_status !== 'active' && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                            bot.join_status === 'pending' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-red/20 text-hxa-red'
+                          }`}>{t(`org.bot.joinStatus.${bot.join_status}`)}</span>
+                        )}
                         <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
                           bot.auth_role === 'admin' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-text-dim/20 text-hxa-text-dim'
                         }`}>{bot.auth_role}</span>
@@ -740,6 +757,10 @@ export default function OrgDashboard() {
               onRoleChanged={(role) => {
                 setBots(prev => prev.map(b => b.id === view.bot.id ? { ...b, auth_role: role } : b));
               }}
+              onStatusChanged={(status) => {
+                setBots(prev => prev.map(b => b.id === view.bot.id ? { ...b, join_status: status } : b));
+                setView(prev => prev.type === 'bot' ? { type: 'bot', bot: { ...prev.bot, join_status: status } } : prev);
+              }}
             />
           )}
           {view.type === 'channel' && (
@@ -774,17 +795,20 @@ export default function OrgDashboard() {
 
 // ─── Bot Profile View ───
 
-function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChanged }: {
+function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChanged, onStatusChanged }: {
   bot: OrgBot;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   onViewChannel: (channelId: string, label: string) => void;
   onDeleted: () => void;
   onRoleChanged: (role: 'admin' | 'member') => void;
+  onStatusChanged: (status: 'active' | 'pending' | 'rejected') => void;
 }) {
   const { t } = useTranslations();
   const timeAgo = useTimeAgo();
   const [channels, setChannels] = useState<OrgChannel[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReject, setConfirmReject] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(false);
 
   useEffect(() => {
     orgAdmin.getBotChannels(bot.id)
@@ -802,8 +826,34 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
     }
   }
 
+  async function handleStatusChange(status: 'active' | 'rejected') {
+    setStatusLoading(true);
+    try {
+      await orgAdmin.updateBotStatus(bot.id, status);
+      onStatusChanged(status);
+      showToast(t(status === 'active' ? 'org.bot.approved' : 'org.bot.rejected'));
+    } catch {
+      showToast(t('org.bot.statusError'), 'error');
+    } finally {
+      setStatusLoading(false);
+    }
+  }
+
   return (
     <div className="h-full overflow-auto p-8 max-md:p-4">
+      {confirmReject && (
+        <ConfirmDialog
+          title={t('org.bot.rejectTitle')}
+          message={t('org.bot.rejectMessage', { name: bot.name })}
+          confirmLabel={t('org.bot.reject')}
+          danger
+          onConfirm={async () => {
+            setConfirmReject(false);
+            handleStatusChange('rejected');
+          }}
+          onCancel={() => setConfirmReject(false)}
+        />
+      )}
       {confirmDelete && (
         <ConfirmDialog
           title={t('org.bot.deleteTitle')}
@@ -836,6 +886,58 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
             </div>
           </div>
         </div>
+
+        {/* Join Status Banner */}
+        {bot.join_status && bot.join_status !== 'active' && (
+          <div className={`rounded-xl p-4 border ${
+            bot.join_status === 'pending'
+              ? 'bg-hxa-amber/10 border-hxa-amber/30'
+              : 'bg-hxa-red/10 border-hxa-red/30'
+          }`}>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className={`text-sm font-semibold ${bot.join_status === 'pending' ? 'text-hxa-amber' : 'text-hxa-red'}`}>
+                  {t(`org.bot.joinStatus.${bot.join_status}`)}
+                </div>
+                <p className="text-xs text-hxa-text-dim mt-1">
+                  {bot.join_status === 'pending' ? t('org.bot.pendingDesc') : t('org.bot.rejectedDesc')}
+                </p>
+                {bot.join_status_reason && (
+                  <p className="text-xs text-hxa-text-dim mt-1">{t('org.bot.reason')}: {bot.join_status_reason}</p>
+                )}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {bot.join_status === 'pending' && (
+                  <>
+                    <button
+                      onClick={() => handleStatusChange('active')}
+                      disabled={statusLoading}
+                      className="px-4 py-2 text-sm font-medium bg-hxa-green/20 text-hxa-green rounded-lg hover:bg-hxa-green/30 border border-hxa-green/30 disabled:opacity-50"
+                    >
+                      {t('org.bot.approve')}
+                    </button>
+                    <button
+                      onClick={() => setConfirmReject(true)}
+                      disabled={statusLoading}
+                      className="px-4 py-2 text-sm font-medium bg-hxa-red/20 text-hxa-red rounded-lg hover:bg-hxa-red/30 border border-hxa-red/30 disabled:opacity-50"
+                    >
+                      {t('org.bot.reject')}
+                    </button>
+                  </>
+                )}
+                {bot.join_status === 'rejected' && (
+                  <button
+                    onClick={() => handleStatusChange('active')}
+                    disabled={statusLoading}
+                    className="px-4 py-2 text-sm font-medium bg-hxa-green/20 text-hxa-green rounded-lg hover:bg-hxa-green/30 border border-hxa-green/30 disabled:opacity-50"
+                  >
+                    {t('org.bot.approve')}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Role */}
         <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
