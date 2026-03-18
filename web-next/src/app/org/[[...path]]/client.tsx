@@ -116,6 +116,39 @@ type View =
   | { type: 'channel'; channelId: string; label: string; botId?: string }
   | { type: 'thread'; thread: OrgThread };
 
+// ─── Hash routing helpers ───
+
+type OrgHashRoute =
+  | { type: 'empty' }
+  | { type: 'bot'; botId: string }
+  | { type: 'thread'; threadId: string }
+  | { type: 'channel'; channelId: string; botId?: string };
+
+function parseOrgHash(): OrgHashRoute {
+  if (typeof window === 'undefined') return { type: 'empty' };
+  const raw = window.location.hash;
+  if (!raw || raw.length <= 1) return { type: 'empty' };
+  const [pathPart, queryPart] = raw.slice(1).split('?');
+  const parts = pathPart.replace(/^\/+/, '').split('/').filter(Boolean);
+  const params = new URLSearchParams(queryPart ?? '');
+  if (parts[0] === 'bots' && parts[1]) return { type: 'bot', botId: parts[1] };
+  if (parts[0] === 'threads' && parts[1]) return { type: 'thread', threadId: parts[1] };
+  if (parts[0] === 'channels' && parts[1]) {
+    return { type: 'channel', channelId: parts[1], botId: params.get('botId') ?? undefined };
+  }
+  return { type: 'empty' };
+}
+
+function viewToHash(view: View): string {
+  if (view.type === 'bot') return `/bots/${view.bot.id}`;
+  if (view.type === 'thread') return `/threads/${view.thread.id}`;
+  if (view.type === 'channel') {
+    const q = view.botId ? `?botId=${encodeURIComponent(view.botId)}` : '';
+    return `/channels/${view.channelId}${q}`;
+  }
+  return '/';
+}
+
 // ─── Main Component ───
 
 export default function OrgDashboard() {
@@ -128,7 +161,11 @@ export default function OrgDashboard() {
   const [loading, setLoading] = useState(true);
 
   // Sidebar state
-  const [sidebarTab, setSidebarTab] = useState<'bots' | 'threads'>('bots');
+  const [sidebarTab, setSidebarTab] = useState<'bots' | 'threads'>(() => {
+    if (typeof window === 'undefined') return 'bots';
+    const r = parseOrgHash();
+    return r.type === 'thread' ? 'threads' : 'bots';
+  });
   const [bots, setBots] = useState<OrgBot[]>([]);
   const [threads, setThreads] = useState<OrgThread[]>([]);
   const [botSearch, setBotSearch] = useState('');
@@ -138,6 +175,7 @@ export default function OrgDashboard() {
 
   // Content view
   const [view, setView] = useState<View>({ type: 'empty' });
+  const pendingHashRef = useRef<OrgHashRoute | null>(null);
 
   // Modals
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -160,6 +198,35 @@ export default function OrgDashboard() {
     if (wsRef.current) wsRef.current.close();
     router.replace('/');
   }, [router]);
+
+  const navigateTo = useCallback((nextView: View) => {
+    setView(nextView);
+    if (nextView.type === 'bot') setSidebarTab('bots');
+    else if (nextView.type === 'thread') setSidebarTab('threads');
+    window.history.pushState(null, '', `#${viewToHash(nextView)}`);
+  }, []);
+
+  const syncFromHash = useCallback(() => {
+    const route = parseOrgHash();
+    if (route.type === 'empty') { setView({ type: 'empty' }); return; }
+    if (route.type === 'bot') {
+      const bot = bots.find(b => b.id === route.botId);
+      if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); }
+      else setView({ type: 'empty' });
+    } else if (route.type === 'thread') {
+      const thread = threads.find(t => t.id === route.threadId);
+      if (thread) { setView({ type: 'thread', thread }); setSidebarTab('threads'); }
+      else setView({ type: 'empty' });
+    } else if (route.type === 'channel') {
+      const ch = channels.find(c => c.id === route.channelId);
+      if (ch) {
+        const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
+        setView({ type: 'channel', channelId: ch.id, label, botId: route.botId });
+      } else {
+        setView({ type: 'empty' });
+      }
+    }
+  }, [bots, threads, channels]);
 
   // Auth check — verify session cookie is org_admin
   useEffect(() => {
@@ -342,6 +409,46 @@ export default function OrgDashboard() {
     return () => clearTimeout(timer);
   }, [threadSearch, threadStatus, authenticated]);
 
+  // Initialize pending hash and register browser navigation listeners
+  useEffect(() => {
+    const r = parseOrgHash();
+    if (r.type !== 'empty') pendingHashRef.current = r;
+    window.addEventListener('popstate', syncFromHash);
+    window.addEventListener('hashchange', syncFromHash);
+    return () => {
+      window.removeEventListener('popstate', syncFromHash);
+      window.removeEventListener('hashchange', syncFromHash);
+    };
+  }, [syncFromHash]);
+
+  // Restore bot view from initial hash after bots are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'bot' || bots.length === 0) return;
+    const bot = bots.find(b => b.id === route.botId);
+    if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); pendingHashRef.current = null; }
+  }, [bots]);
+
+  // Restore thread view from initial hash after threads are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'thread' || threads.length === 0) return;
+    const thread = threads.find(t => t.id === route.threadId);
+    if (thread) { setView({ type: 'thread', thread }); setSidebarTab('threads'); pendingHashRef.current = null; }
+  }, [threads]);
+
+  // Restore channel view from initial hash after channels are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'channel' || channels.length === 0) return;
+    const ch = channels.find(c => c.id === route.channelId);
+    if (ch) {
+      const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
+      setView({ type: 'channel', channelId: ch.id, label, botId: route.botId });
+      pendingHashRef.current = null;
+    }
+  }, [channels]);
+
   async function handleLogout() {
     await api.logout();
     if (wsRef.current) wsRef.current.close();
@@ -381,7 +488,7 @@ export default function OrgDashboard() {
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="md:hidden text-hxa-text-dim hover:text-hxa-text p-1">
             <Menu size={20} />
           </button>
-          <button onClick={() => setView({ type: 'empty' })} className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+          <button onClick={() => navigateTo({ type: 'empty' })} className="flex items-center gap-2 hover:opacity-80 transition-opacity">
             <img src={`${BASE_PATH}/images/logo.png`} alt="HXA-Connect" className="h-5" />
             <span className="font-semibold text-[15px] max-md:max-w-[100px] max-md:truncate">{orgName || 'Organization'}</span>
           </button>
@@ -469,7 +576,7 @@ export default function OrgDashboard() {
                   return (
                     <button
                       key={bot.id}
-                      onClick={() => { setView({ type: 'bot', bot }); setSidebarOpen(false); }}
+                      onClick={() => { navigateTo({ type: 'bot', bot }); setSidebarOpen(false); }}
                       className={`w-full text-left px-3.5 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-all ${
                         isActive ? 'bg-hxa-accent/5 shadow-[inset_4px_0_0_var(--color-hxa-accent)]' : ''
                       }`}
@@ -513,7 +620,7 @@ export default function OrgDashboard() {
                 {threads.map(thread => (
                   <button
                     key={thread.id}
-                    onClick={() => { setView({ type: 'thread', thread }); setSidebarOpen(false); }}
+                    onClick={() => { navigateTo({ type: 'thread', thread }); setSidebarOpen(false); }}
                     className={`w-full text-left px-3 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-colors ${
                       view.type === 'thread' && view.thread.id === thread.id ? 'bg-hxa-bg-hover' : ''
                     }`}
@@ -560,7 +667,7 @@ export default function OrgDashboard() {
                     <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.activeBots')}</h3>
                     <div className="space-y-2">
                       {sortedBots.slice(0, 5).map(bot => (
-                        <button key={bot.id} onClick={() => setView({ type: 'bot', bot })}
+                        <button key={bot.id} onClick={() => navigateTo({ type: 'bot', bot })}
                           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-hxa-bg-hover transition-colors text-left text-sm">
                           <Circle size={7} className={bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'} />
                           <span className="truncate flex-1">{bot.name}</span>
@@ -575,7 +682,7 @@ export default function OrgDashboard() {
                     <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-3">{t('org.recentThreads')}</h3>
                     <div className="space-y-2">
                       {threads.slice(0, 5).map(thread => (
-                        <button key={thread.id} onClick={() => setView({ type: 'thread', thread })}
+                        <button key={thread.id} onClick={() => navigateTo({ type: 'thread', thread })}
                           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-hxa-bg-hover transition-colors text-left text-sm">
                           <span className="truncate flex-1">{thread.topic}</span>
                           <StatusBadge status={thread.status} />
@@ -591,7 +698,7 @@ export default function OrgDashboard() {
                       {channels.slice(0, 5).map(ch => {
                         const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
                         return (
-                          <button key={ch.id} onClick={() => setView({ type: 'channel', channelId: ch.id, label })}
+                          <button key={ch.id} onClick={() => navigateTo({ type: 'channel', channelId: ch.id, label })}
                             className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-hxa-bg-hover transition-colors text-left text-sm">
                             <span className="truncate flex-1 text-hxa-accent">{label}</span>
                             {ch.last_activity_at && <span className="text-[10px] text-hxa-text-dim">{timeAgo(ch.last_activity_at)}</span>}
@@ -607,10 +714,10 @@ export default function OrgDashboard() {
           )}
           {view.type === 'bot' && (
             <BotProfileView bot={view.bot} showToast={showToast}
-              onViewChannel={(channelId, label) => setView({ type: 'channel', channelId, label, botId: view.bot.id })}
+              onViewChannel={(channelId, label) => navigateTo({ type: 'channel', channelId, label, botId: view.bot.id })}
               onDeleted={() => {
                 setBots(prev => prev.filter(b => b.id !== view.bot.id));
-                setView({ type: 'empty' });
+                navigateTo({ type: 'empty' });
               }}
               onRoleChanged={(role) => {
                 setBots(prev => prev.map(b => b.id === view.bot.id ? { ...b, auth_role: role } : b));
@@ -622,10 +729,9 @@ export default function OrgDashboard() {
               onBack={() => {
                 if (view.botId) {
                   const bot = bots.find(b => b.id === view.botId);
-                  if (bot) setView({ type: 'bot', bot });
-                  else setView({ type: 'empty' });
+                  navigateTo(bot ? { type: 'bot', bot } : { type: 'empty' });
                 } else {
-                  setView({ type: 'empty' });
+                  navigateTo({ type: 'empty' });
                 }
               }}
             />
