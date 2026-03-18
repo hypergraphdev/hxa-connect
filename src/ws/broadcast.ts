@@ -159,15 +159,20 @@ export async function notifyAdminsOfJoinRequest(
     org_id: orgId,
   };
 
-  // Plan C: Send WS event to admin clients only
+  // Fetch admin bot list (used for both WS and webhook delivery)
+  const allBots = await db.listBots(orgId);
+  const adminBotIds = new Set(
+    allBots.filter(b => b.auth_role === 'admin' && b.join_status === 'active').map(b => b.id),
+  );
+
+  // Plan C: Send WS event to org admin sessions AND admin bot connections
   for (const client of clients) {
     if (client.orgId !== orgId) continue;
-    if (!client.isOrgAdmin) continue;
+    if (!client.isOrgAdmin && !(client.botId && adminBotIds.has(client.botId))) continue;
     sendToClient(client, event);
   }
 
   // Plan B: Fire webhooks to admin bots with webhook_url
-  const allBots = await db.listBots(orgId);
   const adminBots = allBots.filter(
     b => b.auth_role === 'admin' && b.join_status === 'active' && b.webhook_url,
   );
