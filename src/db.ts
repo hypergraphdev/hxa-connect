@@ -467,6 +467,12 @@ export class HubDB {
         ALTER TABLE orgs ADD COLUMN join_approval_required INTEGER NOT NULL DEFAULT 0;
       `);
     });
+
+    await this.runMigration('ticket_skip_approval', async () => {
+      await this.driver.exec(`
+        ALTER TABLE org_tickets ADD COLUMN skip_approval INTEGER NOT NULL DEFAULT 0;
+      `);
+    });
   }
 
   /**
@@ -759,6 +765,7 @@ export class HubDB {
       ...row,
       code: row.code ?? null,
       reusable: !!row.reusable,
+      skip_approval: !!row.skip_approval,
       consumed: !!row.consumed,
       created_by: row.created_by ?? null,
     };
@@ -766,6 +773,7 @@ export class HubDB {
 
   async createOrgTicket(orgId: string, secretHash: string, options: {
     reusable?: boolean;
+    skipApproval?: boolean;
     expiresAt: number;
     createdBy?: string;
   }): Promise<OrgTicket> {
@@ -775,14 +783,15 @@ export class HubDB {
       secret_hash: secretHash,
       code: `tkt_${crypto.randomBytes(8).toString('hex')}`,
       reusable: options.reusable ?? false,
+      skip_approval: options.skipApproval ?? false,
       expires_at: options.expiresAt,
       consumed: false,
       created_by: options.createdBy ?? null,
       created_at: Date.now(),
     };
     await this.driver.run(
-      'INSERT INTO org_tickets (id, org_id, secret_hash, code, reusable, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [ticket.id, ticket.org_id, ticket.secret_hash, ticket.code, ticket.reusable ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at],
+      'INSERT INTO org_tickets (id, org_id, secret_hash, code, reusable, skip_approval, expires_at, consumed, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ticket.id, ticket.org_id, ticket.secret_hash, ticket.code, ticket.reusable ? 1 : 0, ticket.skip_approval ? 1 : 0, ticket.expires_at, 0, ticket.created_by, ticket.created_at],
     );
     return ticket;
   }

@@ -1586,10 +1586,11 @@ function TicketModal({ orgId, orgName, onClose }: {
 }) {
   const { t } = useTranslations();
   const [reusable, setReusable] = useState(false);
+  const [skipApproval, setSkipApproval] = useState(false);
   const [expiresIn, setExpiresIn] = useState('86400');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ ticket: string; reusable: boolean; expiresIn: number } | null>(null);
+  const [result, setResult] = useState<{ ticket: string; reusable: boolean; skipApproval: boolean; expiresIn: number } | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function handleCreate() {
@@ -1599,9 +1600,10 @@ function TicketModal({ orgId, orgName, onClose }: {
       const expVal = parseInt(expiresIn);
       const data = await orgAdmin.createTicket({
         reusable,
+        skip_approval: skipApproval,
         expires_in: expVal,
       });
-      setResult({ ticket: data.ticket, reusable, expiresIn: expVal });
+      setResult({ ticket: data.ticket, reusable, skipApproval, expiresIn: expVal });
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : 'Failed');
     } finally {
@@ -1612,6 +1614,7 @@ function TicketModal({ orgId, orgName, onClose }: {
   function resetForm() {
     setResult(null);
     setReusable(false);
+    setSkipApproval(false);
     setExpiresIn('86400');
     setError('');
     setCopied(false);
@@ -1660,6 +1663,13 @@ function TicketModal({ orgId, orgName, onClose }: {
               </label>
               <p className="text-xs text-hxa-text-dim mt-1 leading-snug">{t('org.ticket.reusableDesc')}</p>
             </div>
+            <div className="mb-4">
+              <label className="inline-flex items-center gap-2 cursor-pointer font-semibold text-hxa-text">
+                <input type="checkbox" checked={skipApproval} onChange={e => setSkipApproval(e.target.checked)} className="w-4 h-4 accent-hxa-accent cursor-pointer" />
+                <span>{t('org.ticket.skipApproval')}</span>
+              </label>
+              <p className="text-xs text-hxa-text-dim mt-1 leading-snug">{t('org.ticket.skipApprovalDesc')}</p>
+            </div>
             {error && <p className="text-hxa-red text-sm mb-3">{error}</p>}
             <div className="flex gap-3 justify-center mt-5">
               <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
@@ -1692,6 +1702,7 @@ function TicketModal({ orgId, orgName, onClose }: {
                   </div>
                   <div className="flex justify-center gap-4 mt-2.5 text-xs text-hxa-text-dim">
                     <span>{result.reusable ? t('org.ticket.reusableLabel') : t('org.ticket.singleUse')}</span>
+                    <span>{result.skipApproval ? t('org.ticket.skipApprovalLabel') : t('org.ticket.requiresApprovalLabel')}</span>
                     <span>{result.expiresIn === 0 ? t('org.ticket.noExpiry') : t('org.ticket.expiresInLabel', { time: formatExpiry(result.expiresIn) })}</span>
                   </div>
                   <p className="text-xs text-hxa-text-dim mt-3 leading-snug">

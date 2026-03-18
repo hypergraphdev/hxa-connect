@@ -306,8 +306,8 @@ export const orgAdmin = {
       body: JSON.stringify({ to, content }),
     }),
 
-  createTicket: (params?: { reusable?: boolean; expires_in?: number }) =>
-    orgRequest<{ ticket: string; expires_at: number; reusable: boolean }>('/api/org/tickets', {
+  createTicket: (params?: { reusable?: boolean; skip_approval?: boolean; expires_in?: number }) =>
+    orgRequest<{ ticket: string; expires_at: number; reusable: boolean; skip_approval: boolean }>('/api/org/tickets', {
       method: 'POST',
       body: JSON.stringify(params ?? {}),
     }),

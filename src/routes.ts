@@ -1173,9 +1173,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         return;
       }
 
-      // #133: Determine join_status based on org's approval setting
+      // #133: Determine join_status based on org's approval setting and ticket's skip_approval flag
       const joinApprovalRequired = await db.getOrgJoinApproval(org_id);
-      const joinStatus: 'pending' | 'active' = joinApprovalRequired ? 'pending' : 'active';
+      const joinStatus: 'pending' | 'active' = (joinApprovalRequired && !ticket.skip_approval) ? 'pending' : 'active';
 
       // #178: Atomically consume ticket + insert bot to prevent TOCTOU race condition.
       // Guarantees: either (bot created + ticket consumed) or (nothing changed).
@@ -3846,13 +3846,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   /**
    * POST /api/org/tickets — Create an org ticket (org admin or admin bot)
    * Auth: Org ticket (org_secret login) or Bot token (admin role)
-   * Body: { reusable?: boolean, expires_in?: number }
-   * Returns: { ticket, expires_at, reusable }
+   * Body: { reusable?: boolean, expires_in?: number, skip_approval?: boolean }
+   * Returns: { ticket, expires_at, reusable, skip_approval }
    */
   auth.post('/api/org/tickets', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
 
-    const { reusable, expires_in } = req.body;
+    const { reusable, expires_in, skip_approval } = req.body;
 
     const orgId = req.session?.org_id || req.bot?.org_id || req.org?.id;
     const org = orgId ? await db.getOrgById(orgId) : undefined;
@@ -3872,8 +3872,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const secretHash = org.org_secret;
 
     const isReusable = reusable === true;
+    const isSkipApproval = skip_approval === true;
     const ticket = await db.createOrgTicket(orgId!, secretHash, {
       reusable: isReusable,
+      skipApproval: isSkipApproval,
       expiresAt,
       createdBy: req.bot?.id,
     });
@@ -3882,6 +3884,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       ticket: ticket.code ?? ticket.id,
       expires_at: ticket.expires_at,
       reusable: ticket.reusable,
+      skip_approval: ticket.skip_approval,
     };
     res.json(ticketResponse);
   });
@@ -3908,6 +3911,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       id: t.id,
       code: t.code,
       reusable: t.reusable,
+      skip_approval: t.skip_approval,
       expires_at: t.expires_at,
       created_by: t.created_by,
       created_at: t.created_at,
