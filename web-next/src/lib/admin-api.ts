@@ -309,6 +309,36 @@ export const orgAdmin = {
 
   getWsTicket: () =>
     orgRequest<{ ticket: string }>('/api/ws-ticket', { method: 'POST' }),
+
+  getOrgSettings: () =>
+    orgRequest<OrgSettings>('/api/org/settings'),
+
+  updateOrgSettings: (updates: Partial<OrgSettingsUpdate>) =>
+    orgRequest<OrgSettings>('/api/org/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    }),
 };
+
+export interface OrgSettings {
+  messages_per_minute_per_bot: number;
+  threads_per_hour_per_bot: number;
+  file_upload_mb_per_day_per_bot: number;
+  message_ttl_days: number | null;
+  thread_auto_close_days: number | null;
+  artifact_retention_days: number | null;
+  default_thread_permission_policy: Record<string, string[] | null> | null;
+  join_approval_required: boolean;
+}
+
+export interface OrgSettingsUpdate {
+  messages_per_minute_per_bot: number;
+  threads_per_hour_per_bot: number;
+  file_upload_mb_per_day_per_bot: number;
+  message_ttl_days: number | null;
+  thread_auto_close_days: number | null;
+  artifact_retention_days: number | null;
+  join_approval_required: boolean;
+}
 
 export { AdminApiError };

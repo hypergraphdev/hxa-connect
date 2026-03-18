@@ -5,12 +5,12 @@ import { useRouter } from 'next/navigation';
 import {
   Building2, Bot, MessageSquare, Search, LogOut, KeyRound,
   RotateCw, Plus, Trash2, Copy, X, ArrowLeft, Shield, Users,
-  Circle, ChevronDown, FileCode, Menu,
+  Circle, ChevronDown, FileCode, Menu, Settings,
 } from 'lucide-react';
 import {
   orgAdmin, type OrgBot, type OrgThread, type OrgChannel,
   type OrgThreadMessage, type OrgChannelMessage, type OrgArtifact,
-  AdminApiError,
+  type OrgSettings, AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
 import { THREAD_STATUS_OPTIONS, parseParts } from '@/lib/utils';
@@ -114,7 +114,8 @@ type View =
   | { type: 'empty' }
   | { type: 'bot'; bot: OrgBot }
   | { type: 'channel'; channelId: string; label: string; botId?: string }
-  | { type: 'thread'; thread: OrgThread };
+  | { type: 'thread'; thread: OrgThread }
+  | { type: 'settings' };
 
 // ─── Hash routing helpers ───
 
@@ -122,7 +123,8 @@ type OrgHashRoute =
   | { type: 'empty' }
   | { type: 'bot'; botId: string }
   | { type: 'thread'; threadId: string }
-  | { type: 'channel'; channelId: string; botId?: string };
+  | { type: 'channel'; channelId: string; botId?: string }
+  | { type: 'settings' };
 
 function parseOrgHash(): OrgHashRoute {
   if (typeof window === 'undefined') return { type: 'empty' };
@@ -131,6 +133,7 @@ function parseOrgHash(): OrgHashRoute {
   const [pathPart, queryPart] = raw.slice(1).split('?');
   const parts = pathPart.replace(/^\/+/, '').split('/').filter(Boolean);
   const params = new URLSearchParams(queryPart ?? '');
+  if (parts[0] === 'settings') return { type: 'settings' };
   if (parts[0] === 'bots' && parts[1]) return { type: 'bot', botId: parts[1] };
   if (parts[0] === 'threads' && parts[1]) return { type: 'thread', threadId: parts[1] };
   if (parts[0] === 'channels' && parts[1]) {
@@ -140,6 +143,7 @@ function parseOrgHash(): OrgHashRoute {
 }
 
 function viewToHash(view: View): string {
+  if (view.type === 'settings') return '/settings';
   if (view.type === 'bot') return `/bots/${view.bot.id}`;
   if (view.type === 'thread') return `/threads/${view.thread.id}`;
   if (view.type === 'channel') {
@@ -209,6 +213,7 @@ export default function OrgDashboard() {
   const syncFromHash = useCallback(() => {
     const route = parseOrgHash();
     if (route.type === 'empty') { setView({ type: 'empty' }); return; }
+    if (route.type === 'settings') { setView({ type: 'settings' }); return; }
     if (route.type === 'bot') {
       const bot = bots.find(b => b.id === route.botId);
       if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); }
@@ -449,6 +454,14 @@ export default function OrgDashboard() {
     }
   }, [channels]);
 
+  // Restore settings view from initial hash (no data dependencies)
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'settings' || !authenticated) return;
+    setView({ type: 'settings' });
+    pendingHashRef.current = null;
+  }, [authenticated]);
+
   async function handleLogout() {
     await api.logout();
     if (wsRef.current) wsRef.current.close();
@@ -495,6 +508,11 @@ export default function OrgDashboard() {
           <div className="flex-1" />
           <button onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-accent/10 text-hxa-accent rounded-lg hover:bg-hxa-accent/20 border border-hxa-accent/30 transition-colors max-md:px-2 max-md:gap-0">
             <Plus size={14} /> <span className="hidden sm:inline">{t('org.inviteBot')}</span>
+          </button>
+          <button onClick={() => navigateTo({ type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
+            view.type === 'settings' ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40' : 'bg-white/[0.04] text-hxa-text-dim border-hxa-border hover:bg-white/[0.08] hover:text-hxa-text'
+          }`}>
+            <Settings size={14} /> <span className="hidden sm:inline">{t('org.settings')}</span>
           </button>
           <button onClick={() => setConfirm({
             title: t('org.rotateSecret.title'),
@@ -744,6 +762,9 @@ export default function OrgDashboard() {
               }}
               wsRef={wsRef}
             />
+          )}
+          {view.type === 'settings' && (
+            <OrgSettingsView showToast={showToast} />
           )}
         </main>
       </div>
@@ -1240,6 +1261,216 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
       )}
 
       {lightboxSrc2 && <ImageLightbox src={lightboxSrc2} onClose={() => setLightboxSrc2(null)} />}
+    </div>
+  );
+}
+
+// ─── Org Settings View ───
+
+function OrgSettingsView({ showToast }: {
+  showToast: (msg: string, type?: 'success' | 'error') => void;
+}) {
+  const { t } = useTranslations();
+  const [settings, setSettings] = useState<OrgSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    orgAdmin.getOrgSettings()
+      .then(s => setSettings(s))
+      .catch(() => showToast(t('org.settings.loadError'), 'error'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function updateSetting(key: string, value: unknown) {
+    if (saving) return; // serialize: one save at a time to prevent server-side TOCTOU
+    setSaving(key);
+    try {
+      const updated = await orgAdmin.updateOrgSettings({ [key]: value });
+      setSettings(updated);
+      showToast(t('org.settings.saved'));
+    } catch {
+      showToast(t('org.settings.saveError'), 'error');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 rounded-full border-3 border-hxa-accent/20 border-t-hxa-accent animate-spin" />
+      </div>
+    );
+  }
+
+  if (!settings) {
+    return (
+      <div className="h-full flex items-center justify-center text-hxa-text-dim text-sm">
+        {t('org.settings.loadError')}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-auto p-8 max-md:p-4">
+      <div className="max-w-[680px] mx-auto space-y-6">
+        <div className="flex items-center gap-3 mb-2">
+          <Settings size={24} className="text-hxa-accent" />
+          <h2 className="text-xl font-bold">{t('org.settings')}</h2>
+        </div>
+
+        {/* Bot Join Approval */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.botJoin')}</h3>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <div className="text-sm font-medium">{t('org.settings.joinApproval')}</div>
+              <p className="text-xs text-hxa-text-dim mt-1 leading-relaxed">{t('org.settings.joinApprovalDesc')}</p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.join_approval_required}
+              aria-label={t('org.settings.joinApproval')}
+              onClick={() => updateSetting('join_approval_required', !settings.join_approval_required)}
+              disabled={saving !== null}
+              className={`relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0 ${
+                settings.join_approval_required ? 'bg-hxa-accent' : 'bg-white/10'
+              } ${saving !== null ? 'opacity-50' : 'cursor-pointer'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
+                settings.join_approval_required ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Rate Limits */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.rateLimits')}</h3>
+          <div className="space-y-4">
+            <SettingsNumberField
+              label={t('org.settings.msgPerMin')}
+              value={settings.messages_per_minute_per_bot}
+              onSave={(v) => updateSetting('messages_per_minute_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.threadsPerHour')}
+              value={settings.threads_per_hour_per_bot}
+              onSave={(v) => updateSetting('threads_per_hour_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.uploadMbPerDay')}
+              value={settings.file_upload_mb_per_day_per_bot}
+              onSave={(v) => updateSetting('file_upload_mb_per_day_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+          </div>
+        </div>
+
+        {/* Retention */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.retention')}</h3>
+          <div className="space-y-4">
+            <SettingsNumberField
+              label={t('org.settings.msgTtl')}
+              value={settings.message_ttl_days}
+              onSave={(v) => updateSetting('message_ttl_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.threadAutoClose')}
+              value={settings.thread_auto_close_days}
+              onSave={(v) => updateSetting('thread_auto_close_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.artifactRetention')}
+              value={settings.artifact_retention_days}
+              onSave={(v) => updateSetting('artifact_retention_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsNumberField({ label, value, onSave, saving, nullable, min }: {
+  label: string;
+  value: number | null;
+  onSave: (v: number | null) => void;
+  saving: boolean;
+  nullable?: boolean;
+  min?: number;
+}) {
+  const { t } = useTranslations();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value === null ? '' : String(value));
+  const [invalid, setInvalid] = useState(false);
+
+  function handleSave() {
+    if (nullable && draft.trim() === '') {
+      setInvalid(false);
+      onSave(null);
+      setEditing(false);
+      return;
+    }
+    const num = parseInt(draft, 10);
+    if (isNaN(num) || (min !== undefined && num < min)) {
+      setInvalid(true);
+      setTimeout(() => setInvalid(false), 600);
+      return;
+    }
+    setInvalid(false);
+    onSave(num);
+    setEditing(false);
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-sm">{label}</span>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            value={draft}
+            onChange={e => { setDraft(e.target.value); setInvalid(false); }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') { setInvalid(false); setEditing(false); } }}
+            min={min}
+            placeholder={nullable ? t('org.settings.nullHint') : undefined}
+            className={`w-24 bg-black/30 border rounded-lg px-3 py-1.5 text-sm outline-none text-right font-mono transition-colors ${
+              invalid ? 'border-hxa-red text-hxa-red' : 'border-hxa-border focus:border-hxa-accent'
+            }`}
+            autoFocus
+          />
+          <button onClick={handleSave} disabled={saving} className="text-xs text-hxa-accent hover:underline">
+            {t('org.settings.save')}
+          </button>
+          <button onClick={() => { setInvalid(false); setEditing(false); }} className="text-xs text-hxa-text-dim hover:underline">
+            {t('org.confirm.cancel')}
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => { setDraft(value === null ? '' : String(value)); setEditing(true); }}
+          className="font-mono text-sm text-hxa-accent hover:underline"
+        >
+          {value === null ? t('org.settings.unlimited') : value}
+        </button>
+      )}
     </div>
   );
 }
