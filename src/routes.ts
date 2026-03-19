@@ -9,7 +9,7 @@ import { HubDB, encodeCursor } from './db.js';
 import type { HubWS } from './ws.js';
 import { authMiddleware, requireBot, requireScope, requireAuthRole } from './auth.js';
 import { validateWebhookUrl } from './webhook.js';
-import { validateParts, VALID_TOKEN_SCOPES, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy, type SessionRole, type RegisterResponse, type OrgTicketResponse } from './types.js';
+import { validateParts, VALID_TOKEN_SCOPES, PERMISSION_POLICY_KEYS, type HubConfig, type Bot, type BotProfileInput, type Thread, type ThreadStatus, type CloseReason, type ArtifactType, type MessagePart, type Message, type ThreadMessage, type MentionRef, type WireMessage, type WireThreadMessage, type CatchupResponse, type CatchupCountResponse, type OrgSettings, type TokenScope, type ThreadPermissionPolicy, type ThreadVisibility, type ThreadJoinPolicy, type SessionRole, type RegisterResponse, type OrgTicketResponse } from './types.js';
 import { issueWsTicket } from './ws-tickets.js';
 import { routeLogger } from './logger.js';
 import type { SessionStore } from './session.js';
@@ -365,8 +365,20 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     // Cross-org isolation: verify the thread belongs to the bot's org
     if (req.bot && thread.org_id !== req.bot.org_id) {
-      res.status(403).json({ error: 'Thread not in your org', code: 'FORBIDDEN' });
+      // Return 404 to prevent cross-org thread existence disclosure
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return undefined;
+    }
+
+    // Visibility check: for members/private threads, non-participants get 404
+    // Session admins bypass visibility checks (org admin privilege)
+    if (req.bot && thread.visibility !== 'public') {
+      const isParticipant = await db.isParticipant(thread.id, req.bot.id);
+      if (!isParticipant) {
+        // Return 404 to prevent thread existence disclosure (per PRD normative)
+        res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+        return undefined;
+      }
     }
 
     // O9: Check terminal state BEFORE participant membership so that
@@ -2175,7 +2187,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   auth.post('/api/threads', requireBot, requireScope('thread'), async (req, res) => {
     if (!(await checkThreadRateLimit(req, res))) return;
 
-    const { topic, tags, participants, channel_id, context, permission_policy } = req.body;
+    const { topic, tags, participants, channel_id, context, permission_policy, visibility, join_policy } = req.body;
     const orgId = req.bot!.org_id;
 
     if (!topic || typeof topic !== 'string') {
@@ -2251,7 +2263,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         return;
       }
       const policyKeys = Object.keys(permission_policy);
-      const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+      const validPolicyKeys = new Set<string>(PERMISSION_POLICY_KEYS);
       for (const key of policyKeys) {
         if (!validPolicyKeys.has(key)) {
           res.status(400).json({ error: `permission_policy has invalid key: ${key}` });
@@ -2266,6 +2278,26 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       policyJson = JSON.stringify(permission_policy);
     }
 
+    // Validate visibility
+    let resolvedVisibility: ThreadVisibility | undefined;
+    if (visibility !== undefined && visibility !== null) {
+      if (!['public', 'members', 'private'].includes(visibility)) {
+        res.status(400).json({ error: 'visibility must be one of: public, members, private', code: 'VALIDATION_ERROR' });
+        return;
+      }
+      resolvedVisibility = visibility as ThreadVisibility;
+    }
+
+    // Validate join_policy
+    let resolvedJoinPolicy: ThreadJoinPolicy | undefined;
+    if (join_policy !== undefined && join_policy !== null) {
+      if (!['open', 'approval', 'invite_only'].includes(join_policy)) {
+        res.status(400).json({ error: 'join_policy must be one of: open, approval, invite_only', code: 'VALIDATION_ERROR' });
+        return;
+      }
+      resolvedJoinPolicy = join_policy as ThreadJoinPolicy;
+    }
+
     try {
       const thread = await db.createThread(
         orgId,
@@ -2276,6 +2308,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         resolvedChannelId,
         contextJson,
         policyJson,
+        resolvedVisibility,
+        resolvedJoinPolicy,
       );
 
       // Audit (rate limit event already recorded atomically in checkThreadRateLimit)
@@ -2347,8 +2381,12 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       }
       const limit = Math.min(Math.max(parseInt(limitParam || '') || 20, 1), 50);
       const rows = await db.searchThreadsInOrg(req.bot!.org_id, req.bot!.id, { search, status, cursor, limit });
-      const hasMore = rows.length > limit;
-      const items = hasMore ? rows.slice(0, limit) : rows;
+      // Filter out non-visible threads (members/private where bot is not participant)
+      const visibleRows = rows.filter(r =>
+        r.visibility === 'public' || r.is_participant
+      );
+      const hasMore = visibleRows.length > limit;
+      const items = hasMore ? visibleRows.slice(0, limit) : visibleRows;
       const response: Record<string, unknown> = {
         items,
         has_more: hasMore,
@@ -2426,16 +2464,36 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       expectedRevision = parsed;
     }
 
-    const { status: statusInput, close_reason, context, topic, permission_policy: permPolicyInput } = req.body;
-    if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined && permPolicyInput === undefined) {
+    const { status: statusInput, close_reason, context, topic, permission_policy: permPolicyInput, visibility: visInput, join_policy: jpInput } = req.body;
+    if (statusInput === undefined && context === undefined && close_reason === undefined && topic === undefined && permPolicyInput === undefined && visInput === undefined && jpInput === undefined) {
       res.status(400).json({ error: 'No updatable fields provided', code: 'VALIDATION_ERROR' });
       return;
     }
 
-    // Only the thread initiator or a participating admin bot can change permission_policy
-    if (permPolicyInput !== undefined && thread.initiator_id !== req.bot!.id && req.bot!.auth_role !== 'admin') {
-      res.status(403).json({ error: 'Only the thread initiator or a participating admin bot can change permission_policy', code: 'FORBIDDEN' });
-      return;
+    // Settings changes (permission_policy, visibility, join_policy) require manage permission
+    const isSettingsChange = permPolicyInput !== undefined || visInput !== undefined || jpInput !== undefined;
+    if (isSettingsChange) {
+      if (!(await db.checkThreadPermission(thread, req.bot!.id, 'manage'))) {
+        await db.recordAudit(thread.org_id, req.bot!.id, 'thread.permission_denied', 'thread', thread.id, { action: 'manage' });
+        res.status(403).json({ error: 'Permission denied: requires manage permission to change thread settings', code: 'FORBIDDEN' });
+        return;
+      }
+    }
+
+    // Validate visibility
+    if (visInput !== undefined && visInput !== null) {
+      if (!['public', 'members', 'private'].includes(visInput)) {
+        res.status(400).json({ error: 'visibility must be one of: public, members, private', code: 'VALIDATION_ERROR' });
+        return;
+      }
+    }
+
+    // Validate join_policy
+    if (jpInput !== undefined && jpInput !== null) {
+      if (!['open', 'approval', 'invite_only'].includes(jpInput)) {
+        res.status(400).json({ error: 'join_policy must be one of: open, approval, invite_only', code: 'VALIDATION_ERROR' });
+        return;
+      }
     }
 
     // Validate permission_policy if provided
@@ -2444,7 +2502,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       if (permPolicyInput === null) {
         permPolicyJson = null;
       } else if (typeof permPolicyInput === 'object') {
-        const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+        const validPolicyKeys = new Set<string>(PERMISSION_POLICY_KEYS);
         for (const key of Object.keys(permPolicyInput)) {
           if (!validPolicyKeys.has(key)) {
             res.status(400).json({ error: `permission_policy has invalid key: ${key}` });
@@ -2603,6 +2661,44 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         }
         changes.push('permission_policy');
       }
+
+      // Visibility and join_policy changes
+      if (visInput !== undefined || jpInput !== undefined) {
+        let newVisibility = (visInput ?? updated!.visibility) as ThreadVisibility;
+        let newJoinPolicy = (jpInput ?? updated!.join_policy) as ThreadJoinPolicy;
+
+        // Enforce: private forces invite_only
+        if (newVisibility === 'private') {
+          newJoinPolicy = 'invite_only';
+        }
+
+        const oldVisibility = updated!.visibility;
+        const oldJoinPolicy = updated!.join_policy;
+
+        updated = await db.updateThreadVisibility(thread.id, newVisibility, newJoinPolicy);
+        if (!updated) {
+          res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+          return;
+        }
+
+        if (oldVisibility !== newVisibility) {
+          changes.push('visibility');
+          await db.recordAudit(thread.org_id, req.bot!.id, 'thread.visibility_changed', 'thread', thread.id, {
+            from: oldVisibility, to: newVisibility,
+          });
+        }
+        if (oldJoinPolicy !== newJoinPolicy) {
+          changes.push('join_policy');
+          await db.recordAudit(thread.org_id, req.bot!.id, 'thread.join_policy_changed', 'thread', thread.id, {
+            from: oldJoinPolicy, to: newJoinPolicy,
+          });
+        }
+
+        // Downgrading visibility: auto-reject pending join requests
+        if ((newVisibility === 'private' || newJoinPolicy === 'invite_only') && oldJoinPolicy !== 'invite_only') {
+          await db.rejectPendingJoinRequests(thread.id, req.bot!.id);
+        }
+      }
     } catch (error: any) {
       if (error.message === 'REVISION_CONFLICT') {
         res.status(409).json({ error: 'Conflict: thread was modified concurrently', code: 'REVISION_CONFLICT' });
@@ -2624,7 +2720,11 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
   /**
    * POST /api/threads/:id/join — Self-join a thread (same org)
-   * No body required. Any bot in the same org can join.
+   * Respects visibility and join_policy:
+   * - private/members: non-participants get 404
+   * - join_policy=open: direct join (existing behavior)
+   * - join_policy=approval: returns 202 Accepted with pending request
+   * - join_policy=invite_only: returns 403
    */
   auth.post('/api/threads/:id/join', requireBot, requireScope('thread'), async (req, res) => {
     const threadId = req.params.id as string;
@@ -2634,9 +2734,15 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    // Cross-org isolation
+    // Cross-org isolation — return 404 to prevent existence disclosure
     if (thread.org_id !== req.bot!.org_id) {
-      res.status(403).json({ error: 'Thread not in your org', code: 'FORBIDDEN' });
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Visibility check: private threads are invisible to non-participants
+    if (thread.visibility === 'private' && !await db.isParticipant(thread.id, req.bot!.id)) {
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
       return;
     }
 
@@ -2652,10 +2758,44 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
+    // Check join_policy
+    if (thread.join_policy === 'invite_only') {
+      res.status(403).json({ error: 'This thread is invite-only', code: 'INVITE_ONLY' });
+      return;
+    }
+
+    if (thread.join_policy === 'approval') {
+      // Check if there's already a pending request
+      const existing = await db.getPendingJoinRequest(thread.id, req.bot!.id);
+      if (existing) {
+        res.status(409).json({ error: 'Join request already pending', code: 'ALREADY_REQUESTED', request_id: existing.id });
+        return;
+      }
+
+      try {
+        const joinReq = await db.createJoinRequest(thread.id, req.bot!.id);
+        await db.recordAudit(thread.org_id, req.bot!.id, 'thread.join_requested', 'thread', thread.id);
+
+        // Notify participants with manage/invite permission
+        void ws.broadcastThreadEvent(thread.org_id, thread.id, {
+          type: 'thread_join_request',
+          thread_id: thread.id,
+          request_id: joinReq.id,
+          bot_id: req.bot!.id,
+          bot_name: req.bot!.name,
+        }).catch(err => routeLogger.error({ err }, 'broadcast thread_join_request failed'));
+
+        res.status(202).json({ status: 'pending', request_id: joinReq.id });
+      } catch (error: any) {
+        res.status(409).json({ error: error.message || 'Failed to request join', code: 'JOIN_FAILED' });
+      }
+      return;
+    }
+
+    // join_policy = open — direct join (existing behavior)
     try {
       const participant = await db.addParticipant(thread.id, req.bot!.id);
 
-      // Broadcast join event (fire-and-forget)
       void ws.broadcastThreadEvent(thread.org_id, thread.id, {
         type: 'thread_participant',
         thread_id: thread.id,
@@ -2671,6 +2811,99 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     } catch (error: any) {
       res.status(409).json({ error: error.message || 'Failed to join thread', code: 'JOIN_FAILED' });
     }
+  });
+
+  /**
+   * GET /api/threads/:id/join-requests — List pending join requests
+   */
+  auth.get('/api/threads/:id/join-requests', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    // Requires manage or invite permission
+    const canManage = await db.checkThreadPermission(thread, req.bot!.id, 'manage');
+    const canInvite = await db.checkThreadPermission(thread, req.bot!.id, 'invite');
+    if (!canManage && !canInvite) {
+      res.status(403).json({ error: 'Permission denied: requires manage or invite permission', code: 'FORBIDDEN' });
+      return;
+    }
+
+    const requests = await db.listPendingJoinRequests(thread.id);
+    const enriched = await Promise.all(requests.map(async (r) => {
+      const bot = await db.getBotById(r.bot_id);
+      return { ...r, bot_name: bot?.name };
+    }));
+    res.json(enriched);
+  });
+
+  /**
+   * POST /api/threads/:id/join-requests/:requestId/approve — Approve a join request
+   */
+  auth.post('/api/threads/:id/join-requests/:requestId/approve', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
+    if (!thread) return;
+
+    const canManage = await db.checkThreadPermission(thread, req.bot!.id, 'manage');
+    const canInvite = await db.checkThreadPermission(thread, req.bot!.id, 'invite');
+    if (!canManage && !canInvite) {
+      res.status(403).json({ error: 'Permission denied', code: 'FORBIDDEN' });
+      return;
+    }
+
+    const joinReq = await db.getJoinRequest(req.params.requestId as string);
+    if (!joinReq || joinReq.thread_id !== thread.id || joinReq.status !== 'pending') {
+      res.status(404).json({ error: 'Join request not found or already resolved', code: 'NOT_FOUND' });
+      return;
+    }
+
+    await db.resolveJoinRequest(joinReq.id, 'approved', req.bot!.id);
+    const participant = await db.addParticipant(thread.id, joinReq.bot_id);
+
+    await db.recordAudit(thread.org_id, req.bot!.id, 'thread.join_approved', 'thread', thread.id, {
+      approved_bot: joinReq.bot_id, request_id: joinReq.id,
+    });
+
+    const approvedBot = await db.getBotById(joinReq.bot_id);
+
+    void ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_participant',
+      thread_id: thread.id,
+      bot_id: joinReq.bot_id,
+      bot_name: approvedBot?.name ?? joinReq.bot_id,
+      action: 'joined',
+      by: req.bot!.id,
+    }).catch(err => routeLogger.error({ err }, 'broadcast thread_participant failed'));
+
+    res.json({ status: 'approved', joined_at: participant.joined_at });
+  });
+
+  /**
+   * POST /api/threads/:id/join-requests/:requestId/reject — Reject a join request
+   */
+  auth.post('/api/threads/:id/join-requests/:requestId/reject', requireBot, requireScope('thread'), async (req, res) => {
+    const thread = await requireThreadParticipant(req, res, req.params.id as string);
+    if (!thread) return;
+
+    const canManage = await db.checkThreadPermission(thread, req.bot!.id, 'manage');
+    const canInvite = await db.checkThreadPermission(thread, req.bot!.id, 'invite');
+    if (!canManage && !canInvite) {
+      res.status(403).json({ error: 'Permission denied', code: 'FORBIDDEN' });
+      return;
+    }
+
+    const joinReq = await db.getJoinRequest(req.params.requestId as string);
+    if (!joinReq || joinReq.thread_id !== thread.id || joinReq.status !== 'pending') {
+      res.status(404).json({ error: 'Join request not found or already resolved', code: 'NOT_FOUND' });
+      return;
+    }
+
+    await db.resolveJoinRequest(joinReq.id, 'rejected', req.bot!.id);
+
+    await db.recordAudit(thread.org_id, req.bot!.id, 'thread.join_rejected', 'thread', thread.id, {
+      rejected_bot: joinReq.bot_id, request_id: joinReq.id,
+    });
+
+    res.json({ status: 'rejected' });
   });
 
   /**
@@ -2822,6 +3055,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
+
+    // Check write permission
+    if (!(await db.checkThreadPermission(thread, req.bot!.id, 'write'))) {
+      await db.recordAudit(thread.org_id, req.bot!.id, 'thread.write_denied', 'thread', thread.id);
+      res.status(403).json({ error: 'Permission denied: no write access to this thread', code: 'WRITE_PERMISSION_DENIED' });
+      return;
+    }
 
     const { content, content_type, metadata, parts, reply_to } = req.body;
 
@@ -3013,6 +3253,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
 
+    // Check write permission (artifacts follow write permission)
+    if (!(await db.checkThreadPermission(thread, req.bot!.id, 'write'))) {
+      await db.recordAudit(thread.org_id, req.bot!.id, 'thread.write_denied', 'thread', thread.id);
+      res.status(403).json({ error: 'Permission denied: no write access to this thread', code: 'WRITE_PERMISSION_DENIED' });
+      return;
+    }
+
     const {
       artifact_key,
       type,
@@ -3112,6 +3359,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   auth.patch('/api/threads/:id/artifacts/:key', requireBot, requireScope('thread'), async (req, res) => {
     const thread = await requireThreadParticipant(req, res, req.params.id as string, { rejectTerminal: true });
     if (!thread) return;
+
+    // Check write permission (artifact updates follow write permission)
+    if (!(await db.checkThreadPermission(thread, req.bot!.id, 'write'))) {
+      await db.recordAudit(thread.org_id, req.bot!.id, 'thread.write_denied', 'thread', thread.id);
+      res.status(403).json({ error: 'Permission denied: no write access to this thread', code: 'WRITE_PERMISSION_DENIED' });
+      return;
+    }
 
     const key = req.params.key as string;
     if (!key || !ARTIFACT_KEY_PATTERN.test(key)) {
@@ -3788,7 +4042,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         res.status(400).json({ error: 'default_thread_permission_policy must be an object or null' });
         return;
       }
-      const validPolicyKeys = new Set(['resolve', 'close', 'invite', 'remove']);
+      const validPolicyKeys = new Set<string>(PERMISSION_POLICY_KEYS);
       for (const [key, val] of Object.entries(default_thread_permission_policy)) {
         if (!validPolicyKeys.has(key)) {
           res.status(400).json({ error: `default_thread_permission_policy has invalid key: ${key}` });

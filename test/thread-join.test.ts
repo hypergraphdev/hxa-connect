@@ -160,7 +160,8 @@ describe('Thread Self-Join — Cross-Org Isolation', () => {
     const { status, body } = await api(env.baseUrl, 'POST', `/api/threads/${threadId}/join`, {
       token: botTokenOrg2,
     });
-    expect(status).toBe(403);
-    expect(body.code).toBe('FORBIDDEN');
+    // Returns 404 (not 403) to prevent cross-org thread existence disclosure
+    expect(status).toBe(404);
+    expect(body.code).toBe('NOT_FOUND');
   });
 });

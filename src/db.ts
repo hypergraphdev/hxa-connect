@@ -24,6 +24,9 @@ import type {
   BotToken,
   TokenScope,
   ThreadPermissionPolicy,
+  ThreadVisibility,
+  ThreadJoinPolicy,
+  ThreadJoinRequest,
   OrgTicket,
   PlatformInviteCode,
   AuthRole,
@@ -141,6 +144,10 @@ export class HubDB {
           CHECK(close_reason IS NULL OR close_reason IN ('manual', 'timeout', 'error')),
         revision INTEGER NOT NULL DEFAULT 1,
         permission_policy TEXT,
+        visibility TEXT NOT NULL DEFAULT 'public'
+          CHECK(visibility IN ('public', 'members', 'private')),
+        join_policy TEXT NOT NULL DEFAULT 'open'
+          CHECK(join_policy IN ('open', 'approval', 'invite_only')),
         created_at ${ts} NOT NULL,
         updated_at ${ts} NOT NULL,
         last_activity_at ${ts} NOT NULL,
@@ -153,6 +160,17 @@ export class HubDB {
         label TEXT,
         joined_at ${ts} NOT NULL,
         PRIMARY KEY(thread_id, bot_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS thread_join_requests (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'approved', 'rejected')),
+        requested_at ${ts} NOT NULL,
+        resolved_at ${ts},
+        resolved_by TEXT REFERENCES bots(id) ON DELETE SET NULL
       );
 
       CREATE TABLE IF NOT EXISTS thread_messages (
@@ -190,8 +208,12 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_channels_org ON channels(org_id);
       CREATE INDEX IF NOT EXISTS idx_channel_members_bot ON channel_members(bot_id);
       CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
+      CREATE INDEX IF NOT EXISTS idx_threads_org_visibility ON threads(org_id, visibility);
       CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
       CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_thread ON thread_join_requests(thread_id, status);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_bot ON thread_join_requests(bot_id, status);
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_join_request ON thread_join_requests(thread_id, bot_id) WHERE status = 'pending';
       CREATE INDEX IF NOT EXISTS idx_thread_participants_bot ON thread_participants(bot_id);
       CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
@@ -473,6 +495,50 @@ export class HubDB {
         ALTER TABLE org_tickets ADD COLUMN skip_approval INTEGER NOT NULL DEFAULT 0;
       `);
     });
+
+    await this.runMigration('thread_permissions_v1', async () => {
+      // Dialect-aware timestamp type (PG needs BIGINT for ms timestamps)
+      const tsType = this.driver.dialect === 'postgres' ? 'BIGINT' : 'INTEGER';
+
+      // Add visibility and join_policy columns to existing threads
+      // Use try/catch since new databases already have these columns from CREATE TABLE
+      try {
+        await this.driver.exec(`
+          ALTER TABLE threads ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'
+            CHECK(visibility IN ('public', 'members', 'private'));
+        `);
+      } catch { /* column already exists on new databases */ }
+      try {
+        await this.driver.exec(`
+          ALTER TABLE threads ADD COLUMN join_policy TEXT NOT NULL DEFAULT 'open'
+            CHECK(join_policy IN ('open', 'approval', 'invite_only'));
+        `);
+      } catch { /* column already exists on new databases */ }
+      // Create thread_join_requests table (IF NOT EXISTS handles new databases)
+      await this.driver.exec(`
+        CREATE TABLE IF NOT EXISTS thread_join_requests (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+          bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'approved', 'rejected')),
+          requested_at ${tsType} NOT NULL,
+          resolved_at ${tsType},
+          resolved_by TEXT REFERENCES bots(id) ON DELETE SET NULL
+        );
+      `);
+      await this.driver.exec(`
+        CREATE INDEX IF NOT EXISTS idx_threads_org_visibility ON threads(org_id, visibility);
+        CREATE INDEX IF NOT EXISTS idx_join_requests_thread ON thread_join_requests(thread_id, status);
+        CREATE INDEX IF NOT EXISTS idx_join_requests_bot ON thread_join_requests(bot_id, status);
+      `);
+      // Partial unique index: only one pending request per (thread, bot)
+      try {
+        await this.driver.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_join_request ON thread_join_requests(thread_id, bot_id) WHERE status = 'pending';
+        `);
+      } catch { /* may fail on some DB versions */ }
+    });
   }
 
   /**
@@ -553,6 +619,8 @@ export class HubDB {
       context: row.context ?? null,
       close_reason: row.close_reason ?? null,
       permission_policy: row.permission_policy ?? null,
+      visibility: row.visibility ?? 'public',
+      join_policy: row.join_policy ?? 'open',
       revision: row.revision ?? 1,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -1715,8 +1783,14 @@ export class HubDB {
       }
     }
 
-    // No policy for this action — allow (backward compat)
+    // No policy for this action — handle defaults
     if (!policy || !policy[action] || !Array.isArray(policy[action])) {
+      // SPECIAL: 'manage' defaults to initiator-only when null (safe default)
+      // This prevents accidental permission escalation on existing threads
+      if (action === 'manage') {
+        return thread.initiator_id === botId;
+      }
+      // All other actions: allow (backward compat)
       return true;
     }
 
@@ -1738,6 +1812,138 @@ export class HubDB {
     if (!participant.label) return false;
 
     return allowedLabels.includes(participant.label);
+  }
+
+  /**
+   * Check if a bot can see a thread based on visibility.
+   * Returns true if the bot can see the thread, false otherwise.
+   * Org admins (via session) always see all threads — that check is in routes, not here.
+   */
+  async checkThreadVisibility(thread: Thread, botId: string): Promise<boolean> {
+    if (thread.visibility === 'public') return true;
+    // members and private: only participants can see
+    return this.isParticipant(thread.id, botId);
+  }
+
+  // ─── Thread Join Requests ─────────────────────────────────
+
+  async createJoinRequest(threadId: string, botId: string): Promise<ThreadJoinRequest> {
+    const req: ThreadJoinRequest = {
+      id: crypto.randomUUID(),
+      thread_id: threadId,
+      bot_id: botId,
+      status: 'pending',
+      requested_at: Date.now(),
+      resolved_at: null,
+      resolved_by: null,
+    };
+    await this.driver.run(`
+      INSERT INTO thread_join_requests (id, thread_id, bot_id, status, requested_at)
+      VALUES (?, ?, ?, ?, ?)
+    `, [req.id, req.thread_id, req.bot_id, req.status, req.requested_at]);
+    return req;
+  }
+
+  async getJoinRequest(requestId: string): Promise<ThreadJoinRequest | undefined> {
+    return this.driver.get<ThreadJoinRequest>(
+      'SELECT * FROM thread_join_requests WHERE id = ?', [requestId],
+    );
+  }
+
+  async getPendingJoinRequest(threadId: string, botId: string): Promise<ThreadJoinRequest | undefined> {
+    return this.driver.get<ThreadJoinRequest>(
+      'SELECT * FROM thread_join_requests WHERE thread_id = ? AND bot_id = ? AND status = ?',
+      [threadId, botId, 'pending'],
+    );
+  }
+
+  async listPendingJoinRequests(threadId: string, limit = 50, offset = 0): Promise<ThreadJoinRequest[]> {
+    return this.driver.all<ThreadJoinRequest>(
+      'SELECT * FROM thread_join_requests WHERE thread_id = ? AND status = ? ORDER BY requested_at ASC LIMIT ? OFFSET ?',
+      [threadId, 'pending', limit, offset],
+    );
+  }
+
+  async resolveJoinRequest(requestId: string, status: 'approved' | 'rejected', resolvedBy: string): Promise<ThreadJoinRequest | undefined> {
+    const now = Date.now();
+    await this.driver.run(`
+      UPDATE thread_join_requests SET status = ?, resolved_at = ?, resolved_by = ?
+      WHERE id = ? AND status = 'pending'
+    `, [status, now, resolvedBy, requestId]);
+    return this.getJoinRequest(requestId);
+  }
+
+  async updateThreadVisibility(threadId: string, visibility: ThreadVisibility, joinPolicy: ThreadJoinPolicy): Promise<Thread | undefined> {
+    await this.driver.run(`
+      UPDATE threads SET visibility = ?, join_policy = ?, updated_at = ?, revision = revision + 1
+      WHERE id = ?
+    `, [visibility, joinPolicy, Date.now(), threadId]);
+    return this.getThread(threadId);
+  }
+
+  async rejectPendingJoinRequests(threadId: string, resolvedBy: string): Promise<number> {
+    const now = Date.now();
+    const result = await this.driver.run(`
+      UPDATE thread_join_requests SET status = 'rejected', resolved_at = ?, resolved_by = ?
+      WHERE thread_id = ? AND status = 'pending'
+    `, [now, resolvedBy, threadId]);
+    return result.changes;
+  }
+
+  // ─── Audit Log Query ────────────────────────────────────
+
+  async queryAuditLog(
+    orgId: string,
+    filters: {
+      threadId?: string;
+      botId?: string;
+      action?: string;
+      from?: number;
+      to?: number;
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<AuditEntry[]> {
+    const conditions = ['org_id = ?'];
+    const params: unknown[] = [orgId];
+
+    if (filters.threadId) {
+      conditions.push('target_id = ?');
+      params.push(filters.threadId);
+    }
+    if (filters.botId) {
+      conditions.push('bot_id = ?');
+      params.push(filters.botId);
+    }
+    if (filters.action) {
+      conditions.push('action = ?');
+      params.push(filters.action);
+    }
+    if (filters.from) {
+      conditions.push('created_at >= ?');
+      params.push(filters.from);
+    }
+    if (filters.to) {
+      conditions.push('created_at <= ?');
+      params.push(filters.to);
+    }
+
+    const limit = Math.min(filters.limit ?? 50, 200);
+    const offset = filters.offset ?? 0;
+
+    params.push(limit, offset);
+
+    const rows = await this.driver.all<AuditEntry>(`
+      SELECT * FROM audit_log
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `, params);
+
+    return rows.map(row => ({
+      ...row,
+      detail: row.detail ? (typeof row.detail === 'string' ? JSON.parse(row.detail as string) : row.detail) : null,
+    }));
   }
 
   // ─── Channel Operations ──────────────────────────────────
@@ -1928,8 +2134,17 @@ export class HubDB {
     channelId?: string | null,
     context?: string | null,
     permissionPolicy?: string | null,
+    visibility?: ThreadVisibility,
+    joinPolicy?: ThreadJoinPolicy,
   ): Promise<Thread> {
     const uniqueParticipantIds = Array.from(new Set([initiatorId, ...participantIds]));
+
+    // Enforce: private visibility forces invite_only
+    const resolvedVisibility = visibility ?? 'public';
+    let resolvedJoinPolicy = joinPolicy ?? 'open';
+    if (resolvedVisibility === 'private') {
+      resolvedJoinPolicy = 'invite_only';
+    }
 
     const now = Date.now();
     const thread: Thread = {
@@ -1943,6 +2158,8 @@ export class HubDB {
       context: context ?? null,
       close_reason: null,
       permission_policy: permissionPolicy ?? null,
+      visibility: resolvedVisibility,
+      join_policy: resolvedJoinPolicy,
       revision: 1,
       created_at: now,
       updated_at: now,
@@ -1973,8 +2190,8 @@ export class HubDB {
       await txn.run(`
         INSERT INTO threads (
           id, org_id, topic, tags, status, initiator_id, channel_id, context, close_reason,
-          permission_policy, revision, created_at, updated_at, last_activity_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          permission_policy, visibility, join_policy, revision, created_at, updated_at, last_activity_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         thread.id,
         thread.org_id,
@@ -1986,6 +2203,8 @@ export class HubDB {
         thread.context,
         thread.close_reason,
         thread.permission_policy,
+        thread.visibility,
+        thread.join_policy,
         thread.revision,
         thread.created_at,
         thread.updated_at,
