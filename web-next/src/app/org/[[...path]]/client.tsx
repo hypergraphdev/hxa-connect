@@ -19,6 +19,8 @@ import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { PartRenderer } from '@/components/ui/PartRenderer';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { ThreadSettingsPanel } from '@/components/thread/ThreadSettingsPanel';
+import { InviteToThreadDialog } from '@/components/thread/InviteToThreadDialog';
 import { useTranslations } from '@/i18n/context';
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
@@ -781,6 +783,10 @@ export default function OrgDashboard() {
                 setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, status } : t));
                 setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, status } } : prev);
               }}
+              onThreadUpdated={(updates) => {
+                setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, ...updates } : t));
+                setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, ...updates } } : prev);
+              }}
               wsRef={wsRef}
             />
           )}
@@ -1104,10 +1110,11 @@ function ChannelView({ channelId, label, onBack }: {
 
 // ─── Thread View ───
 
-function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
+function ThreadView({ thread, showToast, onStatusChanged, onThreadUpdated, wsRef }: {
   thread: OrgThread;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   onStatusChanged: (status: string) => void;
+  onThreadUpdated: (updates: Partial<OrgThread>) => void;
   wsRef: React.MutableRefObject<WebSocket | null>;
 }) {
   const { t } = useTranslations();
@@ -1123,9 +1130,16 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [currentStatus, setCurrentStatus] = useState(thread.status);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviting, setInviting] = useState(false);
 
   // Sync status when switching threads
   useEffect(() => { setCurrentStatus(thread.status); }, [thread.id, thread.status]);
+
+  // Close panels when switching threads
+  useEffect(() => { setSettingsOpen(false); setInviteOpen(false); }, [thread.id]);
 
   const loadMessages = useCallback(async (before?: string) => {
     try {
@@ -1254,6 +1268,42 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
     }
   }
 
+  async function handleSettingsSave(updates: { visibility?: string; join_policy?: string; permission_policy?: Record<string, string[] | null> | null }) {
+    setSettingsSaving(true);
+    try {
+      const updated = await orgAdmin.updateThread(thread.id, updates);
+      onThreadUpdated({
+        visibility: updated.visibility,
+        join_policy: updated.join_policy,
+        permission_policy: updated.permission_policy,
+      });
+      showToast(t('thread.settings.saved'));
+      setSettingsOpen(false);
+    } catch {
+      showToast(t('thread.settings.error'), 'error');
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  const fetchBots = useCallback(async () => {
+    const res = await orgAdmin.listBots({ limit: 100 });
+    return { items: res.items.map(b => ({ id: b.id, name: b.name, online: b.online })) };
+  }, []);
+
+  async function handleInviteBot(botId: string, label?: string) {
+    setInviting(true);
+    try {
+      await orgAdmin.inviteToThread(thread.id, botId, label);
+      showToast(t('thread.inviteBot.success'));
+      setInviteOpen(false);
+    } catch {
+      showToast(t('thread.inviteBot.error'), 'error');
+    } finally {
+      setInviting(false);
+    }
+  }
+
   function renderParts(msg: OrgThreadMessage) {
     const parts = parseParts(msg.parts, msg.content);
     return parts.map((p, i) => (
@@ -1282,6 +1332,10 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
             setCurrentStatus(status);
           }}
           onOpenArtifacts={() => setArtifactsOpen(!artifactsOpen)}
+          visibility={thread.visibility}
+          canManageSettings={true}
+          onOpenSettings={() => setSettingsOpen(!settingsOpen)}
+          onInviteBot={() => setInviteOpen(true)}
         />
 
         {/* Messages */}
@@ -1361,6 +1415,32 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
           </div>
         </div>
       )}
+
+      {/* Thread Settings side panel */}
+      <ThreadSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        visibility={thread.visibility}
+        joinPolicy={thread.join_policy}
+        permissionPolicy={
+          thread.permission_policy
+            ? (typeof thread.permission_policy === 'string'
+                ? (() => { try { return JSON.parse(thread.permission_policy as string); } catch { return null; } })()
+                : thread.permission_policy)
+            : null
+        }
+        onSave={handleSettingsSave}
+        saving={settingsSaving}
+      />
+
+      {/* Invite Bot dialog */}
+      <InviteToThreadDialog
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        onInvite={handleInviteBot}
+        fetchBots={fetchBots}
+        inviting={inviting}
+      />
 
       {lightboxSrc2 && <ImageLightbox src={lightboxSrc2} onClose={() => setLightboxSrc2(null)} />}
     </div>

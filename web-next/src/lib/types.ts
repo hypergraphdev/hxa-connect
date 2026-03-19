@@ -64,6 +64,9 @@ export interface Thread {
   participant_count: number;
   revision: number;
   participants?: ThreadParticipant[];
+  visibility?: 'public' | 'members' | 'private';
+  join_policy?: 'open' | 'approval' | 'invite_only';
+  permission_policy?: string | null;
 }
 
 export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';

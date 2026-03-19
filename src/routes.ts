@@ -2088,8 +2088,8 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   });
 
   /**
-   * PATCH /api/org/threads/:id — Update thread status (org admin)
-   * Body: { status, close_reason? }
+   * PATCH /api/org/threads/:id — Update thread (org admin)
+   * Body: { status?, close_reason?, visibility?, join_policy?, permission_policy? }
    */
   auth.patch('/api/org/threads/:id', async (req, res) => {
     if (!requireOrgAdmin(req, res)) return;
@@ -2101,72 +2101,168 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    const { status: statusInput, close_reason } = req.body;
-    if (statusInput === undefined) {
-      res.status(400).json({ error: 'status is required', code: 'VALIDATION_ERROR' });
-      return;
-    }
-    if (typeof statusInput !== 'string' || !THREAD_STATUSES.has(statusInput as ThreadStatus)) {
-      res.status(400).json({ error: 'Invalid status' });
-      return;
-    }
-    const status = statusInput as ThreadStatus;
+    const { status: statusInput, close_reason, visibility: visInput, join_policy: jpInput, permission_policy: permPolicyInput } = req.body;
 
-    let closeReason: CloseReason | undefined;
-    if (close_reason !== undefined) {
-      if (typeof close_reason !== 'string' || !CLOSE_REASONS.has(close_reason as CloseReason)) {
-        res.status(400).json({ error: 'Invalid close_reason' });
+    const isSettingsChange = visInput !== undefined || jpInput !== undefined || permPolicyInput !== undefined;
+    const isStatusChange = statusInput !== undefined;
+
+    if (!isSettingsChange && !isStatusChange) {
+      res.status(400).json({ error: 'No updatable fields provided', code: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    // ── Phase 1: Validate ALL inputs before writing anything ──
+
+    // Validate visibility
+    if (visInput !== undefined && visInput !== null && !['public', 'members', 'private'].includes(visInput)) {
+      res.status(400).json({ error: 'visibility must be one of: public, members, private', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    // Validate join_policy
+    if (jpInput !== undefined && jpInput !== null && !['open', 'approval', 'invite_only'].includes(jpInput)) {
+      res.status(400).json({ error: 'join_policy must be one of: open, approval, invite_only', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    // Validate permission_policy (keys AND values)
+    let permPolicyJson: string | null | undefined;
+    if (permPolicyInput !== undefined) {
+      if (permPolicyInput === null) {
+        permPolicyJson = null;
+      } else if (typeof permPolicyInput === 'object' && !Array.isArray(permPolicyInput)) {
+        const validPolicyKeys = new Set<string>(PERMISSION_POLICY_KEYS);
+        for (const [key, val] of Object.entries(permPolicyInput)) {
+          if (!validPolicyKeys.has(key)) {
+            res.status(400).json({ error: `permission_policy has invalid key: ${key}` });
+            return;
+          }
+          if (val !== null && !Array.isArray(val)) {
+            res.status(400).json({ error: `permission_policy.${key} must be an array of strings or null` });
+            return;
+          }
+          if (Array.isArray(val) && !val.every((v: unknown) => typeof v === 'string')) {
+            res.status(400).json({ error: `permission_policy.${key} must contain only strings` });
+            return;
+          }
+        }
+        permPolicyJson = JSON.stringify(permPolicyInput);
+      } else {
+        res.status(400).json({ error: 'permission_policy must be an object or null' });
         return;
       }
-      closeReason = close_reason as CloseReason;
+    }
+    // Validate status
+    let status: ThreadStatus | undefined;
+    let closeReason: CloseReason | undefined;
+    if (isStatusChange) {
+      if (typeof statusInput !== 'string' || !THREAD_STATUSES.has(statusInput as ThreadStatus)) {
+        res.status(400).json({ error: 'Invalid status' });
+        return;
+      }
+      status = statusInput as ThreadStatus;
+      if (close_reason !== undefined) {
+        if (typeof close_reason !== 'string' || !CLOSE_REASONS.has(close_reason as CloseReason)) {
+          res.status(400).json({ error: 'Invalid close_reason' });
+          return;
+        }
+        closeReason = close_reason as CloseReason;
+      }
+      if (status === 'closed' && closeReason === undefined) {
+        res.status(400).json({ error: 'close_reason is required for closed status' });
+        return;
+      }
+      if (status !== 'closed' && closeReason !== undefined) {
+        res.status(400).json({ error: 'close_reason is only allowed with closed status' });
+        return;
+      }
+      // Pre-validate status transition (before any writes)
+      const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+        active: ['blocked', 'reviewing', 'resolved', 'closed'],
+        blocked: ['active'],
+        reviewing: ['active', 'resolved', 'closed'],
+        resolved: ['active'],
+        closed: ['active'],
+      };
+      const allowed = ALLOWED_TRANSITIONS[thread.status];
+      if (!allowed || !allowed.includes(status)) {
+        res.status(409).json({ error: `Cannot transition from '${thread.status}' to '${status}'`, code: 'INVALID_TRANSITION' });
+        return;
+      }
     }
 
-    if (status === 'closed' && closeReason === undefined) {
-      res.status(400).json({ error: 'close_reason is required for closed status' });
-      return;
-    }
-    if (status !== 'closed' && closeReason !== undefined) {
-      res.status(400).json({ error: 'close_reason is only allowed with closed status' });
-      return;
-    }
+    // ── Phase 2: Apply writes (all validation passed, including transition check) ──
 
     try {
-      const updated = await db.updateThreadStatus(thread.id, status, closeReason);
-      if (!updated) {
-        res.status(404).json({ error: 'Thread not found' });
-        return;
+      let updated = thread;
+      const changes: string[] = [];
+      const by = req.org ? `org:${orgId}` : (req.bot?.name ?? 'admin');
+
+      // Apply settings changes
+      if (visInput !== undefined || jpInput !== undefined) {
+        let newVisibility = (visInput ?? updated.visibility) as ThreadVisibility;
+        let newJoinPolicy = (jpInput ?? updated.join_policy) as ThreadJoinPolicy;
+        if (newVisibility === 'private') newJoinPolicy = 'invite_only';
+
+        const result = await db.updateThreadVisibility(thread.id, newVisibility, newJoinPolicy);
+        if (result) {
+          if (updated.visibility !== newVisibility) changes.push('visibility');
+          if (updated.join_policy !== newJoinPolicy) changes.push('join_policy');
+          updated = result;
+        }
       }
 
-      // Broadcast status change (fire-and-forget — don't block HTTP response)
-      const by = req.org ? `org:${orgId}` : req.bot!.name;
-      void ws.broadcastThreadEvent(orgId, thread.id, {
-        type: 'thread_status_changed',
-        thread_id: thread.id,
-        topic: updated.topic,
-        from: thread.status,
-        to: updated.status,
-        by,
-      }).catch(err => routeLogger.error({ err }, 'broadcast thread_status_changed failed'));
+      if (permPolicyJson !== undefined) {
+        const result = await db.updateThreadPermissionPolicy(thread.id, permPolicyJson!);
+        if (result) {
+          changes.push('permission_policy');
+          updated = result;
+        }
+      }
 
-      // Catchup events for offline bots
-      const participants = await db.getParticipants(thread.id);
-      for (const p of participants) {
-        await db.recordCatchupEvent(orgId, p.bot_id, 'thread_status_changed', {
+      // Apply status change
+      if (status) {
+        const statusResult = await db.updateThreadStatus(thread.id, status, closeReason);
+        if (!statusResult) {
+          res.status(404).json({ error: 'Thread not found' });
+          return;
+        }
+        updated = statusResult;
+
+        void ws.broadcastThreadEvent(orgId, thread.id, {
+          type: 'thread_status_changed',
           thread_id: thread.id,
           topic: updated.topic,
           from: thread.status,
           to: updated.status,
           by,
+        }).catch(err => routeLogger.error({ err }, 'broadcast thread_status_changed failed'));
+
+        const participants = await db.getParticipants(thread.id);
+        for (const p of participants) {
+          await db.recordCatchupEvent(orgId, p.bot_id, 'thread_status_changed', {
+            thread_id: thread.id,
+            topic: updated.topic,
+            from: thread.status,
+            to: updated.status,
+            by,
+          });
+        }
+
+        const actorId = req.bot?.id || `org:${orgId}`;
+        await db.recordAudit(orgId, actorId, 'thread.status_changed', 'thread', thread.id, {
+          from: thread.status,
+          to: updated.status,
+          close_reason: closeReason || null,
         });
       }
 
-      // Audit
-      const actorId = req.bot?.id || `org:${orgId}`;
-      await db.recordAudit(orgId, actorId, 'thread.status_changed', 'thread', thread.id, {
-        from: thread.status,
-        to: updated.status,
-        close_reason: closeReason || null,
-      });
+      // Broadcast settings changes
+      if (changes.length > 0) {
+        void ws.broadcastThreadEvent(orgId, thread.id, {
+          type: 'thread_updated',
+          thread: updated,
+          changes,
+        }).catch(err => routeLogger.error({ err }, 'broadcast thread_updated failed'));
+      }
 
       res.json(updated);
     } catch (err: any) {
@@ -2176,6 +2272,65 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         throw err;
       }
     }
+  });
+
+  /**
+   * POST /api/org/threads/:id/participants — Invite bot to thread (org admin)
+   * Body: { bot_id, label? }
+   */
+  auth.post('/api/org/threads/:id/participants', async (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+
+    const thread = await db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== orgId) {
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Terminal threads cannot accept new participants
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Cannot invite to a resolved or closed thread', code: 'THREAD_TERMINAL' });
+      return;
+    }
+
+    const { bot_id, label } = req.body;
+    if (!bot_id || typeof bot_id !== 'string') {
+      res.status(400).json({ error: 'bot_id is required' });
+      return;
+    }
+
+    const bot = await db.getBotById(bot_id);
+    if (!bot || bot.org_id !== orgId) {
+      res.status(404).json({ error: 'Bot not found in this org', code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Only active bots can be invited
+    if (bot.join_status && bot.join_status !== 'active') {
+      res.status(400).json({ error: 'Bot must have active join status', code: 'BOT_NOT_ACTIVE' });
+      return;
+    }
+
+    if (await db.isParticipant(thread.id, bot_id)) {
+      res.status(409).json({ error: 'Bot is already a participant', code: 'ALREADY_PARTICIPANT' });
+      return;
+    }
+
+    const participant = await db.addParticipant(thread.id, bot_id, typeof label === 'string' ? label : undefined);
+
+    const by = req.org ? `org:${orgId}` : (req.bot?.name ?? 'admin');
+    void ws.broadcastThreadEvent(orgId, thread.id, {
+      type: 'thread_participant',
+      thread_id: thread.id,
+      bot_id: bot.id,
+      bot_name: bot.name,
+      action: 'joined',
+      by,
+      label: typeof label === 'string' ? label : undefined,
+    }).catch(err => routeLogger.error({ err }, 'broadcast thread_participant failed'));
+
+    res.json(participant);
   });
 
   // ─── Threads ─────────────────────────────────────────────
