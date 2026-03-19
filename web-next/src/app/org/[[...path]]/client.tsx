@@ -153,39 +153,6 @@ function viewToHash(view: View): string {
   return '/';
 }
 
-// ─── Hash routing helpers ───
-
-type OrgHashRoute =
-  | { type: 'empty' }
-  | { type: 'bot'; botId: string }
-  | { type: 'thread'; threadId: string }
-  | { type: 'channel'; channelId: string; botId?: string };
-
-function parseOrgHash(): OrgHashRoute {
-  if (typeof window === 'undefined') return { type: 'empty' };
-  const raw = window.location.hash;
-  if (!raw || raw.length <= 1) return { type: 'empty' };
-  const [pathPart, queryPart] = raw.slice(1).split('?');
-  const parts = pathPart.replace(/^\/+/, '').split('/').filter(Boolean);
-  const params = new URLSearchParams(queryPart ?? '');
-  if (parts[0] === 'bots' && parts[1]) return { type: 'bot', botId: parts[1] };
-  if (parts[0] === 'threads' && parts[1]) return { type: 'thread', threadId: parts[1] };
-  if (parts[0] === 'channels' && parts[1]) {
-    return { type: 'channel', channelId: parts[1], botId: params.get('botId') ?? undefined };
-  }
-  return { type: 'empty' };
-}
-
-function viewToHash(view: View): string {
-  if (view.type === 'bot') return `/bots/${view.bot.id}`;
-  if (view.type === 'thread') return `/threads/${view.thread.id}`;
-  if (view.type === 'channel') {
-    const q = view.botId ? `?botId=${encodeURIComponent(view.botId)}` : '';
-    return `/channels/${view.channelId}${q}`;
-  }
-  return '/';
-}
-
 // ─── Main Component ───
 
 export default function OrgDashboard() {
@@ -229,35 +196,6 @@ export default function OrgDashboard() {
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
   }, []);
-
-  const navigateTo = useCallback((nextView: View) => {
-    setView(nextView);
-    if (nextView.type === 'bot') setSidebarTab('bots');
-    else if (nextView.type === 'thread') setSidebarTab('threads');
-    window.history.pushState(null, '', `#${viewToHash(nextView)}`);
-  }, []);
-
-  const syncFromHash = useCallback(() => {
-    const route = parseOrgHash();
-    if (route.type === 'empty') { setView({ type: 'empty' }); return; }
-    if (route.type === 'bot') {
-      const bot = bots.find(b => b.id === route.botId);
-      if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); }
-      else setView({ type: 'empty' });
-    } else if (route.type === 'thread') {
-      const thread = threads.find(t => t.id === route.threadId);
-      if (thread) { setView({ type: 'thread', thread }); setSidebarTab('threads'); }
-      else setView({ type: 'empty' });
-    } else if (route.type === 'channel') {
-      const ch = channels.find(c => c.id === route.channelId);
-      if (ch) {
-        const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
-        setView({ type: 'channel', channelId: ch.id, label, botId: route.botId });
-      } else {
-        setView({ type: 'empty' });
-      }
-    }
-  }, [bots, threads, channels]);
 
   const handleSessionExpired = useCallback(() => {
     setAuthenticated(false);
