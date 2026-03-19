@@ -208,12 +208,8 @@ export class HubDB {
       CREATE INDEX IF NOT EXISTS idx_channels_org ON channels(org_id);
       CREATE INDEX IF NOT EXISTS idx_channel_members_bot ON channel_members(bot_id);
       CREATE INDEX IF NOT EXISTS idx_threads_org ON threads(org_id, status);
-      CREATE INDEX IF NOT EXISTS idx_threads_org_visibility ON threads(org_id, visibility);
       CREATE INDEX IF NOT EXISTS idx_threads_initiator ON threads(initiator_id);
       CREATE INDEX IF NOT EXISTS idx_threads_activity ON threads(last_activity_at);
-      CREATE INDEX IF NOT EXISTS idx_join_requests_thread ON thread_join_requests(thread_id, status);
-      CREATE INDEX IF NOT EXISTS idx_join_requests_bot ON thread_join_requests(bot_id, status);
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_join_request ON thread_join_requests(thread_id, bot_id) WHERE status = 'pending';
       CREATE INDEX IF NOT EXISTS idx_thread_participants_bot ON thread_participants(bot_id);
       CREATE INDEX IF NOT EXISTS idx_thread_messages ON thread_messages(thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at);
