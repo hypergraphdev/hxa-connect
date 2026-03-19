@@ -116,6 +116,15 @@ export interface OrgBot {
   last_seen_at?: string | number;
 }
 
+export interface MessageSearchResult {
+  message_id: string;
+  thread_id: string;
+  thread_topic: string;
+  sender_name: string | null;
+  content: string;
+  created_at: number;
+}
+
 export interface OrgThread {
   id: string;
   org_id: string;
@@ -326,6 +335,9 @@ export const orgAdmin = {
       method: 'PATCH',
       body: JSON.stringify(updates),
     }),
+
+  searchMessages: (q: string) =>
+    orgRequest<{ messages: MessageSearchResult[] }>(`/api/org/search?q=${encodeURIComponent(q)}`),
 };
 
 export interface OrgSettings {

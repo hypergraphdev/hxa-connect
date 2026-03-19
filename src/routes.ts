@@ -2019,6 +2019,19 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
   });
 
   /**
+   * GET /api/org/search?q=<term> — Cross-thread message content search (org admin)
+   * Returns up to 20 matching messages with thread info, sorted newest first.
+   */
+  auth.get('/api/org/search', async (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q.length < 2) { res.json({ messages: [] }); return; }
+    const messages = await db.searchMessagesInOrg(orgId, q, 20);
+    res.json({ messages });
+  });
+
+  /**
    * GET /api/org/threads/:id/messages — Thread messages (enriched with parts)
    * Query: limit?, before? (message id for pagination, or timestamp for legacy), since?
    * When before is a message id (not numeric), uses cursor-based pagination and returns

@@ -2063,6 +2063,30 @@ export class HubDB {
   }
 
   /**
+   * Search thread messages in an org by content (org admin facing).
+   * Returns matching messages with thread info for cross-thread message search.
+   */
+  async searchMessagesInOrg(
+    orgId: string,
+    query: string,
+    limit = 20,
+  ): Promise<{ message_id: string; thread_id: string; thread_topic: string; sender_name: string | null; content: string; created_at: number }[]> {
+    return this.driver.all<any>(
+      `SELECT tm.id AS message_id, tm.thread_id, t.topic AS thread_topic,
+              b.name AS sender_name, tm.content, tm.created_at
+       FROM thread_messages tm
+       JOIN threads t ON t.id = tm.thread_id
+       LEFT JOIN bots b ON b.id = tm.sender_id
+       WHERE t.org_id = ?
+         AND tm.content LIKE ?
+         AND tm.content != ''
+       ORDER BY tm.created_at DESC
+       LIMIT ?`,
+      [orgId, `%${query}%`, limit],
+    );
+  }
+
+  /**
    * Search all threads in an org by topic (bot-facing, scope=org).
    * Unlike listThreadsForBotPaginated, this does NOT require the bot to be a participant.
    * Includes is_participant flag so the caller knows whether it has already joined.

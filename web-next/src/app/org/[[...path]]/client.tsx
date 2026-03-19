@@ -10,7 +10,7 @@ import {
 import {
   orgAdmin, type OrgBot, type OrgThread, type OrgChannel,
   type OrgThreadMessage, type OrgChannelMessage, type OrgArtifact,
-  type OrgSettings, AdminApiError,
+  type OrgSettings, type MessageSearchResult, AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
 import { THREAD_STATUS_OPTIONS, parseParts } from '@/lib/utils';
@@ -114,7 +114,7 @@ type View =
   | { type: 'empty' }
   | { type: 'bot'; bot: OrgBot }
   | { type: 'channel'; channelId: string; label: string; botId?: string }
-  | { type: 'thread'; thread: OrgThread }
+  | { type: 'thread'; thread: OrgThread; highlightMessageId?: string; anchorCreatedAt?: number }
   | { type: 'settings' };
 
 // ─── Hash routing helpers ───
@@ -175,6 +175,8 @@ export default function OrgDashboard() {
   const [botSearch, setBotSearch] = useState('');
   const [threadSearch, setThreadSearch] = useState('');
   const [threadStatus, setThreadStatus] = useState('');
+  const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchResult[]>([]);
+  const [messageSearchLoading, setMessageSearchLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Content view
@@ -644,26 +646,58 @@ export default function OrgDashboard() {
                 {sortedBots.map(bot => {
                   const isActive = view.type === 'bot' && view.bot.id === bot.id;
                   return (
-                    <button
+                    <div
                       key={bot.id}
-                      onClick={() => { navigateTo({ type: 'bot', bot }); setSidebarOpen(false); }}
-                      className={`w-full text-left px-3.5 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-all ${
+                      className={`group relative w-full border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-all ${
                         isActive ? 'bg-hxa-accent/5 shadow-[inset_4px_0_0_var(--color-hxa-accent)]' : ''
                       }`}
                     >
-                      <div className="flex items-center gap-2.5">
-                        <Circle size={8} className={`shrink-0 ${bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'}`} />
-                        <span className="text-sm font-medium truncate">{bot.name}</span>
-                        {bot.join_status && bot.join_status !== 'active' && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
-                            bot.join_status === 'pending' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-red/20 text-hxa-red'
-                          }`}>{t(`org.bot.joinStatus.${bot.join_status}`)}</span>
-                        )}
-                        <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
-                          bot.auth_role === 'admin' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-text-dim/20 text-hxa-text-dim'
-                        }`}>{bot.auth_role}</span>
-                      </div>
-                    </button>
+                      <button
+                        onClick={() => { navigateTo({ type: 'bot', bot }); setSidebarOpen(false); }}
+                        className="w-full text-left px-3.5 py-2.5 pr-8"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <Circle size={8} className={`shrink-0 ${bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'}`} />
+                          <span className="text-sm font-medium truncate">{bot.name}</span>
+                          {bot.join_status && bot.join_status !== 'active' && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                              bot.join_status === 'pending' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-red/20 text-hxa-red'
+                            }`}>{t(`org.bot.joinStatus.${bot.join_status}`)}</span>
+                          )}
+                          <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                            bot.auth_role === 'admin' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-text-dim/20 text-hxa-text-dim'
+                          }`}>{bot.auth_role}</span>
+                        </div>
+                      </button>
+                      {/* Delete button — only for offline bots, visible on hover */}
+                      {!bot.online && (
+                        <button
+                          title={t('org.bot.deleteTitle')}
+                          onClick={e => {
+                            e.stopPropagation();
+                            setConfirm({
+                              title: t('org.bot.deleteTitle'),
+                              message: t('org.bot.deleteMessage', { name: bot.name }),
+                              confirmLabel: t('org.bot.deleteConfirm'),
+                              danger: true,
+                              onConfirm: async () => {
+                                setConfirm(null);
+                                try {
+                                  await orgAdmin.deleteBot(bot.id);
+                                  setBots(prev => prev.filter(b => b.id !== bot.id));
+                                  if (view.type === 'bot' && view.bot.id === bot.id) setView({ type: 'empty' });
+                                  showToast(t('org.bot.deleted'));
+                                } catch { showToast(t('org.bot.deleteError'), 'error'); }
+                              },
+                              onCancel: () => setConfirm(null),
+                            });
+                          }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1.5 rounded text-hxa-text-dim hover:text-hxa-red hover:bg-hxa-red/10 transition-all"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -680,7 +714,16 @@ export default function OrgDashboard() {
                     type="text"
                     placeholder={t('org.search.threads')}
                     value={threadSearch}
-                    onChange={e => setThreadSearch(e.target.value)}
+                    onChange={e => {
+                      const q = e.target.value;
+                      setThreadSearch(q);
+                      if (q.trim().length < 2) { setMessageSearchResults([]); return; }
+                      setMessageSearchLoading(true);
+                      orgAdmin.searchMessages(q.trim())
+                        .then(r => setMessageSearchResults(r.messages))
+                        .catch(() => setMessageSearchResults([]))
+                        .finally(() => setMessageSearchLoading(false));
+                    }}
                     className="w-full bg-black/30 border border-hxa-border rounded-lg pl-8 pr-3 py-2 text-xs outline-none focus:border-hxa-accent"
                   />
                 </div>
@@ -692,25 +735,73 @@ export default function OrgDashboard() {
                 />
               </div>
               <div className="flex-1 overflow-y-auto">
-                {threads.map(thread => (
-                  <button
-                    key={thread.id}
-                    onClick={() => { navigateTo({ type: 'thread', thread }); setSidebarOpen(false); }}
-                    className={`w-full text-left px-3 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-colors ${
-                      view.type === 'thread' && view.thread.id === thread.id ? 'bg-hxa-bg-hover' : ''
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium truncate flex-1">{thread.topic}</span>
-                      <StatusBadge status={thread.status} />
+                {/* Topic matches */}
+                {threads.length > 0 && (
+                  <>
+                    {threadSearch.trim() && (
+                      <div className="px-3 py-1 text-[10px] font-semibold text-hxa-text-dim uppercase tracking-wider border-b border-hxa-border/30">
+                        {t('org.search.topicMatches')}
+                      </div>
+                    )}
+                    {threads.map(thread => (
+                      <button
+                        key={thread.id}
+                        onClick={() => { navigateTo({ type: 'thread', thread }); setSidebarOpen(false); }}
+                        className={`w-full text-left px-3 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-colors ${
+                          view.type === 'thread' && view.thread.id === thread.id ? 'bg-hxa-bg-hover' : ''
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate flex-1">{thread.topic}</span>
+                          <StatusBadge status={thread.status} />
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 text-[10px] text-hxa-text-dim">
+                          <span><Users size={10} className="inline" /> {thread.participant_count}</span>
+                          <span><MessageSquare size={10} className="inline" /> {thread.message_count}</span>
+                          <span className="ml-auto">{timeAgo(thread.last_activity_at)}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {/* Message content matches */}
+                {threadSearch.trim().length >= 2 && (
+                  <>
+                    <div className="px-3 py-1 text-[10px] font-semibold text-hxa-text-dim uppercase tracking-wider border-b border-hxa-border/30 flex items-center gap-1.5">
+                      <MessageSquare size={10} />
+                      {messageSearchLoading ? t('org.search.searching') : t('org.search.messageMatches', { count: messageSearchResults.length })}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-hxa-text-dim">
-                      <span><Users size={10} className="inline" /> {thread.participant_count}</span>
-                      <span><MessageSquare size={10} className="inline" /> {thread.message_count}</span>
-                      <span className="ml-auto">{timeAgo(thread.last_activity_at)}</span>
-                    </div>
-                  </button>
-                ))}
+                    {messageSearchResults.map(msg => {
+                      const snippet = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
+                      return (
+                        <button
+                          key={msg.message_id}
+                          onClick={async () => {
+                            let thread = threads.find(t => t.id === msg.thread_id);
+                            if (!thread) {
+                              try { thread = await orgAdmin.getThread(msg.thread_id); } catch { return; }
+                            }
+                            navigateTo({ type: 'thread', thread, highlightMessageId: msg.message_id, anchorCreatedAt: msg.created_at });
+                            setSidebarOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2.5 border-b border-hxa-border/30 hover:bg-hxa-bg-hover transition-colors"
+                        >
+                          <div className="text-xs font-medium text-hxa-accent truncate mb-0.5">{msg.thread_topic}</div>
+                          <div className="text-[11px] text-hxa-text-dim leading-relaxed line-clamp-2">{snippet}</div>
+                          <div className="text-[10px] text-hxa-text-dim/60 mt-0.5">{msg.sender_name} · {timeAgo(msg.created_at)}</div>
+                        </button>
+                      );
+                    })}
+                    {!messageSearchLoading && messageSearchResults.length === 0 && threadSearch.trim().length >= 2 && (
+                      <div className="px-3 py-3 text-[11px] text-hxa-text-dim text-center">{t('org.search.noMessages')}</div>
+                    )}
+                  </>
+                )}
+
+                {threads.length === 0 && threadSearch.trim().length < 2 && (
+                  <div className="px-3 py-3 text-[11px] text-hxa-text-dim text-center">{t('org.noThreads')}</div>
+                )}
               </div>
             </div>
           )}
@@ -817,6 +908,8 @@ export default function OrgDashboard() {
           )}
           {view.type === 'thread' && (
             <ThreadView thread={view.thread} showToast={showToast}
+              highlightMessageId={view.highlightMessageId}
+              anchorCreatedAt={view.anchorCreatedAt}
               onStatusChanged={(status) => {
                 setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, status } : t));
                 setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, status } } : prev);
@@ -1144,11 +1237,13 @@ function ChannelView({ channelId, label, onBack }: {
 
 // ─── Thread View ───
 
-function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
+function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessageId, anchorCreatedAt }: {
   thread: OrgThread;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   onStatusChanged: (status: string) => void;
   wsRef: React.MutableRefObject<WebSocket | null>;
+  highlightMessageId?: string;
+  anchorCreatedAt?: number;
 }) {
   const { t } = useTranslations();
   const timeAgo = useTimeAgo();
@@ -1161,6 +1256,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   const [loading, setLoading] = useState(true);
   const [lightboxSrc2, setLightboxSrc2] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const highlightRef = useRef<HTMLDivElement>(null);
 
   const [currentStatus, setCurrentStatus] = useState(thread.status);
 
@@ -1172,10 +1268,7 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
       const raw = await orgAdmin.getThreadMessages(thread.id, { before, limit: 50 });
       const isLegacy = Array.isArray(raw);
       const items = isLegacy ? raw : (raw.items || (raw as unknown as { messages: OrgThreadMessage[] }).messages || []);
-      // Plain array (legacy path) — assume more exist if we got exactly limit items
       const more = isLegacy ? items.length >= 50 : (raw.has_more ?? false);
-      // Legacy path returns chronological (oldest first) — use as-is.
-      // Paginated path returns newest first — reverse to chronological.
       const chronological = isLegacy ? items : [...items].reverse();
       if (before) {
         setMessages(prev => [...chronological, ...prev]);
@@ -1183,15 +1276,29 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
         setMessages(chronological);
       }
       setHasMore(more);
-      // Cursor = oldest message ID for "before" pagination
-      // Legacy (chronological): oldest = items[0]. Paginated (newest-first): oldest = items[last]
       const oldestId = items.length > 0 ? (isLegacy ? items[0].id : items[items.length - 1].id) : undefined;
       setCursor(raw.next_cursor || oldestId);
     } catch { /* ignore */ }
     setLoading(false);
   }, [thread.id]);
 
-  useEffect(() => { loadMessages(); }, [loadMessages]);
+  // When anchorCreatedAt is set, load messages around that timestamp instead of latest
+  useEffect(() => {
+    if (anchorCreatedAt) {
+      // Load messages just after the anchor timestamp so the target message is included
+      const anchorCursor = String(anchorCreatedAt + 1);
+      loadMessages(anchorCursor);
+    } else {
+      loadMessages();
+    }
+  }, [loadMessages, anchorCreatedAt]);
+
+  // Scroll to highlighted message after load
+  useEffect(() => {
+    if (!highlightMessageId || loading) return;
+    const el = document.getElementById(`msg-${highlightMessageId}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [highlightMessageId, loading, messages]);
 
   // Load artifacts when panel opens
   useEffect(() => {
@@ -1335,8 +1442,9 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
             const provenance = msg.metadata?.provenance as { authored_by?: string } | undefined;
             const isHuman = provenance?.authored_by === 'human';
             const ownerName = (msg.metadata?.provenance as { owner_name?: string } | undefined)?.owner_name;
+            const isHighlighted = highlightMessageId === msg.id;
             return (
-              <div key={msg.id} className="group">
+              <div key={msg.id} id={`msg-${msg.id}`} className={`group rounded-lg transition-colors duration-700 ${isHighlighted ? 'bg-hxa-accent/10 outline outline-1 outline-hxa-accent/40' : ''}`}>
                 <div className="flex items-center gap-2 mb-0.5">
                   <span className="text-xs font-semibold text-hxa-text-dim">{msg.sender_name}</span>
                   {isHuman && (
