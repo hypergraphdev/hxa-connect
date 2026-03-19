@@ -450,4 +450,117 @@ describe('Bot Join Approval (#133)', () => {
       expect(data.join_status).toBe('pending');
     });
   });
+
+  // ─── Ticket skip_approval ─────────────────────────────────
+
+  describe('Ticket skip_approval', () => {
+    let orgId: string;
+    let orgSecret: string;
+
+    beforeAll(async () => {
+      const org = await env.createOrg('skip-approval-test-org');
+      orgId = org.id;
+      orgSecret = org.org_secret;
+    });
+
+    it('ticket defaults to skip_approval=false', async () => {
+      const ticket = await env.db.createOrgTicket(orgId, 'hash', {
+        expiresAt: Date.now() + 3600_000,
+      });
+      expect(ticket.skip_approval).toBe(false);
+    });
+
+    it('ticket can be created with skip_approval=true', async () => {
+      const ticket = await env.db.createOrgTicket(orgId, 'hash', {
+        expiresAt: Date.now() + 3600_000,
+        skipApproval: true,
+      });
+      expect(ticket.skip_approval).toBe(true);
+    });
+
+    it('POST /api/org/tickets accepts skip_approval param', async () => {
+      const cookie = await env.loginAsOrg(orgSecret);
+      const res = await fetch(`${env.baseUrl}/api/org/tickets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `hxa_session=${cookie}`, Origin: env.baseUrl },
+        body: JSON.stringify({ skip_approval: true, expires_in: 3600 }),
+      });
+      expect(res.ok).toBe(true);
+      const data = await res.json();
+      expect(data.skip_approval).toBe(true);
+      expect(data.ticket).toBeTruthy();
+    });
+
+    it('POST /api/org/tickets defaults skip_approval to false', async () => {
+      const cookie = await env.loginAsOrg(orgSecret);
+      const res = await fetch(`${env.baseUrl}/api/org/tickets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `hxa_session=${cookie}`, Origin: env.baseUrl },
+        body: JSON.stringify({ expires_in: 3600 }),
+      });
+      expect(res.ok).toBe(true);
+      const data = await res.json();
+      expect(data.skip_approval).toBe(false);
+    });
+
+    it('GET /api/org/tickets returns skip_approval field', async () => {
+      const cookie = await env.loginAsOrg(orgSecret);
+      const res = await fetch(`${env.baseUrl}/api/org/tickets`, {
+        headers: { Cookie: `hxa_session=${cookie}`, Origin: env.baseUrl },
+      });
+      expect(res.ok).toBe(true);
+      const data = await res.json();
+      expect(data.items.length).toBeGreaterThan(0);
+      for (const t of data.items) {
+        expect(typeof t.skip_approval).toBe('boolean');
+      }
+    });
+
+    it('skip_approval ticket bypasses org-level approval', async () => {
+      // Enable approval
+      await enableApproval(orgSecret);
+
+      // Create skip_approval ticket
+      const ticket = await env.db.createOrgTicket(orgId, 'hash', {
+        expiresAt: Date.now() + 3600_000,
+        skipApproval: true,
+      });
+
+      // Register with skip_approval ticket — should be active immediately
+      const { res, data } = await registerWithTicket(orgId, ticket.id, 'skip-approval-bot');
+      expect(res.ok).toBe(true);
+      expect(data.join_status).toBe('active');
+    });
+
+    it('normal ticket still requires approval when org has it enabled', async () => {
+      // Org approval already enabled from previous test
+      const ticket = await env.db.createOrgTicket(orgId, 'hash', {
+        expiresAt: Date.now() + 3600_000,
+        // skipApproval not set — defaults to false
+      });
+
+      const { res, data } = await registerWithTicket(orgId, ticket.id, 'needs-approval-bot');
+      expect(res.ok).toBe(true);
+      expect(data.join_status).toBe('pending');
+    });
+
+    it('skip_approval has no effect when org approval is disabled', async () => {
+      // Disable approval
+      const cookie = await env.loginAsOrg(orgSecret);
+      await fetch(`${env.baseUrl}/api/org/settings`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: `hxa_session=${cookie}`, Origin: env.baseUrl },
+        body: JSON.stringify({ join_approval_required: false }),
+      });
+
+      const ticket = await env.db.createOrgTicket(orgId, 'hash', {
+        expiresAt: Date.now() + 3600_000,
+        skipApproval: true,
+      });
+
+      const { res, data } = await registerWithTicket(orgId, ticket.id, 'no-approval-needed-bot');
+      expect(res.ok).toBe(true);
+      expect(data.join_status).toBe('active');
+    });
+  });
 });

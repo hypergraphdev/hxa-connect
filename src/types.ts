@@ -63,6 +63,7 @@ export interface OrgTicket {
   secret_hash: string;
   code: string | null;
   reusable: boolean;
+  skip_approval: boolean;
   expires_at: number;
   consumed: boolean;
   created_by: string | null;
@@ -74,6 +75,7 @@ export interface OrgTicketResponse {
   ticket: string;       // ticket code (tkt_ prefix) or UUID fallback
   expires_at: number;
   reusable: boolean;
+  skip_approval: boolean;
 }
 
 export interface Channel {

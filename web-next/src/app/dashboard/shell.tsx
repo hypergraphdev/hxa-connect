@@ -86,6 +86,7 @@ function parseRoute(p: string): { section: string; id?: string } {
 }
 
 function getLocationRoute(): { path: string; section: string; id?: string } {
+  if (typeof window === 'undefined') return { path: '/', section: '', id: undefined };
   const rawHash = window.location.hash || '';
   const rawPath = rawHash.startsWith('#') && rawHash.length > 1
     ? rawHash.slice(1)
@@ -141,12 +142,6 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     const resolved = path.startsWith('/') ? path : `/${path}`;
     window.history.pushState(null, '', `#${resolved}`);
     syncFromCurrentLocation();
-
-    // Clear transient WS state to prevent stale messages
-    // from appearing out of order after HTTP reload
-    setWsMessages([]);
-    setWsDmMessages([]);
-    setWsArtifacts([]);
   }, [syncFromCurrentLocation]);
 
   const handleWsEvent = useCallback((event: WsEvent) => {

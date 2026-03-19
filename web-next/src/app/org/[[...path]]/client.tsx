@@ -5,12 +5,12 @@ import { useRouter } from 'next/navigation';
 import {
   Building2, Bot, MessageSquare, Search, LogOut, KeyRound,
   RotateCw, Plus, Trash2, Copy, X, ArrowLeft, Shield, Users,
-  Circle, ChevronDown, FileCode, Menu,
+  Circle, ChevronDown, FileCode, Menu, Settings,
 } from 'lucide-react';
 import {
   orgAdmin, type OrgBot, type OrgThread, type OrgChannel,
   type OrgThreadMessage, type OrgChannelMessage, type OrgArtifact,
-  AdminApiError,
+  type OrgSettings, AdminApiError,
 } from '@/lib/admin-api';
 import * as api from '@/lib/api';
 import { THREAD_STATUS_OPTIONS, parseParts } from '@/lib/utils';
@@ -114,7 +114,44 @@ type View =
   | { type: 'empty' }
   | { type: 'bot'; bot: OrgBot }
   | { type: 'channel'; channelId: string; label: string; botId?: string }
-  | { type: 'thread'; thread: OrgThread };
+  | { type: 'thread'; thread: OrgThread }
+  | { type: 'settings' };
+
+// ─── Hash routing helpers ───
+
+type OrgHashRoute =
+  | { type: 'empty' }
+  | { type: 'bot'; botId: string }
+  | { type: 'thread'; threadId: string }
+  | { type: 'channel'; channelId: string; botId?: string }
+  | { type: 'settings' };
+
+function parseOrgHash(): OrgHashRoute {
+  if (typeof window === 'undefined') return { type: 'empty' };
+  const raw = window.location.hash;
+  if (!raw || raw.length <= 1) return { type: 'empty' };
+  const [pathPart, queryPart] = raw.slice(1).split('?');
+  const parts = pathPart.replace(/^\/+/, '').split('/').filter(Boolean);
+  const params = new URLSearchParams(queryPart ?? '');
+  if (parts[0] === 'settings') return { type: 'settings' };
+  if (parts[0] === 'bots' && parts[1]) return { type: 'bot', botId: parts[1] };
+  if (parts[0] === 'threads' && parts[1]) return { type: 'thread', threadId: parts[1] };
+  if (parts[0] === 'channels' && parts[1]) {
+    return { type: 'channel', channelId: parts[1], botId: params.get('botId') ?? undefined };
+  }
+  return { type: 'empty' };
+}
+
+function viewToHash(view: View): string {
+  if (view.type === 'settings') return '/settings';
+  if (view.type === 'bot') return `/bots/${view.bot.id}`;
+  if (view.type === 'thread') return `/threads/${view.thread.id}`;
+  if (view.type === 'channel') {
+    const q = view.botId ? `?botId=${encodeURIComponent(view.botId)}` : '';
+    return `/channels/${view.channelId}${q}`;
+  }
+  return '/';
+}
 
 // ─── Hash routing helpers ───
 
@@ -227,6 +264,36 @@ export default function OrgDashboard() {
     if (wsRef.current) wsRef.current.close();
     router.replace('/');
   }, [router]);
+
+  const navigateTo = useCallback((nextView: View) => {
+    setView(nextView);
+    if (nextView.type === 'bot') setSidebarTab('bots');
+    else if (nextView.type === 'thread') setSidebarTab('threads');
+    window.history.pushState(null, '', `#${viewToHash(nextView)}`);
+  }, []);
+
+  const syncFromHash = useCallback(() => {
+    const route = parseOrgHash();
+    if (route.type === 'empty') { setView({ type: 'empty' }); return; }
+    if (route.type === 'settings') { setView({ type: 'settings' }); return; }
+    if (route.type === 'bot') {
+      const bot = bots.find(b => b.id === route.botId);
+      if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); }
+      else setView({ type: 'empty' });
+    } else if (route.type === 'thread') {
+      const thread = threads.find(t => t.id === route.threadId);
+      if (thread) { setView({ type: 'thread', thread }); setSidebarTab('threads'); }
+      else setView({ type: 'empty' });
+    } else if (route.type === 'channel') {
+      const ch = channels.find(c => c.id === route.channelId);
+      if (ch) {
+        const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
+        setView({ type: 'channel', channelId: ch.id, label, botId: route.botId });
+      } else {
+        setView({ type: 'empty' });
+      }
+    }
+  }, [bots, threads, channels]);
 
   // Auth check — verify session cookie is org_admin
   useEffect(() => {
@@ -364,16 +431,28 @@ export default function OrgDashboard() {
       });
     }
     if (evt.type === 'bot_registered') {
-      const botData = evt.bot as { id: string; name: string };
+      const botData = evt.bot as { id: string; name: string; join_status?: string };
       setBots(prev => {
         if (prev.some(b => b.id === botData.id)) return prev;
         return [...prev, {
           id: botData.id,
           name: botData.name,
           auth_role: 'member',
+          join_status: (botData.join_status as OrgBot['join_status']) ?? 'active',
           online: false,
           created_at: new Date().toISOString(),
         } as OrgBot];
+      });
+    }
+    if (evt.type === 'bot_status_changed') {
+      const botId = evt.bot_id as string;
+      const joinStatus = evt.join_status as 'active' | 'pending' | 'rejected';
+      setBots(prev => prev.map(b => b.id === botId ? { ...b, join_status: joinStatus } : b));
+      setView(prev => {
+        if (prev.type === 'bot' && prev.bot.id === botId) {
+          return { type: 'bot', bot: { ...prev.bot, join_status: joinStatus } };
+        }
+        return prev;
       });
     }
     if (evt.type === 'thread_created') {
@@ -449,6 +528,54 @@ export default function OrgDashboard() {
     return () => clearTimeout(timer);
   }, [threadSearch, threadStatus, authenticated]);
 
+  // Initialize pending hash and register browser navigation listeners
+  useEffect(() => {
+    const r = parseOrgHash();
+    if (r.type !== 'empty') pendingHashRef.current = r;
+    window.addEventListener('popstate', syncFromHash);
+    window.addEventListener('hashchange', syncFromHash);
+    return () => {
+      window.removeEventListener('popstate', syncFromHash);
+      window.removeEventListener('hashchange', syncFromHash);
+    };
+  }, [syncFromHash]);
+
+  // Restore bot view from initial hash after bots are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'bot' || bots.length === 0) return;
+    const bot = bots.find(b => b.id === route.botId);
+    if (bot) { setView({ type: 'bot', bot }); setSidebarTab('bots'); pendingHashRef.current = null; }
+  }, [bots]);
+
+  // Restore thread view from initial hash after threads are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'thread' || threads.length === 0) return;
+    const thread = threads.find(t => t.id === route.threadId);
+    if (thread) { setView({ type: 'thread', thread }); setSidebarTab('threads'); pendingHashRef.current = null; }
+  }, [threads]);
+
+  // Restore channel view from initial hash after channels are loaded
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'channel' || channels.length === 0) return;
+    const ch = channels.find(c => c.id === route.channelId);
+    if (ch) {
+      const label = ch.members.map(m => typeof m === 'string' ? m : m.name).join(' \u2194 ');
+      setView({ type: 'channel', channelId: ch.id, label, botId: route.botId });
+      pendingHashRef.current = null;
+    }
+  }, [channels]);
+
+  // Restore settings view from initial hash (no data dependencies)
+  useEffect(() => {
+    const route = pendingHashRef.current;
+    if (!route || route.type !== 'settings' || !authenticated) return;
+    setView({ type: 'settings' });
+    pendingHashRef.current = null;
+  }, [authenticated]);
+
   async function handleLogout() {
     await api.logout();
     if (wsRef.current) wsRef.current.close();
@@ -495,6 +622,11 @@ export default function OrgDashboard() {
           <div className="flex-1" />
           <button onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-accent/10 text-hxa-accent rounded-lg hover:bg-hxa-accent/20 border border-hxa-accent/30 transition-colors max-md:px-2 max-md:gap-0">
             <Plus size={14} /> <span className="hidden sm:inline">{t('org.inviteBot')}</span>
+          </button>
+          <button onClick={() => navigateTo({ type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
+            view.type === 'settings' ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40' : 'bg-white/[0.04] text-hxa-text-dim border-hxa-border hover:bg-white/[0.08] hover:text-hxa-text'
+          }`}>
+            <Settings size={14} /> <span className="hidden sm:inline">{t('org.settings')}</span>
           </button>
           <button onClick={() => setConfirm({
             title: t('org.rotateSecret.title'),
@@ -584,6 +716,11 @@ export default function OrgDashboard() {
                       <div className="flex items-center gap-2.5">
                         <Circle size={8} className={`shrink-0 ${bot.online ? 'fill-hxa-green text-hxa-green' : 'fill-hxa-red text-hxa-red'}`} />
                         <span className="text-sm font-medium truncate">{bot.name}</span>
+                        {bot.join_status && bot.join_status !== 'active' && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                            bot.join_status === 'pending' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-red/20 text-hxa-red'
+                          }`}>{t(`org.bot.joinStatus.${bot.join_status}`)}</span>
+                        )}
                         <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
                           bot.auth_role === 'admin' ? 'bg-hxa-amber/20 text-hxa-amber' : 'bg-hxa-text-dim/20 text-hxa-text-dim'
                         }`}>{bot.auth_role}</span>
@@ -722,6 +859,10 @@ export default function OrgDashboard() {
               onRoleChanged={(role) => {
                 setBots(prev => prev.map(b => b.id === view.bot.id ? { ...b, auth_role: role } : b));
               }}
+              onStatusChanged={(status) => {
+                setBots(prev => prev.map(b => b.id === view.bot.id ? { ...b, join_status: status } : b));
+                setView(prev => prev.type === 'bot' ? { type: 'bot', bot: { ...prev.bot, join_status: status } } : prev);
+              }}
             />
           )}
           {view.type === 'channel' && (
@@ -745,6 +886,9 @@ export default function OrgDashboard() {
               wsRef={wsRef}
             />
           )}
+          {view.type === 'settings' && (
+            <OrgSettingsView showToast={showToast} />
+          )}
         </main>
       </div>
     </div>
@@ -753,17 +897,20 @@ export default function OrgDashboard() {
 
 // ─── Bot Profile View ───
 
-function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChanged }: {
+function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChanged, onStatusChanged }: {
   bot: OrgBot;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   onViewChannel: (channelId: string, label: string) => void;
   onDeleted: () => void;
   onRoleChanged: (role: 'admin' | 'member') => void;
+  onStatusChanged: (status: 'active' | 'pending' | 'rejected') => void;
 }) {
   const { t } = useTranslations();
   const timeAgo = useTimeAgo();
   const [channels, setChannels] = useState<OrgChannel[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReject, setConfirmReject] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(false);
 
   useEffect(() => {
     orgAdmin.getBotChannels(bot.id)
@@ -781,8 +928,34 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
     }
   }
 
+  async function handleStatusChange(status: 'active' | 'rejected') {
+    setStatusLoading(true);
+    try {
+      await orgAdmin.updateBotStatus(bot.id, status);
+      onStatusChanged(status);
+      showToast(t(status === 'active' ? 'org.bot.approved' : 'org.bot.rejected'));
+    } catch {
+      showToast(t('org.bot.statusError'), 'error');
+    } finally {
+      setStatusLoading(false);
+    }
+  }
+
   return (
     <div className="h-full overflow-auto p-8 max-md:p-4">
+      {confirmReject && (
+        <ConfirmDialog
+          title={t('org.bot.rejectTitle')}
+          message={t('org.bot.rejectMessage', { name: bot.name })}
+          confirmLabel={t('org.bot.reject')}
+          danger
+          onConfirm={async () => {
+            setConfirmReject(false);
+            handleStatusChange('rejected');
+          }}
+          onCancel={() => setConfirmReject(false)}
+        />
+      )}
       {confirmDelete && (
         <ConfirmDialog
           title={t('org.bot.deleteTitle')}
@@ -815,6 +988,58 @@ function BotProfileView({ bot, showToast, onViewChannel, onDeleted, onRoleChange
             </div>
           </div>
         </div>
+
+        {/* Join Status Banner */}
+        {bot.join_status && bot.join_status !== 'active' && (
+          <div className={`rounded-xl p-4 border ${
+            bot.join_status === 'pending'
+              ? 'bg-hxa-amber/10 border-hxa-amber/30'
+              : 'bg-hxa-red/10 border-hxa-red/30'
+          }`}>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className={`text-sm font-semibold ${bot.join_status === 'pending' ? 'text-hxa-amber' : 'text-hxa-red'}`}>
+                  {t(`org.bot.joinStatus.${bot.join_status}`)}
+                </div>
+                <p className="text-xs text-hxa-text-dim mt-1">
+                  {bot.join_status === 'pending' ? t('org.bot.pendingDesc') : t('org.bot.rejectedDesc')}
+                </p>
+                {bot.join_status_reason && (
+                  <p className="text-xs text-hxa-text-dim mt-1">{t('org.bot.reason')}: {bot.join_status_reason}</p>
+                )}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {bot.join_status === 'pending' && (
+                  <>
+                    <button
+                      onClick={() => handleStatusChange('active')}
+                      disabled={statusLoading}
+                      className="px-4 py-2 text-sm font-medium bg-hxa-green/20 text-hxa-green rounded-lg hover:bg-hxa-green/30 border border-hxa-green/30 disabled:opacity-50"
+                    >
+                      {t('org.bot.approve')}
+                    </button>
+                    <button
+                      onClick={() => setConfirmReject(true)}
+                      disabled={statusLoading}
+                      className="px-4 py-2 text-sm font-medium bg-hxa-red/20 text-hxa-red rounded-lg hover:bg-hxa-red/30 border border-hxa-red/30 disabled:opacity-50"
+                    >
+                      {t('org.bot.reject')}
+                    </button>
+                  </>
+                )}
+                {bot.join_status === 'rejected' && (
+                  <button
+                    onClick={() => handleStatusChange('active')}
+                    disabled={statusLoading}
+                    className="px-4 py-2 text-sm font-medium bg-hxa-green/20 text-hxa-green rounded-lg hover:bg-hxa-green/30 border border-hxa-green/30 disabled:opacity-50"
+                  >
+                    {t('org.bot.approve')}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Role */}
         <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-4">
@@ -1244,6 +1469,216 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef }: {
   );
 }
 
+// ─── Org Settings View ───
+
+function OrgSettingsView({ showToast }: {
+  showToast: (msg: string, type?: 'success' | 'error') => void;
+}) {
+  const { t } = useTranslations();
+  const [settings, setSettings] = useState<OrgSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    orgAdmin.getOrgSettings()
+      .then(s => setSettings(s))
+      .catch(() => showToast(t('org.settings.loadError'), 'error'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function updateSetting(key: string, value: unknown) {
+    if (saving) return; // serialize: one save at a time to prevent server-side TOCTOU
+    setSaving(key);
+    try {
+      const updated = await orgAdmin.updateOrgSettings({ [key]: value });
+      setSettings(updated);
+      showToast(t('org.settings.saved'));
+    } catch {
+      showToast(t('org.settings.saveError'), 'error');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 rounded-full border-3 border-hxa-accent/20 border-t-hxa-accent animate-spin" />
+      </div>
+    );
+  }
+
+  if (!settings) {
+    return (
+      <div className="h-full flex items-center justify-center text-hxa-text-dim text-sm">
+        {t('org.settings.loadError')}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-auto p-8 max-md:p-4">
+      <div className="max-w-[680px] mx-auto space-y-6">
+        <div className="flex items-center gap-3 mb-2">
+          <Settings size={24} className="text-hxa-accent" />
+          <h2 className="text-xl font-bold">{t('org.settings')}</h2>
+        </div>
+
+        {/* Bot Join Approval */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.botJoin')}</h3>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <div className="text-sm font-medium">{t('org.settings.joinApproval')}</div>
+              <p className="text-xs text-hxa-text-dim mt-1 leading-relaxed">{t('org.settings.joinApprovalDesc')}</p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.join_approval_required}
+              aria-label={t('org.settings.joinApproval')}
+              onClick={() => updateSetting('join_approval_required', !settings.join_approval_required)}
+              disabled={saving !== null}
+              className={`relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0 ${
+                settings.join_approval_required ? 'bg-hxa-accent' : 'bg-white/10'
+              } ${saving !== null ? 'opacity-50' : 'cursor-pointer'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
+                settings.join_approval_required ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Rate Limits */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.rateLimits')}</h3>
+          <div className="space-y-4">
+            <SettingsNumberField
+              label={t('org.settings.msgPerMin')}
+              value={settings.messages_per_minute_per_bot}
+              onSave={(v) => updateSetting('messages_per_minute_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.threadsPerHour')}
+              value={settings.threads_per_hour_per_bot}
+              onSave={(v) => updateSetting('threads_per_hour_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.uploadMbPerDay')}
+              value={settings.file_upload_mb_per_day_per_bot}
+              onSave={(v) => updateSetting('file_upload_mb_per_day_per_bot', v)}
+              saving={saving !== null}
+              min={1}
+            />
+          </div>
+        </div>
+
+        {/* Retention */}
+        <div className="glass bg-[rgba(10,15,26,0.6)] border border-hxa-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-hxa-text-dim uppercase tracking-wider mb-4">{t('org.settings.retention')}</h3>
+          <div className="space-y-4">
+            <SettingsNumberField
+              label={t('org.settings.msgTtl')}
+              value={settings.message_ttl_days}
+              onSave={(v) => updateSetting('message_ttl_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.threadAutoClose')}
+              value={settings.thread_auto_close_days}
+              onSave={(v) => updateSetting('thread_auto_close_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+            <SettingsNumberField
+              label={t('org.settings.artifactRetention')}
+              value={settings.artifact_retention_days}
+              onSave={(v) => updateSetting('artifact_retention_days', v)}
+              saving={saving !== null}
+              nullable
+              min={1}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsNumberField({ label, value, onSave, saving, nullable, min }: {
+  label: string;
+  value: number | null;
+  onSave: (v: number | null) => void;
+  saving: boolean;
+  nullable?: boolean;
+  min?: number;
+}) {
+  const { t } = useTranslations();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value === null ? '' : String(value));
+  const [invalid, setInvalid] = useState(false);
+
+  function handleSave() {
+    if (nullable && draft.trim() === '') {
+      setInvalid(false);
+      onSave(null);
+      setEditing(false);
+      return;
+    }
+    const num = parseInt(draft, 10);
+    if (isNaN(num) || (min !== undefined && num < min)) {
+      setInvalid(true);
+      setTimeout(() => setInvalid(false), 600);
+      return;
+    }
+    setInvalid(false);
+    onSave(num);
+    setEditing(false);
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-sm">{label}</span>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            value={draft}
+            onChange={e => { setDraft(e.target.value); setInvalid(false); }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') { setInvalid(false); setEditing(false); } }}
+            min={min}
+            placeholder={nullable ? t('org.settings.nullHint') : undefined}
+            className={`w-24 bg-black/30 border rounded-lg px-3 py-1.5 text-sm outline-none text-right font-mono transition-colors ${
+              invalid ? 'border-hxa-red text-hxa-red' : 'border-hxa-border focus:border-hxa-accent'
+            }`}
+            autoFocus
+          />
+          <button onClick={handleSave} disabled={saving} className="text-xs text-hxa-accent hover:underline">
+            {t('org.settings.save')}
+          </button>
+          <button onClick={() => { setInvalid(false); setEditing(false); }} className="text-xs text-hxa-text-dim hover:underline">
+            {t('org.confirm.cancel')}
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => { setDraft(value === null ? '' : String(value)); setEditing(true); }}
+          className="font-mono text-sm text-hxa-accent hover:underline"
+        >
+          {value === null ? t('org.settings.unlimited') : value}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Ticket Modal ───
 
 function TicketModal({ orgId, orgName, onClose }: {
@@ -1253,10 +1688,11 @@ function TicketModal({ orgId, orgName, onClose }: {
 }) {
   const { t } = useTranslations();
   const [reusable, setReusable] = useState(false);
+  const [skipApproval, setSkipApproval] = useState(false);
   const [expiresIn, setExpiresIn] = useState('86400');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ ticket: string; reusable: boolean; expiresIn: number } | null>(null);
+  const [result, setResult] = useState<{ ticket: string; reusable: boolean; skipApproval: boolean; expiresIn: number } | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function handleCreate() {
@@ -1266,9 +1702,10 @@ function TicketModal({ orgId, orgName, onClose }: {
       const expVal = parseInt(expiresIn);
       const data = await orgAdmin.createTicket({
         reusable,
+        skip_approval: skipApproval,
         expires_in: expVal,
       });
-      setResult({ ticket: data.ticket, reusable, expiresIn: expVal });
+      setResult({ ticket: data.ticket, reusable, skipApproval, expiresIn: expVal });
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : 'Failed');
     } finally {
@@ -1279,6 +1716,7 @@ function TicketModal({ orgId, orgName, onClose }: {
   function resetForm() {
     setResult(null);
     setReusable(false);
+    setSkipApproval(false);
     setExpiresIn('86400');
     setError('');
     setCopied(false);
@@ -1327,6 +1765,13 @@ function TicketModal({ orgId, orgName, onClose }: {
               </label>
               <p className="text-xs text-hxa-text-dim mt-1 leading-snug">{t('org.ticket.reusableDesc')}</p>
             </div>
+            <div className="mb-4">
+              <label className="inline-flex items-center gap-2 cursor-pointer font-semibold text-hxa-text">
+                <input type="checkbox" checked={skipApproval} onChange={e => setSkipApproval(e.target.checked)} className="w-4 h-4 accent-hxa-accent cursor-pointer" />
+                <span>{t('org.ticket.skipApproval')}</span>
+              </label>
+              <p className="text-xs text-hxa-text-dim mt-1 leading-snug">{t('org.ticket.skipApprovalDesc')}</p>
+            </div>
             {error && <p className="text-hxa-red text-sm mb-3">{error}</p>}
             <div className="flex gap-3 justify-center mt-5">
               <button type="button" onClick={onClose} className="py-2 px-6 rounded-lg text-[13px] font-semibold bg-white/[0.06] border border-white/10 text-hxa-text-dim hover:bg-white/10 hover:border-white/15 transition-colors">
@@ -1359,6 +1804,7 @@ function TicketModal({ orgId, orgName, onClose }: {
                   </div>
                   <div className="flex justify-center gap-4 mt-2.5 text-xs text-hxa-text-dim">
                     <span>{result.reusable ? t('org.ticket.reusableLabel') : t('org.ticket.singleUse')}</span>
+                    <span>{result.skipApproval ? t('org.ticket.skipApprovalLabel') : t('org.ticket.requiresApprovalLabel')}</span>
                     <span>{result.expiresIn === 0 ? t('org.ticket.noExpiry') : t('org.ticket.expiresInLabel', { time: formatExpiry(result.expiresIn) })}</span>
                   </div>
                   <p className="text-xs text-hxa-text-dim mt-3 leading-snug">

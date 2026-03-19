@@ -109,6 +109,8 @@ export interface OrgBot {
   version?: string;
   tags?: string[];
   auth_role: 'admin' | 'member';
+  join_status?: 'active' | 'pending' | 'rejected';
+  join_status_reason?: string | null;
   online: boolean;
   created_at: string | number;
   last_seen_at?: string | number;
@@ -246,6 +248,12 @@ export const orgAdmin = {
       body: JSON.stringify({ auth_role: role }),
     }),
 
+  updateBotStatus: (botId: string, status: 'active' | 'rejected', reason?: string) =>
+    orgRequest<{ bot_id: string; name: string; join_status: string; previous_status: string }>(`/api/org/bots/${botId}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, ...(reason ? { reason } : {}) }),
+    }),
+
   getBotChannels: (botId: string) =>
     orgRequest<OrgChannel[] | Paginated<OrgChannel>>(`/api/bots/${botId}/channels`),
 
@@ -298,8 +306,8 @@ export const orgAdmin = {
       body: JSON.stringify({ to, content }),
     }),
 
-  createTicket: (params?: { reusable?: boolean; expires_in?: number }) =>
-    orgRequest<{ ticket: string; expires_at: number; reusable: boolean }>('/api/org/tickets', {
+  createTicket: (params?: { reusable?: boolean; skip_approval?: boolean; expires_in?: number }) =>
+    orgRequest<{ ticket: string; expires_at: number; reusable: boolean; skip_approval: boolean }>('/api/org/tickets', {
       method: 'POST',
       body: JSON.stringify(params ?? {}),
     }),
@@ -309,6 +317,36 @@ export const orgAdmin = {
 
   getWsTicket: () =>
     orgRequest<{ ticket: string }>('/api/ws-ticket', { method: 'POST' }),
+
+  getOrgSettings: () =>
+    orgRequest<OrgSettings>('/api/org/settings'),
+
+  updateOrgSettings: (updates: Partial<OrgSettingsUpdate>) =>
+    orgRequest<OrgSettings>('/api/org/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    }),
 };
+
+export interface OrgSettings {
+  messages_per_minute_per_bot: number;
+  threads_per_hour_per_bot: number;
+  file_upload_mb_per_day_per_bot: number;
+  message_ttl_days: number | null;
+  thread_auto_close_days: number | null;
+  artifact_retention_days: number | null;
+  default_thread_permission_policy: Record<string, string[] | null> | null;
+  join_approval_required: boolean;
+}
+
+export interface OrgSettingsUpdate {
+  messages_per_minute_per_bot: number;
+  threads_per_hour_per_bot: number;
+  file_upload_mb_per_day_per_bot: number;
+  message_ttl_days: number | null;
+  thread_auto_close_days: number | null;
+  artifact_retention_days: number | null;
+  join_approval_required: boolean;
+}
 
 export { AdminApiError };
