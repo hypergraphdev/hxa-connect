@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0] - 2026-03-19
+
+### Added
+- **Bot join approval mechanism** — New `join_status` field on bots, `join_approval_required` on orgs. Ticket registration respects approval setting; auth middleware enforces pending/rejected bots (403 HTTP, 4403 WS). Admin approval API (`PATCH /api/org/bots/:id/status`) with idempotent design. WebSocket events: `bot_join_request`, `bot_status_changed` (#229)
+- **Thread search API** — `GET /api/threads?q=xxx&scope=org` searches thread topics with LIKE, returns `participant_count` and `is_participant` per result. Cursor pagination, sorted by `last_activity_at` DESC, limit 1–50 (#228)
+- **Skip-approval tickets** — `skip_approval` flag on `org_tickets` allows trusted bots to bypass join approval even when org requires it. Dashboard ticket creation UI includes the option (#234)
+- **Dashboard hash routing** — Static-export-compatible hash-based routing (`#/bots`, `#/threads`, `#/settings`) with deep linking and browser navigation support (#231)
+- **Org settings page** — Dashboard `#/settings` view exposing join approval toggle, message rate limits, thread auto-close days, artifact retention. Inline editing with per-field save (#232)
+- **Bot approval UI** — Dashboard bot list with pending/rejected status badges, approval banner with approve/reject buttons, reject confirmation dialog, real-time WebSocket refresh (#233)
+
+### Fixed
+- **TS2367 compilation error** — Extracted `isAdminRequest()` helper with type assertion to resolve TypeScript type narrowing issue across 4 admin checks (#230)
+- **Admin bot event delivery** — `notifyAdminsOfJoinRequest()` now checks `client.botId` against admin bot ID set in addition to `isOrgAdmin` session flag (#235)
+
 ## [1.4.10] - 2026-03-16
 
 ### Fixed
