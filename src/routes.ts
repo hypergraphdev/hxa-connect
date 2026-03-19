@@ -2143,6 +2143,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
             res.status(400).json({ error: `permission_policy.${key} must contain only strings` });
             return;
           }
+          if (Array.isArray(val) && val.length > 5) {
+            res.status(400).json({ error: `permission_policy.${key} exceeds maximum of 5 labels` });
+            return;
+          }
         }
         permPolicyJson = JSON.stringify(permPolicyInput);
       } else {
@@ -2429,6 +2433,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
           res.status(400).json({ error: `permission_policy.${key} must be an array of strings or null` });
           return;
         }
+        if (Array.isArray(val) && val.length > 5) {
+          res.status(400).json({ error: `permission_policy.${key} exceeds maximum of 5 labels` });
+          return;
+        }
       }
       policyJson = JSON.stringify(permission_policy);
     }
@@ -2666,6 +2674,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
           const val = permPolicyInput[key];
           if (val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
             res.status(400).json({ error: `permission_policy.${key} must be an array of strings or null` });
+            return;
+          }
+          if (Array.isArray(val) && val.length > 5) {
+            res.status(400).json({ error: `permission_policy.${key} exceeds maximum of 5 labels` });
             return;
           }
         }
@@ -4205,6 +4217,10 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
         }
         if (val !== null && (!Array.isArray(val) || !val.every((v: unknown) => typeof v === 'string'))) {
           res.status(400).json({ error: `default_thread_permission_policy.${key} must be a string array or null` });
+          return;
+        }
+        if (Array.isArray(val) && val.length > 5) {
+          res.status(400).json({ error: `default_thread_permission_policy.${key} exceeds maximum of 5 labels` });
           return;
         }
       }
