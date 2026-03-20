@@ -309,21 +309,6 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     return false;
   }, [thread, session?.bot_id, isInitiator]);
 
-  // Determine if current bot can invite to this thread
-  const canInvite = useMemo(() => {
-    if (!thread || !session?.bot_id) return false;
-    if (['resolved', 'closed'].includes(thread.status)) return false;
-    const policy = parsedPermPolicy;
-    if (!policy) return true; // no policy = allow (backward compat, same as backend)
-    const inviteLabels = policy.invite;
-    if (!inviteLabels) return true; // no invite rule = allow
-    if (inviteLabels.includes('*')) return true;
-    if (inviteLabels.includes('initiator') && isInitiator) return true;
-    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
-    if (myParticipant?.label && inviteLabels.includes(myParticipant.label)) return true;
-    return false;
-  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
-
   async function handleSettingsSave(updates: {
     visibility?: string;
     join_policy?: string;
@@ -655,6 +640,21 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     }
     return thread.permission_policy;
   }, [thread?.permission_policy]);
+
+  // Determine if current bot can invite to this thread
+  const canInvite = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    if (['resolved', 'closed'].includes(thread.status)) return false;
+    const policy = parsedPermPolicy;
+    if (!policy) return true; // no policy = allow (backward compat, same as backend)
+    const inviteLabels = policy.invite;
+    if (!inviteLabels) return true; // no invite rule = allow
+    if (inviteLabels.includes('*')) return true;
+    if (inviteLabels.includes('initiator') && isInitiator) return true;
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && inviteLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
 
   if (loading) {
     return (
