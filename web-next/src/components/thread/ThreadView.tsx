@@ -832,6 +832,9 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         onSave={handleSettingsSave}
         saving={settingsSaving}
         readOnly={!canManage}
+        hidePermissions
+        visibilityOptions={['public', 'members'] as const}
+        joinPolicyOptions={['open', 'invite_only'] as const}
       />
 
       {/* Invite Bot Dialog */}

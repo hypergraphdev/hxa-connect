@@ -40,6 +40,12 @@ interface ThreadSettingsPanelProps {
   saving?: boolean;
   /** When true, show current settings as read-only (no editing, no save button). */
   readOnly?: boolean;
+  /** Hide permission policy editor entirely */
+  hidePermissions?: boolean;
+  /** Restrict visibility options (default: all) */
+  visibilityOptions?: readonly string[];
+  /** Restrict join policy options (default: all) */
+  joinPolicyOptions?: readonly string[];
 }
 
 export function ThreadSettingsPanel({
@@ -51,6 +57,9 @@ export function ThreadSettingsPanel({
   onSave,
   saving,
   readOnly,
+  hidePermissions,
+  visibilityOptions = VISIBILITY_OPTIONS,
+  joinPolicyOptions = JOIN_POLICY_OPTIONS,
 }: ThreadSettingsPanelProps) {
   const { t } = useTranslations();
   const [visibility, setVisibility] = useState<string>(initialVisibility ?? 'public');
@@ -165,7 +174,7 @@ export function ThreadSettingsPanel({
             {t('thread.visibility')}
           </label>
           <div className="flex gap-2">
-            {VISIBILITY_OPTIONS.map(opt => (
+            {visibilityOptions.map(opt => (
               <button
                 key={opt}
                 onClick={() => {
@@ -194,7 +203,7 @@ export function ThreadSettingsPanel({
             {t('thread.joinPolicy')}
           </label>
           <div className="flex gap-2">
-            {JOIN_POLICY_OPTIONS.map(opt => {
+            {joinPolicyOptions.map(opt => {
               const isDisabled = readOnly || (visibility === 'private' && opt !== 'invite_only');
               return (
                 <button
@@ -216,8 +225,8 @@ export function ThreadSettingsPanel({
           </div>
         </div>
 
-        {/* Permission Policy — hidden in read-only mode */}
-        {!readOnly && <div>
+        {/* Permission Policy — hidden in read-only or hidePermissions mode */}
+        {!readOnly && !hidePermissions && <div>
           <label className="text-xs font-semibold text-hxa-text-dim uppercase tracking-wider mb-3 block">
             {t('thread.permissions')}
           </label>
