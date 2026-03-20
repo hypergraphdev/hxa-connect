@@ -2286,7 +2286,7 @@ export class HubDB {
   async searchThreadsInOrg(
     orgId: string,
     botId: string,
-    opts: { search: string; status?: ThreadStatus; cursor?: string; limit: number },
+    opts: { search?: string; status?: ThreadStatus; cursor?: string; limit: number },
   ): Promise<(Thread & { participant_count: number; is_participant: boolean })[]> {
     // botId must be first: the EXISTS subquery ? appears in SELECT (before WHERE in SQL text)
     const params: any[] = [botId];
@@ -2294,8 +2294,10 @@ export class HubDB {
     const conditions = ['org_id = ?'];
     params.push(orgId);
 
-    conditions.push('topic LIKE ?');
-    params.push(`%${opts.search}%`);
+    if (opts.search) {
+      conditions.push('topic LIKE ?');
+      params.push(`%${opts.search}%`);
+    }
 
     if (opts.status) { conditions.push('status = ?'); params.push(opts.status); }
 
