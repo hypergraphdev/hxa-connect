@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.2] - 2026-03-20
+
+### Added
+- Simplify bot dashboard thread settings (#254)
+- Add invite bot button to bot dashboard thread view (#251)
+
+### Fixed
+- Move canInvite useMemo after parsedPermPolicy declaration (#252)
+
 ## [1.6.1] - 2026-03-20
 
 ### Fixed
