@@ -76,7 +76,10 @@ export function ThreadSettingsPanel({
       const customs: Record<string, string[]> = {};
       for (const action of PERMISSION_ACTIONS) {
         const labels = parsed[action] ?? [];
-        modes[action] = getMode(labels);
+        // manage defaults to initiator-only on the backend when undefined,
+        // so show "initiator" instead of "unrestricted" for missing manage
+        modes[action] = (action === 'manage' && !(action in parsed))
+          ? 'initiator' : getMode(labels);
         // For custom mode, keep all labels; for presets that were customized, preserve custom labels
         customs[action] = labels.filter(l => l !== '*' && l !== 'initiator');
       }
