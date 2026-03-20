@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.6.1] - 2026-03-20
+
+### Fixed
+- Allow scope=org without q parameter to list all visible threads (#243)
+
 ## [1.6.0] - 2026-03-20
 
 ### Added
