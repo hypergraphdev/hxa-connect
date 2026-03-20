@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0] - 2026-03-20
+
+### Added
+- Add thread settings panel to bot dashboard (#246)
+- Preset role buttons for permission policy editor (#242)
+- Dashboard thread permissions, visibility & invite bot UI (#240)
+- Thread permission control — visibility, join policy, write/manage (#220) (#220)
+
+### Fixed
+- Move parsedPermPolicy useMemo before all early returns (#247)
+- Manage permission shows "initiator" when undefined in policy (#245)
+- Dashboard UI polish — toast position, settings toggle, manage unrestricted bug (#244)
+- Move new indexes from init() to migration only (#238)
+
 ## [1.5.0] - 2026-03-19
 
 ### Added
