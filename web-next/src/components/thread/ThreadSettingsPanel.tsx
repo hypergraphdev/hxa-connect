@@ -38,6 +38,8 @@ interface ThreadSettingsPanelProps {
     permission_policy?: Record<string, string[] | null> | null;
   }) => void;
   saving?: boolean;
+  /** When true, show current settings as read-only (no editing, no save button). */
+  readOnly?: boolean;
 }
 
 export function ThreadSettingsPanel({
@@ -48,6 +50,7 @@ export function ThreadSettingsPanel({
   permissionPolicy: initialPermPolicy,
   onSave,
   saving,
+  readOnly,
 }: ThreadSettingsPanelProps) {
   const { t } = useTranslations();
   const [visibility, setVisibility] = useState<string>(initialVisibility ?? 'public');
@@ -115,7 +118,10 @@ export function ThreadSettingsPanel({
     let hasAny = false;
     for (const action of PERMISSION_ACTIONS) {
       const mode = permModes[action] ?? 'unrestricted';
-      const labels = labelsForMode(mode, customLabels[action] ?? []);
+      let labels = labelsForMode(mode, customLabels[action] ?? []);
+      // manage "unrestricted" must emit ["*"] because the backend defaults
+      // undefined manage to initiator-only (safe default), unlike other actions
+      if (action === 'manage' && mode === 'unrestricted') labels = ['*'];
       if (labels.length > 0) {
         pp[action] = labels;
         hasAny = true;
@@ -160,12 +166,16 @@ export function ThreadSettingsPanel({
               <button
                 key={opt}
                 onClick={() => {
+                  if (readOnly) return;
                   setVisibility(opt);
                   if (opt === 'private') setJoinPolicy('invite_only');
                 }}
+                disabled={readOnly}
                 className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${
                   visibility === opt
                     ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40'
+                    : readOnly
+                    ? 'bg-black/10 text-hxa-text-muted border-hxa-border/50 cursor-not-allowed opacity-50'
                     : 'bg-black/20 text-hxa-text-dim border-hxa-border hover:border-hxa-text-dim'
                 }`}
               >
@@ -182,16 +192,16 @@ export function ThreadSettingsPanel({
           </label>
           <div className="flex gap-2">
             {JOIN_POLICY_OPTIONS.map(opt => {
-              const disabled = visibility === 'private' && opt !== 'invite_only';
+              const isDisabled = readOnly || (visibility === 'private' && opt !== 'invite_only');
               return (
                 <button
                   key={opt}
-                  onClick={() => !disabled && setJoinPolicy(opt)}
-                  disabled={disabled}
+                  onClick={() => !isDisabled && setJoinPolicy(opt)}
+                  disabled={isDisabled}
                   className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${
                     joinPolicy === opt
                       ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40'
-                      : disabled
+                      : isDisabled
                       ? 'bg-black/10 text-hxa-text-muted border-hxa-border/50 cursor-not-allowed opacity-50'
                       : 'bg-black/20 text-hxa-text-dim border-hxa-border hover:border-hxa-text-dim'
                   }`}
@@ -203,8 +213,8 @@ export function ThreadSettingsPanel({
           </div>
         </div>
 
-        {/* Permission Policy */}
-        <div>
+        {/* Permission Policy — hidden in read-only mode */}
+        {!readOnly && <div>
           <label className="text-xs font-semibold text-hxa-text-dim uppercase tracking-wider mb-3 block">
             {t('thread.permissions')}
           </label>
@@ -291,19 +301,21 @@ export function ThreadSettingsPanel({
               );
             })}
           </div>
-        </div>
+        </div>}
       </div>
 
-      {/* Footer — save button */}
-      <div className="shrink-0 px-4 py-3 border-t border-hxa-border">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="w-full text-xs font-medium px-4 py-2 bg-hxa-accent/20 text-hxa-accent border border-hxa-accent/30 rounded-lg hover:bg-hxa-accent/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {saving ? '...' : t('org.settings.save')}
-        </button>
-      </div>
+      {/* Footer — save button (hidden in read-only mode) */}
+      {!readOnly && (
+        <div className="shrink-0 px-4 py-3 border-t border-hxa-border">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="w-full text-xs font-medium px-4 py-2 bg-hxa-accent/20 text-hxa-accent border border-hxa-accent/30 rounded-lg hover:bg-hxa-accent/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? '...' : t('org.settings.save')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

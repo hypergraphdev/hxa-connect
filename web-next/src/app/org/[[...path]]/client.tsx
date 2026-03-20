@@ -30,7 +30,7 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 function Toast({ message, type, onDone }: { message: string; type: 'success' | 'error'; onDone: () => void }) {
   useEffect(() => { const t = setTimeout(onDone, 3000); return () => clearTimeout(t); }, [onDone]);
   return (
-    <div className={`fixed top-4 right-4 z-50 px-4 py-2.5 rounded-lg text-sm font-medium shadow-lg animate-fade-in ${
+    <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg text-sm font-medium shadow-lg animate-fade-in ${
       type === 'success' ? 'bg-hxa-green/20 text-hxa-green border border-hxa-green/30' : 'bg-hxa-red/20 text-hxa-red border border-hxa-red/30'
     }`}>{message}</div>
   );
@@ -523,7 +523,7 @@ export default function OrgDashboard() {
           <button onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-accent/10 text-hxa-accent rounded-lg hover:bg-hxa-accent/20 border border-hxa-accent/30 transition-colors max-md:px-2 max-md:gap-0">
             <Plus size={14} /> <span className="hidden sm:inline">{t('org.inviteBot')}</span>
           </button>
-          <button onClick={() => navigateTo({ type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
+          <button onClick={() => navigateTo(view.type === 'settings' ? { type: 'empty' } : { type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
             view.type === 'settings' ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40' : 'bg-white/[0.04] text-hxa-text-dim border-hxa-border hover:bg-white/[0.08] hover:text-hxa-text'
           }`}>
             <Settings size={14} /> <span className="hidden sm:inline">{t('org.settings')}</span>
