@@ -630,14 +630,6 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
   const canSend = thread && !['resolved', 'closed'].includes(thread.status);
 
-  if (loading) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <Loader2 size={24} className="animate-spin text-hxa-accent" />
-      </div>
-    );
-  }
-
   const parsedPermPolicy = useMemo(() => {
     if (!thread?.permission_policy) return null;
     if (typeof thread.permission_policy === 'string') {
@@ -645,6 +637,14 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     }
     return thread.permission_policy;
   }, [thread?.permission_policy]);
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 size={24} className="animate-spin text-hxa-accent" />
+      </div>
+    );
+  }
 
   if (!thread) {
     return (
