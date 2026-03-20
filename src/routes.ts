@@ -2532,13 +2532,9 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     const search = getQueryString(req.query.q)?.trim();
     const scope = getQueryString(req.query.scope);
 
-    // scope=org: search all threads in bot's org (not just joined)
+    // scope=org: list/search all threads in bot's org (not just joined)
     if (scope === 'org') {
-      if (!search) {
-        res.status(400).json({ error: 'q parameter required when scope=org' });
-        return;
-      }
-      if (search.length > 200) {
+      if (search && search.length > 200) {
         res.status(400).json({ error: 'q too long (max 200 chars)' });
         return;
       }

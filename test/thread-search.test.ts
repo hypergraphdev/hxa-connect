@@ -165,12 +165,13 @@ describe('Thread Search (scope=org)', () => {
 
   // ── Validation / edge cases ───────────────────────────────
 
-  it('requires q when scope=org', async () => {
+  it('lists all visible threads when scope=org without q', async () => {
     const { status, body } = await api(env.baseUrl, 'GET', '/api/threads?scope=org', {
       token: botToken2,
     });
-    expect(status).toBe(400);
-    expect(body.error).toContain('q parameter required');
+    expect(status).toBe(200);
+    expect(body.items).toBeDefined();
+    expect(Array.isArray(body.items)).toBe(true);
   });
 
   it('rejects q longer than 200 chars', async () => {
