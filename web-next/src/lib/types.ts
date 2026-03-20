@@ -57,6 +57,7 @@ export interface Thread {
   status: ThreadStatus;
   tags: string[];
   created_by: string;
+  initiator_id?: string;
   created_at: string;
   updated_at: string;
   last_activity_at: string;

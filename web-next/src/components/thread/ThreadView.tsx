@@ -10,6 +10,7 @@ import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/comp
 import { PartRenderer } from '@/components/ui/PartRenderer';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { ThreadSettingsPanel } from '@/components/thread/ThreadSettingsPanel';
 import { useTranslations } from '@/i18n/context';
 import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
 
@@ -87,6 +88,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadAborts = useRef<Map<string, () => void>>(new Map());
@@ -273,6 +276,52 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(msg);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }
+
+  // ─── Thread settings ───
+
+  // Determine if current bot can manage this thread's settings
+  const isInitiator = !!(thread && session?.bot_id && thread.initiator_id === session.bot_id);
+  const canManage = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    // Thread initiator always has manage (backend default)
+    if (isInitiator) return true;
+    // Check explicit manage policy
+    let policy: Record<string, string[] | null> = {};
+    if (thread.permission_policy) {
+      if (typeof thread.permission_policy === 'string') {
+        try { policy = JSON.parse(thread.permission_policy); } catch { return false; }
+      } else {
+        policy = thread.permission_policy as Record<string, string[] | null>;
+      }
+    }
+    const manageLabels = policy.manage;
+    if (!manageLabels) return false; // undefined = initiator-only (already checked above)
+    if (manageLabels.includes('*')) return true;
+    // "initiator" special label — matches thread creator
+    if (manageLabels.includes('initiator') && isInitiator) return true;
+    // Check if bot's participant label matches
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && manageLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator]);
+
+  async function handleSettingsSave(updates: {
+    visibility?: string;
+    join_policy?: string;
+    permission_policy?: Record<string, string[] | null> | null;
+  }) {
+    setSettingsSaving(true);
+    try {
+      const updated = await api.updateThread(threadId, updates);
+      setThread(updated);
+      showToast(t('thread.settings.saved'));
+      setSettingsOpen(false);
+    } catch {
+      showToast(t('thread.settings.error'));
+    } finally {
+      setSettingsSaving(false);
+    }
   }
 
   // ─── Image handling ───
@@ -589,6 +638,14 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     );
   }
 
+  const parsedPermPolicy = useMemo(() => {
+    if (!thread?.permission_policy) return null;
+    if (typeof thread.permission_policy === 'string') {
+      try { return JSON.parse(thread.permission_policy); } catch { return null; }
+    }
+    return thread.permission_policy;
+  }, [thread?.permission_policy]);
+
   if (!thread) {
     return (
       <div className="flex-1 flex items-center justify-center text-hxa-text-dim text-sm">
@@ -598,7 +655,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
+    <div className="flex-1 flex min-h-0 min-w-0">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <ThreadHeader
         topic={thread.topic}
         status={thread.status}
@@ -618,6 +676,9 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
           } catch { /* silent */ }
         }}
         onOpenArtifacts={onOpenArtifacts}
+        visibility={thread.visibility}
+        canManageSettings={true}
+        onOpenSettings={() => setSettingsOpen(o => !o)}
       />
 
       {/* Messages */}
@@ -740,6 +801,19 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         </div>
       )}
 
+    </div>
+
+      {/* Thread Settings Panel */}
+      <ThreadSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        visibility={thread.visibility}
+        joinPolicy={thread.join_policy}
+        permissionPolicy={parsedPermPolicy}
+        onSave={handleSettingsSave}
+        saving={settingsSaving}
+        readOnly={!canManage}
+      />
     </div>
   );
 }
