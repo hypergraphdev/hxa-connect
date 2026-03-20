@@ -11,6 +11,7 @@ import { PartRenderer } from '@/components/ui/PartRenderer';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
 import { ThreadSettingsPanel } from '@/components/thread/ThreadSettingsPanel';
+import { InviteToThreadDialog } from '@/components/thread/InviteToThreadDialog';
 import { useTranslations } from '@/i18n/context';
 import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
 
@@ -90,6 +91,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviting, setInviting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadAborts = useRef<Map<string, () => void>>(new Map());
@@ -305,6 +308,21 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     if (myParticipant?.label && manageLabels.includes(myParticipant.label)) return true;
     return false;
   }, [thread, session?.bot_id, isInitiator]);
+
+  // Determine if current bot can invite to this thread
+  const canInvite = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    if (['resolved', 'closed'].includes(thread.status)) return false;
+    const policy = parsedPermPolicy;
+    if (!policy) return true; // no policy = allow (backward compat, same as backend)
+    const inviteLabels = policy.invite;
+    if (!inviteLabels) return true; // no invite rule = allow
+    if (inviteLabels.includes('*')) return true;
+    if (inviteLabels.includes('initiator') && isInitiator) return true;
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && inviteLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
 
   async function handleSettingsSave(updates: {
     visibility?: string;
@@ -679,6 +697,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         visibility={thread.visibility}
         canManageSettings={true}
         onOpenSettings={() => setSettingsOpen(o => !o)}
+        onInviteBot={canInvite ? () => setInviteOpen(true) : undefined}
       />
 
       {/* Messages */}
@@ -813,6 +832,31 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         onSave={handleSettingsSave}
         saving={settingsSaving}
         readOnly={!canManage}
+      />
+
+      {/* Invite Bot Dialog */}
+      <InviteToThreadDialog
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        fetchBots={async () => {
+          const res = await api.listBots();
+          // Bot-level auth returns flat array; org-level returns { items }
+          const items = Array.isArray(res) ? res : (res.items ?? []);
+          return { items };
+        }}
+        inviting={inviting}
+        onInvite={async (botId, label) => {
+          setInviting(true);
+          try {
+            await api.inviteToThread(thread.id, botId, label);
+            showToast(t('thread.inviteBot.success'));
+            setInviteOpen(false);
+          } catch {
+            showToast(t('thread.inviteBot.error'));
+          } finally {
+            setInviting(false);
+          }
+        }}
       />
     </div>
   );
