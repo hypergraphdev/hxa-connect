@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.0] - 2026-03-27
+
+### Added
+- Allow org admins to remove thread participants (#257)
+
 ## [1.6.2] - 2026-03-20
 
 ### Added
