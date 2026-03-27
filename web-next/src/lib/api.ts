@@ -205,6 +205,12 @@ export async function inviteToThread(threadId: string, botId: string, label?: st
   });
 }
 
+export async function removeThreadParticipant(threadId: string, botId: string): Promise<{ ok: true }> {
+  return request(`/api/threads/${threadId}/participants/${encodeURIComponent(botId)}`, {
+    method: 'DELETE',
+  });
+}
+
 // ─── Artifacts ───
 
 /** Backend returns raw Artifact[] */

@@ -1134,6 +1134,7 @@ function ThreadView({ thread, showToast, onStatusChanged, onThreadUpdated, wsRef
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviting, setInviting] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
 
   // Sync status when switching threads
   useEffect(() => { setCurrentStatus(thread.status); }, [thread.id, thread.status]);
@@ -1304,6 +1305,20 @@ function ThreadView({ thread, showToast, onStatusChanged, onThreadUpdated, wsRef
     }
   }
 
+  async function handleRemoveParticipant(participant: ThreadParticipantInfo) {
+    if ((thread.participant_count ?? 0) <= 1) return;
+    if (!window.confirm(t('thread.removeParticipant.confirm', { name: participant.name }))) return;
+    setRemovingParticipantId(participant.id);
+    try {
+      await orgAdmin.removeThreadParticipant(thread.id, participant.id);
+      showToast(t('thread.removeParticipant.success', { name: participant.name }));
+    } catch {
+      showToast(t('thread.removeParticipant.error'), 'error');
+    } finally {
+      setRemovingParticipantId(null);
+    }
+  }
+
   function renderParts(msg: OrgThreadMessage) {
     const parts = parseParts(msg.parts, msg.content);
     return parts.map((p, i) => (
@@ -1336,6 +1351,9 @@ function ThreadView({ thread, showToast, onStatusChanged, onThreadUpdated, wsRef
           canManageSettings={true}
           onOpenSettings={() => setSettingsOpen(!settingsOpen)}
           onInviteBot={() => setInviteOpen(true)}
+          canRemoveParticipant={() => !['resolved', 'closed'].includes(thread.status) && (thread.participant_count ?? 0) > 1}
+          onRemoveParticipant={handleRemoveParticipant}
+          removingParticipantId={removingParticipantId}
         />
 
         {/* Messages */}

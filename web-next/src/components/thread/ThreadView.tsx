@@ -93,6 +93,7 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviting, setInviting] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadAborts = useRef<Map<string, () => void>>(new Map());
@@ -656,6 +657,35 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     return false;
   }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
 
+  const canRemoveOthers = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    if (['resolved', 'closed'].includes(thread.status)) return false;
+    if ((thread.participant_count ?? 0) <= 1) return false;
+    const policy = parsedPermPolicy;
+    if (!policy) return true;
+    const removeLabels = policy.remove;
+    if (!removeLabels) return true;
+    if (removeLabels.includes('*')) return true;
+    if (removeLabels.includes('initiator') && isInitiator) return true;
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && removeLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
+
+  async function handleRemoveParticipant(participant: ThreadParticipantInfo) {
+    if (!thread || participant.id === session?.bot_id) return;
+    if (!window.confirm(t('thread.removeParticipant.confirm', { name: participant.name }))) return;
+    setRemovingParticipantId(participant.id);
+    try {
+      await api.removeThreadParticipant(thread.id, participant.id);
+      showToast(t('thread.removeParticipant.success', { name: participant.name }));
+    } catch {
+      showToast(t('thread.removeParticipant.error'));
+    } finally {
+      setRemovingParticipantId(null);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -698,6 +728,9 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         canManageSettings={true}
         onOpenSettings={() => setSettingsOpen(o => !o)}
         onInviteBot={canInvite ? () => setInviteOpen(true) : undefined}
+        canRemoveParticipant={(participant) => canRemoveOthers && participant.id !== session?.bot_id}
+        onRemoveParticipant={canRemoveOthers ? handleRemoveParticipant : undefined}
+        removingParticipantId={removingParticipantId}
       />
 
       {/* Messages */}
@@ -1006,4 +1039,3 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
     </div>
   );
 }
-

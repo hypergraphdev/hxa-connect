@@ -351,6 +351,51 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     return undefined;
   }
 
+  function threadActorRef(req: import('express').Request, orgId: string): string {
+    if (req.session?.role === 'org_admin' || req.session?.role === 'super_admin') {
+      return `org:${orgId}`;
+    }
+    return req.bot?.id ?? `org:${orgId}`;
+  }
+
+  async function removeThreadParticipantCore(
+    thread: Thread,
+    target: Bot,
+    removedBy: string,
+    auditBotId: string | null,
+  ): Promise<void> {
+    const participants = await db.getParticipants(thread.id);
+    if (participants.length <= 1) {
+      const err = new Error('Cannot remove the last participant from a thread');
+      (err as any).status = 400;
+      throw err;
+    }
+
+    // Broadcast before deletion so the removed bot is still eligible to receive it.
+    await ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_participant',
+      thread_id: thread.id,
+      bot_id: target.id,
+      bot_name: target.name,
+      action: 'left',
+      by: removedBy,
+    });
+
+    await db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
+      thread_id: thread.id,
+      topic: thread.topic,
+      removed_by: removedBy,
+    });
+
+    await db.removeParticipant(thread.id, target.id);
+
+    await db.recordAudit(thread.org_id, auditBotId, 'thread.remove_participant', 'thread', thread.id, {
+      removed_bot_id: target.id,
+      removed_bot_name: target.name,
+      removed_by: removedBy,
+    });
+  }
+
   async function requireThreadParticipant(
     req: import('express').Request,
     res: import('express').Response,
@@ -2337,6 +2382,44 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     res.json(participant);
   });
 
+  /**
+   * DELETE /api/org/threads/:id/participants/:bot — Remove participant from thread (org admin)
+   */
+  auth.delete('/api/org/threads/:id/participants/:bot', async (req, res) => {
+    if (!requireOrgAdmin(req, res)) return;
+    const orgId = (req.session?.org_id || req.org?.id || req.bot?.org_id)!;
+
+    const thread = await db.getThread(req.params.id as string);
+    if (!thread || thread.org_id !== orgId) {
+      res.status(404).json({ error: 'Thread not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    if (thread.status === 'resolved' || thread.status === 'closed') {
+      res.status(409).json({ error: 'Cannot remove participants from a resolved or closed thread', code: 'THREAD_TERMINAL' });
+      return;
+    }
+
+    const target = await resolveBot(orgId, req.params.bot as string);
+    if (!target) {
+      res.status(404).json({ error: `Bot not found: ${req.params.bot}`, code: 'NOT_FOUND' });
+      return;
+    }
+
+    if (!(await db.isParticipant(thread.id, target.id))) {
+      res.status(404).json({ error: 'Bot is not a participant in this thread', code: 'NOT_FOUND' });
+      return;
+    }
+
+    try {
+      await removeThreadParticipantCore(thread, target, threadActorRef(req, orgId), req.bot?.id ?? null);
+      res.json({ ok: true });
+    } catch (error: any) {
+      const status = error?.status || 500;
+      res.status(status).json({ error: error?.message || 'Failed to remove participant', code: status === 400 ? 'VALIDATION_ERROR' : 'INTERNAL_ERROR' });
+    }
+  });
+
   // ─── Threads ─────────────────────────────────────────────
 
   /**
@@ -3172,41 +3255,13 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       return;
     }
 
-    const participants = await db.getParticipants(thread.id);
-    if (participants.length <= 1) {
-      res.status(400).json({ error: 'Cannot remove the last participant from a thread' });
-      return;
+    try {
+      await removeThreadParticipantCore(thread, target, req.bot!.id, req.bot!.id);
+      res.json({ ok: true });
+    } catch (error: any) {
+      const status = error?.status || 500;
+      res.status(status).json({ error: error?.message || 'Failed to remove participant', code: status === 400 ? 'VALIDATION_ERROR' : 'INTERNAL_ERROR' });
     }
-
-    // Broadcast leave event BEFORE removing participant, so the removed bot
-    // is still in the recipient list and receives the notification.
-    // NOTE: This broadcast must complete before removeParticipant is called,
-    // so we intentionally await it here (unlike other fire-and-forget broadcasts).
-    await ws.broadcastThreadEvent(thread.org_id, thread.id, {
-      type: 'thread_participant',
-      thread_id: thread.id,
-      bot_id: target.id,
-      bot_name: target.name,
-      action: 'left',
-      by: req.bot!.id,
-    });
-
-    // Record catchup event so the removed bot sees it even if offline
-    await db.recordCatchupEvent(thread.org_id, target.id, 'thread_participant_removed', {
-      thread_id: thread.id,
-      topic: thread.topic,
-      removed_by: req.bot!.id,
-    });
-
-    await db.removeParticipant(thread.id, target.id);
-
-    // Audit
-    await db.recordAudit(thread.org_id, req.bot!.id, 'thread.remove_participant', 'thread', thread.id, {
-      removed_bot_id: target.id,
-      removed_bot_name: target.name,
-    });
-
-    res.json({ ok: true });
   });
 
   /**

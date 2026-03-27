@@ -285,6 +285,11 @@ export const orgAdmin = {
       body: JSON.stringify({ bot_id: botId, ...(label ? { label } : {}) }),
     }),
 
+  removeThreadParticipant: (threadId: string, botId: string) =>
+    orgRequest<{ ok: true }>(`/api/org/threads/${threadId}/participants/${encodeURIComponent(botId)}`, {
+      method: 'DELETE',
+    }),
+
   getThreadMessages: (threadId: string, params?: { before?: string; limit?: number }) => {
     const sp = new URLSearchParams();
     if (params?.before) sp.set('before', params.before);

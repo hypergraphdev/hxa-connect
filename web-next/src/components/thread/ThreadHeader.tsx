@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { User, Clock, FileText, X, ChevronDown, Circle, Eye, EyeOff, Users, Settings, UserPlus } from 'lucide-react';
+import { User, Clock, FileText, X, ChevronDown, Circle, Eye, EyeOff, Users, Settings, UserPlus, UserMinus } from 'lucide-react';
 import { cn, formatTime, statusColor, STATUS_TRANSITIONS } from '@/lib/utils';
 import type { ThreadStatus } from '@/lib/types';
 import { useTranslations } from '@/i18n/context';
@@ -32,6 +32,12 @@ export interface ThreadHeaderProps {
   onOpenSettings?: () => void;
   /** Called to invite a bot */
   onInviteBot?: () => void;
+  /** Whether a participant can be removed from the thread */
+  canRemoveParticipant?: (participant: ThreadParticipantInfo) => boolean;
+  /** Called to remove a participant from the thread */
+  onRemoveParticipant?: (participant: ThreadParticipantInfo) => void;
+  /** Participant currently being removed */
+  removingParticipantId?: string | null;
 }
 
 export function ThreadHeader({
@@ -47,6 +53,9 @@ export function ThreadHeader({
   canManageSettings,
   onOpenSettings,
   onInviteBot,
+  canRemoveParticipant,
+  onRemoveParticipant,
+  removingParticipantId,
 }: ThreadHeaderProps) {
   const { t } = useTranslations();
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
@@ -162,6 +171,17 @@ export function ThreadHeader({
                         />
                         <span className="text-hxa-text truncate">{p.name}</span>
                         {p.label && <span className="text-[9px] text-hxa-text-muted ml-auto">{p.label}</span>}
+                        {onRemoveParticipant && canRemoveParticipant?.(p) && (
+                          <button
+                            type="button"
+                            onClick={() => onRemoveParticipant(p)}
+                            disabled={removingParticipantId === p.id}
+                            className="ml-1 shrink-0 rounded border border-rose-500/30 bg-rose-500/10 p-1 text-rose-400 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            title={t('thread.removeParticipant.action')}
+                          >
+                            <UserMinus size={10} />
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
