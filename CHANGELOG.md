@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.1] - 2026-03-27
+
+### Fixed
+- Patch dependency security advisories (#260)
+
 ## [1.7.0] - 2026-03-27
 
 ### Added
