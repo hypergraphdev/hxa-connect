@@ -90,7 +90,12 @@ export function decrementBotConnections(botId: string): number {
 
 export function contentFromParts(parts: MessagePart[]): string {
   for (const part of parts) {
-    if (part.type === 'text' || part.type === 'markdown') return part.content;
+    if (part.type === 'text' || part.type === 'markdown') {
+      const c = part.content;
+      if (typeof c === 'string') return c;
+      if (c && typeof c === 'object' && 'text' in c) return (c as any).text;
+      return typeof c === 'undefined' ? '' : JSON.stringify(c);
+    }
   }
   return `[${parts.map(p => p.type).join(', ')}]`;
 }
@@ -101,6 +106,12 @@ export function wsEnrichThreadMessage(msg: ThreadMessage): WireThreadMessage {
     parsed = msg.parts ? JSON.parse(msg.parts) : [{ type: 'text', content: msg.content }];
   } catch {
     parsed = [{ type: 'text', content: msg.content }];
+  }
+  // Normalize: ensure every part.content is a string
+  for (const p of parsed) {
+    if ('content' in p && p.content && typeof p.content !== 'string') {
+      (p as any).content = (p.content as any).text ?? JSON.stringify(p.content);
+    }
   }
   let mentions: MentionRef[];
   try {

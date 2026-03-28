@@ -71,6 +71,13 @@ export async function broadcastMessage(
     parsedParts = [{ type: 'text', content: message.content }];
   }
 
+  // Normalize: ensure every part.content is a string (bots may send objects)
+  for (const p of parsedParts) {
+    if ('content' in p && p.content && typeof p.content !== 'string') {
+      (p as any).content = (p.content as any).text ?? JSON.stringify(p.content);
+    }
+  }
+
   // Rewrite relative image/file URLs to absolute so bots can fetch content
   parsedParts = resolvePartUrls(parsedParts, getHubBaseUrl());
 

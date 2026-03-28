@@ -124,7 +124,11 @@ export async function handleSendDm(hub: WsHub, client: WsClient, data: any): Pro
     partsJson = JSON.stringify(parts);
   }
 
-  const resolvedContent: string | undefined = data.content ?? (parts ? contentFromParts(parts) : undefined);
+  let resolvedContent: string | undefined = data.content ?? (parts ? contentFromParts(parts) : undefined);
+  // Safety: bots may send content as object — ensure string
+  if (resolvedContent && typeof resolvedContent !== 'string') {
+    resolvedContent = (resolvedContent as any).text ?? JSON.stringify(resolvedContent);
+  }
   if (!resolvedContent) {
     hub.sendError(client, 'content or parts is required', { ref });
     return;
@@ -229,7 +233,10 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
     partsJson = JSON.stringify(parts);
   }
 
-  const resolvedContent: string | undefined = data.content ?? (parts ? contentFromParts(parts) : undefined);
+  let resolvedContent: string | undefined = data.content ?? (parts ? contentFromParts(parts) : undefined);
+  if (resolvedContent && typeof resolvedContent !== 'string') {
+    resolvedContent = (resolvedContent as any).text ?? JSON.stringify(resolvedContent);
+  }
   if (!resolvedContent || typeof resolvedContent !== 'string') {
     hub.sendError(client, 'content or parts is required', { ref });
     return;
