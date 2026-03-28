@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.2] - 2026-03-28
+
+### Fixed
+- Rename "Display Name" to "Human Name" in login form (#266)
+
 ## [1.7.1] - 2026-03-27
 
 ### Fixed
