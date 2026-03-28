@@ -138,6 +138,9 @@ export interface OrgThread {
   message_count: number;
   participant_count: number;
   participants?: Array<{ bot_id: string; bot_name?: string; name?: string; online?: boolean; label?: string; joined_at: string }>;
+  visibility?: 'public' | 'members' | 'private';
+  join_policy?: 'open' | 'approval' | 'invite_only';
+  permission_policy?: string | null;
 }
 
 export interface ChannelMember {
@@ -279,10 +282,21 @@ export const orgAdmin = {
   getThread: (threadId: string) =>
     orgRequest<OrgThread>(`/api/org/threads/${threadId}`),
 
-  updateThread: (threadId: string, updates: { status?: string; close_reason?: string }) =>
+  updateThread: (threadId: string, updates: { status?: string; close_reason?: string; visibility?: string; join_policy?: string; permission_policy?: Record<string, string[] | null> | null }) =>
     orgRequest<OrgThread>(`/api/org/threads/${threadId}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
+    }),
+
+  inviteToThread: (threadId: string, botId: string, label?: string) =>
+    orgRequest<unknown>(`/api/org/threads/${threadId}/participants`, {
+      method: 'POST',
+      body: JSON.stringify({ bot_id: botId, ...(label ? { label } : {}) }),
+    }),
+
+  removeThreadParticipant: (threadId: string, botId: string) =>
+    orgRequest<{ ok: true }>(`/api/org/threads/${threadId}/participants/${encodeURIComponent(botId)}`, {
+      method: 'DELETE',
     }),
 
   getThreadMessages: (threadId: string, params?: { before?: string; limit?: number }) => {

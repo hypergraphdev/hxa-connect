@@ -104,6 +104,9 @@ export interface Message {
 
 export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';
 export type CloseReason = 'manual' | 'timeout' | 'error';
+export type ThreadVisibility = 'public' | 'members' | 'private';
+export type ThreadJoinPolicy = 'open' | 'approval' | 'invite_only';
+export type JoinRequestStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Thread {
   id: string;
@@ -116,11 +119,23 @@ export interface Thread {
   context: string | null; // JSON string
   close_reason: CloseReason | null;
   permission_policy: string | null; // JSON string of ThreadPermissionPolicy
+  visibility: ThreadVisibility;
+  join_policy: ThreadJoinPolicy;
   revision: number; // Optimistic concurrency control — increments on every update
   created_at: number;
   updated_at: number;
   last_activity_at: number;
   resolved_at: number | null;
+}
+
+export interface ThreadJoinRequest {
+  id: string;
+  thread_id: string;
+  bot_id: string;
+  status: JoinRequestStatus;
+  requested_at: number;
+  resolved_at: number | null;
+  resolved_by: string | null;
 }
 
 export interface ThreadParticipant {
@@ -279,13 +294,21 @@ export interface Session {
  * - "*" means any participant (default behavior)
  * - "initiator" matches the thread initiator regardless of label
  * If a field is omitted or null, the action is unrestricted (any participant).
+ *
+ * EXCEPTION: For 'manage', null means initiator-only (safe default).
+ * This prevents accidental permission escalation on existing threads.
  */
 export interface ThreadPermissionPolicy {
   resolve?: string[] | null;   // Who can set status to 'resolved'
   close?: string[] | null;     // Who can set status to 'closed'
   invite?: string[] | null;    // Who can invite new participants
   remove?: string[] | null;    // Who can remove participants
+  write?: string[] | null;     // Who can send messages and add artifacts
+  manage?: string[] | null;    // Who can modify thread settings (visibility, join_policy, permission_policy)
 }
+
+export const PERMISSION_POLICY_KEYS: (keyof ThreadPermissionPolicy)[] =
+  ['resolve', 'close', 'invite', 'remove', 'write', 'manage'];
 
 // ─── Org Settings / Rate Limiting ────────────────────────────
 
@@ -307,7 +330,9 @@ export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update' | 'bot.rename' | 'bot.role_change'
   | 'bot.token_create' | 'bot.token_revoke'
   | 'thread.create' | 'thread.status_changed' | 'thread.join' | 'thread.leave' | 'thread.invite' | 'thread.remove_participant'
-  | 'thread.permission_denied'
+  | 'thread.permission_denied' | 'thread.write_denied'
+  | 'thread.visibility_changed' | 'thread.join_policy_changed'
+  | 'thread.join_requested' | 'thread.join_approved' | 'thread.join_rejected'
   | 'message.send'
   | 'artifact.add' | 'artifact.update'
   | 'file.upload'
@@ -448,6 +473,9 @@ export type WsServerEvent =
   | { type: 'thread_message'; thread_id: string; message: WireThreadMessage }
   | { type: 'thread_artifact'; thread_id: string; artifact: Artifact; action: 'added' | 'updated' }
   | { type: 'thread_participant'; thread_id: string; bot_id: string; bot_name: string; action: 'joined' | 'left'; by: string; label?: string | null }
+  | { type: 'thread_join_request'; thread_id: string; request_id: string; bot_id: string; bot_name: string }
+  | { type: 'thread_join_resolved'; thread_id: string; request_id: string; bot_id: string; status: 'approved' | 'rejected' }
+  | { type: 'thread_visibility_changed'; thread_id: string; visibility: ThreadVisibility; join_policy: ThreadJoinPolicy }
   | { type: 'thread_status_changed'; thread_id: string; topic: string; from: ThreadStatus; to: ThreadStatus; by: string }
   | { type: 'ack'; ref: string; result: Record<string, unknown> }
   | { type: 'error'; message: string; code?: string; retry_after?: number; ref?: string }

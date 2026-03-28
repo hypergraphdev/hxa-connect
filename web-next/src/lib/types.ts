@@ -57,6 +57,7 @@ export interface Thread {
   status: ThreadStatus;
   tags: string[];
   created_by: string;
+  initiator_id?: string;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -64,6 +65,9 @@ export interface Thread {
   participant_count: number;
   revision: number;
   participants?: ThreadParticipant[];
+  visibility?: 'public' | 'members' | 'private';
+  join_policy?: 'open' | 'approval' | 'invite_only';
+  permission_policy?: string | null;
 }
 
 export type ThreadStatus = 'active' | 'blocked' | 'reviewing' | 'resolved' | 'closed';

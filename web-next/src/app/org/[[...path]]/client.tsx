@@ -19,6 +19,8 @@ import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { PartRenderer } from '@/components/ui/PartRenderer';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { ThreadSettingsPanel } from '@/components/thread/ThreadSettingsPanel';
+import { InviteToThreadDialog } from '@/components/thread/InviteToThreadDialog';
 import { useTranslations } from '@/i18n/context';
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
@@ -28,7 +30,7 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 function Toast({ message, type, onDone }: { message: string; type: 'success' | 'error'; onDone: () => void }) {
   useEffect(() => { const t = setTimeout(onDone, 3000); return () => clearTimeout(t); }, [onDone]);
   return (
-    <div className={`fixed top-4 right-4 z-50 px-4 py-2.5 rounded-lg text-sm font-medium shadow-lg animate-fade-in ${
+    <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg text-sm font-medium shadow-lg animate-fade-in ${
       type === 'success' ? 'bg-hxa-green/20 text-hxa-green border border-hxa-green/30' : 'bg-hxa-red/20 text-hxa-red border border-hxa-red/30'
     }`}>{message}</div>
   );
@@ -563,7 +565,7 @@ export default function OrgDashboard() {
           <button onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] bg-hxa-accent/10 text-hxa-accent rounded-lg hover:bg-hxa-accent/20 border border-hxa-accent/30 transition-colors max-md:px-2 max-md:gap-0">
             <Plus size={14} /> <span className="hidden sm:inline">{t('org.inviteBot')}</span>
           </button>
-          <button onClick={() => navigateTo({ type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
+          <button onClick={() => navigateTo(view.type === 'settings' ? { type: 'empty' } : { type: 'settings' })} className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] rounded-lg border transition-colors max-md:px-2 max-md:gap-0 ${
             view.type === 'settings' ? 'bg-hxa-accent/20 text-hxa-accent border-hxa-accent/40' : 'bg-white/[0.04] text-hxa-text-dim border-hxa-border hover:bg-white/[0.08] hover:text-hxa-text'
           }`}>
             <Settings size={14} /> <span className="hidden sm:inline">{t('org.settings')}</span>
@@ -914,6 +916,10 @@ export default function OrgDashboard() {
                 setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, status } : t));
                 setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, status } } : prev);
               }}
+              onThreadUpdated={(updates) => {
+                setThreads(prev => prev.map(t => t.id === view.thread.id ? { ...t, ...updates } : t));
+                setView(prev => prev.type === 'thread' ? { type: 'thread', thread: { ...prev.thread, ...updates } } : prev);
+              }}
               wsRef={wsRef}
             />
           )}
@@ -1237,10 +1243,11 @@ function ChannelView({ channelId, label, onBack }: {
 
 // ─── Thread View ───
 
-function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessageId, anchorCreatedAt }: {
+function ThreadView({ thread, showToast, onStatusChanged, onThreadUpdated, wsRef, highlightMessageId, anchorCreatedAt }: {
   thread: OrgThread;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   onStatusChanged: (status: string) => void;
+  onThreadUpdated: (updates: Partial<OrgThread>) => void;
   wsRef: React.MutableRefObject<WebSocket | null>;
   highlightMessageId?: string;
   anchorCreatedAt?: number;
@@ -1259,9 +1266,17 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessag
   const highlightRef = useRef<HTMLDivElement>(null);
 
   const [currentStatus, setCurrentStatus] = useState(thread.status);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviting, setInviting] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
 
   // Sync status when switching threads
   useEffect(() => { setCurrentStatus(thread.status); }, [thread.id, thread.status]);
+
+  // Close panels when switching threads
+  useEffect(() => { setSettingsOpen(false); setInviteOpen(false); }, [thread.id]);
 
   const loadMessages = useCallback(async (before?: string) => {
     try {
@@ -1401,6 +1416,56 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessag
     }
   }
 
+  async function handleSettingsSave(updates: { visibility?: string; join_policy?: string; permission_policy?: Record<string, string[] | null> | null }) {
+    setSettingsSaving(true);
+    try {
+      const updated = await orgAdmin.updateThread(thread.id, updates);
+      onThreadUpdated({
+        visibility: updated.visibility,
+        join_policy: updated.join_policy,
+        permission_policy: updated.permission_policy,
+      });
+      showToast(t('thread.settings.saved'));
+      setSettingsOpen(false);
+    } catch {
+      showToast(t('thread.settings.error'), 'error');
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  const fetchBots = useCallback(async () => {
+    const res = await orgAdmin.listBots({ limit: 100 });
+    return { items: res.items.map(b => ({ id: b.id, name: b.name, online: b.online })) };
+  }, []);
+
+  async function handleInviteBot(botId: string, label?: string) {
+    setInviting(true);
+    try {
+      await orgAdmin.inviteToThread(thread.id, botId, label);
+      showToast(t('thread.inviteBot.success'));
+      setInviteOpen(false);
+    } catch {
+      showToast(t('thread.inviteBot.error'), 'error');
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  async function handleRemoveParticipant(participant: ThreadParticipantInfo) {
+    if ((thread.participant_count ?? 0) <= 1) return;
+    if (!window.confirm(t('thread.removeParticipant.confirm', { name: participant.name }))) return;
+    setRemovingParticipantId(participant.id);
+    try {
+      await orgAdmin.removeThreadParticipant(thread.id, participant.id);
+      showToast(t('thread.removeParticipant.success', { name: participant.name }));
+    } catch {
+      showToast(t('thread.removeParticipant.error'), 'error');
+    } finally {
+      setRemovingParticipantId(null);
+    }
+  }
+
   function renderParts(msg: OrgThreadMessage) {
     const parts = parseParts(msg.parts, msg.content);
     return parts.map((p, i) => (
@@ -1429,6 +1494,13 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessag
             setCurrentStatus(status);
           }}
           onOpenArtifacts={() => setArtifactsOpen(!artifactsOpen)}
+          visibility={thread.visibility}
+          canManageSettings={true}
+          onOpenSettings={() => setSettingsOpen(!settingsOpen)}
+          onInviteBot={() => setInviteOpen(true)}
+          canRemoveParticipant={() => !['resolved', 'closed'].includes(thread.status) && (thread.participant_count ?? 0) > 1}
+          onRemoveParticipant={handleRemoveParticipant}
+          removingParticipantId={removingParticipantId}
         />
 
         {/* Messages */}
@@ -1509,6 +1581,32 @@ function ThreadView({ thread, showToast, onStatusChanged, wsRef, highlightMessag
           </div>
         </div>
       )}
+
+      {/* Thread Settings side panel */}
+      <ThreadSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        visibility={thread.visibility}
+        joinPolicy={thread.join_policy}
+        permissionPolicy={
+          thread.permission_policy
+            ? (typeof thread.permission_policy === 'string'
+                ? (() => { try { return JSON.parse(thread.permission_policy as string); } catch { return null; } })()
+                : thread.permission_policy)
+            : null
+        }
+        onSave={handleSettingsSave}
+        saving={settingsSaving}
+      />
+
+      {/* Invite Bot dialog */}
+      <InviteToThreadDialog
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        onInvite={handleInviteBot}
+        fetchBots={fetchBots}
+        inviting={inviting}
+      />
 
       {lightboxSrc2 && <ImageLightbox src={lightboxSrc2} onClose={() => setLightboxSrc2(null)} />}
     </div>

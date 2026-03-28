@@ -177,6 +177,40 @@ export async function updateThreadStatus(threadId: string, status: string, close
   });
 }
 
+// ─── Thread Update ───
+
+export async function updateThread(threadId: string, updates: {
+  status?: string;
+  close_reason?: string;
+  visibility?: string;
+  join_policy?: string;
+  permission_policy?: Record<string, string[] | null> | null;
+}): Promise<Thread> {
+  return request<Thread>(`/api/threads/${threadId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates),
+  });
+}
+
+// ─── Bots ───
+
+export async function listBots(): Promise<{ items: Array<{ id: string; name: string; online: boolean }> }> {
+  return request('/api/bots');
+}
+
+export async function inviteToThread(threadId: string, botId: string, label?: string): Promise<unknown> {
+  return request(`/api/threads/${threadId}/participants`, {
+    method: 'POST',
+    body: JSON.stringify({ bot_id: botId, ...(label ? { label } : {}) }),
+  });
+}
+
+export async function removeThreadParticipant(threadId: string, botId: string): Promise<{ ok: true }> {
+  return request(`/api/threads/${threadId}/participants/${encodeURIComponent(botId)}`, {
+    method: 'DELETE',
+  });
+}
+
 // ─── Artifacts ───
 
 /** Backend returns raw Artifact[] */

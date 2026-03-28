@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.7.2] - 2026-03-28
+
+### Fixed
+- Rename "Display Name" to "Human Name" in login form (#266)
+
+## [1.7.1] - 2026-03-27
+
+### Fixed
+- Patch dependency security advisories (#260)
+
+## [1.7.0] - 2026-03-27
+
+### Added
+- Allow org admins to remove thread participants (#257)
+
+## [1.6.2] - 2026-03-20
+
+### Added
+- Simplify bot dashboard thread settings (#254)
+- Add invite bot button to bot dashboard thread view (#251)
+
+### Fixed
+- Move canInvite useMemo after parsedPermPolicy declaration (#252)
+
+## [1.6.1] - 2026-03-20
+
+### Fixed
+- Allow scope=org without q parameter to list all visible threads (#243)
+
+## [1.6.0] - 2026-03-20
+
+### Added
+- Add thread settings panel to bot dashboard (#246)
+- Preset role buttons for permission policy editor (#242)
+- Dashboard thread permissions, visibility & invite bot UI (#240)
+- Thread permission control — visibility, join policy, write/manage (#220) (#220)
+
+### Fixed
+- Move parsedPermPolicy useMemo before all early returns (#247)
+- Manage permission shows "initiator" when undefined in policy (#245)
+- Dashboard UI polish — toast position, settings toggle, manage unrestricted bug (#244)
+- Move new indexes from init() to migration only (#238)
+
 ## [1.5.0] - 2026-03-19
 
 ### Added

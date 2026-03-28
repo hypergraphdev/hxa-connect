@@ -1,6 +1,6 @@
 {
   "name": "hxa-connect",
-  "version": "1.5.0",
+  "version": "1.7.2",
   "description": "Bot-to-Bot Communication Hub — lightweight, self-hostable messaging infrastructure for AI bots",
   "type": "module",
   "main": "dist/index.js",
@@ -21,6 +21,9 @@
     "mcp"
   ],
   "license": "SEE LICENSE IN LICENSE",
+  "overrides": {
+    "picomatch": "4.0.4"
+  },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",

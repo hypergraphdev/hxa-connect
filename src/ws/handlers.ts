@@ -206,7 +206,7 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -215,6 +215,13 @@ export async function handleSendThreadMessage(hub: WsHub, client: WsClient, data
   }
   if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
+    return;
+  }
+
+  // Check write permission
+  if (!(await hub.db.checkThreadPermission(thread, client.botId!, 'write'))) {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.write_denied', 'thread', thread.id);
+    hub.sendError(client, 'Permission denied: no write access to this thread', { ref, code: 'WRITE_PERMISSION_DENIED' });
     return;
   }
 
@@ -482,7 +489,7 @@ export async function handleThreadUpdate(hub: WsHub, client: WsClient, data: any
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (!await hub.db.isParticipant(thread.id, client.botId!)) {
@@ -674,7 +681,7 @@ export async function handleThreadInvite(hub: WsHub, client: WsClient, data: any
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -760,7 +767,7 @@ export async function handleThreadJoin(hub: WsHub, client: WsClient, data: any):
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -768,9 +775,42 @@ export async function handleThreadJoin(hub: WsHub, client: WsClient, data: any):
     return;
   }
 
+  // Visibility check: private threads are invisible to non-participants
+  if (thread.visibility === 'private' && !await hub.db.isParticipant(thread.id, client.botId!)) {
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
+    return;
+  }
+
   // Already a participant — idempotent success
   if (await hub.db.isParticipant(thread.id, client.botId!)) {
     if (ref) hub.sendAck(client, ref, { operation: 'thread_join', resource_id: thread.id, thread_id: thread.id, status: 'already_joined', timestamp: Date.now() });
+    return;
+  }
+
+  // Join policy check
+  if (thread.join_policy === 'invite_only') {
+    hub.sendError(client, 'This thread is invite-only', { ref, code: 'INVITE_ONLY' });
+    return;
+  }
+  if (thread.join_policy === 'approval') {
+    // For approval, create a pending request instead of joining directly
+    const existing = await hub.db.getPendingJoinRequest(thread.id, client.botId!);
+    if (existing) {
+      hub.sendError(client, 'Join request already pending', { ref, code: 'ALREADY_REQUESTED' });
+      return;
+    }
+    const joinReq = await hub.db.createJoinRequest(thread.id, client.botId!);
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.join_requested', 'thread', thread.id);
+    // Broadcast thread_join_request to participants with manage/invite permission
+    const bot = await hub.db.getBotById(client.botId!);
+    await hub.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_join_request',
+      thread_id: thread.id,
+      request_id: joinReq.id,
+      bot_id: client.botId!,
+      bot_name: bot?.name || 'unknown',
+    });
+    if (ref) hub.sendAck(client, ref, { operation: 'thread_join', resource_id: thread.id, thread_id: thread.id, status: 'pending', request_id: joinReq.id });
     return;
   }
 
@@ -818,7 +858,7 @@ export async function handleThreadLeave(hub: WsHub, client: WsClient, data: any)
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -893,7 +933,7 @@ export async function handleThreadRemoveParticipant(hub: WsHub, client: WsClient
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -997,7 +1037,7 @@ export async function handleArtifactAdd(hub: WsHub, client: WsClient, data: any)
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -1006,6 +1046,13 @@ export async function handleArtifactAdd(hub: WsHub, client: WsClient, data: any)
   }
   if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
+    return;
+  }
+
+  // Check write permission (artifacts follow write permission)
+  if (!(await hub.db.checkThreadPermission(thread, client.botId!, 'write'))) {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.write_denied', 'thread', thread.id);
+    hub.sendError(client, 'Permission denied: no write access to this thread', { ref, code: 'WRITE_PERMISSION_DENIED' });
     return;
   }
 
@@ -1092,7 +1139,7 @@ export async function handleArtifactUpdate(hub: WsHub, client: WsClient, data: a
     return;
   }
   if (thread.org_id !== client.orgId) {
-    hub.sendError(client, 'Thread not in your org', { ref, code: 'FORBIDDEN' });
+    hub.sendError(client, 'Thread not found', { ref, code: 'NOT_FOUND' });
     return;
   }
   if (thread.status === 'resolved' || thread.status === 'closed') {
@@ -1101,6 +1148,13 @@ export async function handleArtifactUpdate(hub: WsHub, client: WsClient, data: a
   }
   if (!await hub.db.isParticipant(thread.id, client.botId!)) {
     hub.sendError(client, 'Not a participant of this thread', { ref, code: 'JOIN_REQUIRED' });
+    return;
+  }
+
+  // Check write permission (artifact updates follow write permission)
+  if (!(await hub.db.checkThreadPermission(thread, client.botId!, 'write'))) {
+    await hub.db.recordAudit(thread.org_id, client.botId!, 'thread.write_denied', 'thread', thread.id);
+    hub.sendError(client, 'Permission denied: no write access to this thread', { ref, code: 'WRITE_PERMISSION_DENIED' });
     return;
   }
 

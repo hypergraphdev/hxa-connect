@@ -543,7 +543,8 @@ describe('WS Full-Duplex Operations', () => {
       const ref = 'xorg-1';
       wsSend(ws, { type: 'thread_join', thread_id: threadId, ref });
       const err = await waitForError(ws, ref);
-      expect(err.code).toBe('FORBIDDEN');
+      // Returns NOT_FOUND (not FORBIDDEN) to prevent cross-org thread existence disclosure
+      expect(err.code).toBe('NOT_FOUND');
       ws.close();
     });
 
@@ -552,7 +553,8 @@ describe('WS Full-Duplex Operations', () => {
       const ref = 'xorg-2';
       wsSend(ws, { type: 'send_thread_message', thread_id: threadId, content: 'hi', ref });
       const err = await waitForError(ws, ref);
-      expect(err.code).toBe('FORBIDDEN');
+      // Returns NOT_FOUND (not FORBIDDEN) to prevent cross-org thread existence disclosure
+      expect(err.code).toBe('NOT_FOUND');
       ws.close();
     });
   });

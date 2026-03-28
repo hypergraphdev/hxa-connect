@@ -10,6 +10,8 @@ import { MentionPopup, extractMentionQuery, type MentionCandidate } from '@/comp
 import { PartRenderer } from '@/components/ui/PartRenderer';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { ThreadHeader, type ThreadParticipantInfo } from '@/components/thread/ThreadHeader';
+import { ThreadSettingsPanel } from '@/components/thread/ThreadSettingsPanel';
+import { InviteToThreadDialog } from '@/components/thread/InviteToThreadDialog';
 import { useTranslations } from '@/i18n/context';
 import { ImageUploadButton, PendingImagePreview, validateImage, MAX_IMAGES_PER_MESSAGE, type PendingImage } from './ImageUpload';
 
@@ -87,6 +89,11 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviting, setInviting] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadAborts = useRef<Map<string, () => void>>(new Map());
@@ -273,6 +280,52 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(msg);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }
+
+  // ─── Thread settings ───
+
+  // Determine if current bot can manage this thread's settings
+  const isInitiator = !!(thread && session?.bot_id && thread.initiator_id === session.bot_id);
+  const canManage = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    // Thread initiator always has manage (backend default)
+    if (isInitiator) return true;
+    // Check explicit manage policy
+    let policy: Record<string, string[] | null> = {};
+    if (thread.permission_policy) {
+      if (typeof thread.permission_policy === 'string') {
+        try { policy = JSON.parse(thread.permission_policy); } catch { return false; }
+      } else {
+        policy = thread.permission_policy as Record<string, string[] | null>;
+      }
+    }
+    const manageLabels = policy.manage;
+    if (!manageLabels) return false; // undefined = initiator-only (already checked above)
+    if (manageLabels.includes('*')) return true;
+    // "initiator" special label — matches thread creator
+    if (manageLabels.includes('initiator') && isInitiator) return true;
+    // Check if bot's participant label matches
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && manageLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator]);
+
+  async function handleSettingsSave(updates: {
+    visibility?: string;
+    join_policy?: string;
+    permission_policy?: Record<string, string[] | null> | null;
+  }) {
+    setSettingsSaving(true);
+    try {
+      const updated = await api.updateThread(threadId, updates);
+      setThread(updated);
+      showToast(t('thread.settings.saved'));
+      setSettingsOpen(false);
+    } catch {
+      showToast(t('thread.settings.error'));
+    } finally {
+      setSettingsSaving(false);
+    }
   }
 
   // ─── Image handling ───
@@ -581,6 +634,58 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
 
   const canSend = thread && !['resolved', 'closed'].includes(thread.status);
 
+  const parsedPermPolicy = useMemo(() => {
+    if (!thread?.permission_policy) return null;
+    if (typeof thread.permission_policy === 'string') {
+      try { return JSON.parse(thread.permission_policy); } catch { return null; }
+    }
+    return thread.permission_policy;
+  }, [thread?.permission_policy]);
+
+  // Determine if current bot can invite to this thread
+  const canInvite = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    if (['resolved', 'closed'].includes(thread.status)) return false;
+    const policy = parsedPermPolicy;
+    if (!policy) return true; // no policy = allow (backward compat, same as backend)
+    const inviteLabels = policy.invite;
+    if (!inviteLabels) return true; // no invite rule = allow
+    if (inviteLabels.includes('*')) return true;
+    if (inviteLabels.includes('initiator') && isInitiator) return true;
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && inviteLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
+
+  const canRemoveOthers = useMemo(() => {
+    if (!thread || !session?.bot_id) return false;
+    if (['resolved', 'closed'].includes(thread.status)) return false;
+    if ((thread.participant_count ?? 0) <= 1) return false;
+    const policy = parsedPermPolicy;
+    if (!policy) return true;
+    const removeLabels = policy.remove;
+    if (!removeLabels) return true;
+    if (removeLabels.includes('*')) return true;
+    if (removeLabels.includes('initiator') && isInitiator) return true;
+    const myParticipant = thread.participants?.find(p => p.bot_id === session.bot_id);
+    if (myParticipant?.label && removeLabels.includes(myParticipant.label)) return true;
+    return false;
+  }, [thread, session?.bot_id, isInitiator, parsedPermPolicy]);
+
+  async function handleRemoveParticipant(participant: ThreadParticipantInfo) {
+    if (!thread || participant.id === session?.bot_id) return;
+    if (!window.confirm(t('thread.removeParticipant.confirm', { name: participant.name }))) return;
+    setRemovingParticipantId(participant.id);
+    try {
+      await api.removeThreadParticipant(thread.id, participant.id);
+      showToast(t('thread.removeParticipant.success', { name: participant.name }));
+    } catch {
+      showToast(t('thread.removeParticipant.error'));
+    } finally {
+      setRemovingParticipantId(null);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -598,7 +703,8 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
+    <div className="flex-1 flex min-h-0 min-w-0">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <ThreadHeader
         topic={thread.topic}
         status={thread.status}
@@ -618,6 +724,13 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
           } catch { /* silent */ }
         }}
         onOpenArtifacts={onOpenArtifacts}
+        visibility={thread.visibility}
+        canManageSettings={true}
+        onOpenSettings={() => setSettingsOpen(o => !o)}
+        onInviteBot={canInvite ? () => setInviteOpen(true) : undefined}
+        canRemoveParticipant={(participant) => canRemoveOthers && participant.id !== session?.bot_id}
+        onRemoveParticipant={canRemoveOthers ? handleRemoveParticipant : undefined}
+        removingParticipantId={removingParticipantId}
       />
 
       {/* Messages */}
@@ -740,6 +853,47 @@ export function ThreadView({ threadId, wsMessages, wsThread, wsThreadStatusChang
         </div>
       )}
 
+    </div>
+
+      {/* Thread Settings Panel */}
+      <ThreadSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        visibility={thread.visibility}
+        joinPolicy={thread.join_policy}
+        permissionPolicy={parsedPermPolicy}
+        onSave={handleSettingsSave}
+        saving={settingsSaving}
+        readOnly={!canManage}
+        hidePermissions
+        visibilityOptions={['public', 'members'] as const}
+        joinPolicyOptions={['open', 'invite_only'] as const}
+      />
+
+      {/* Invite Bot Dialog */}
+      <InviteToThreadDialog
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        fetchBots={async () => {
+          const res = await api.listBots();
+          // Bot-level auth returns flat array; org-level returns { items }
+          const items = Array.isArray(res) ? res : (res.items ?? []);
+          return { items };
+        }}
+        inviting={inviting}
+        onInvite={async (botId, label) => {
+          setInviting(true);
+          try {
+            await api.inviteToThread(thread.id, botId, label);
+            showToast(t('thread.inviteBot.success'));
+            setInviteOpen(false);
+          } catch {
+            showToast(t('thread.inviteBot.error'));
+          } finally {
+            setInviting(false);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -885,4 +1039,3 @@ function MessageBubble({ message, isSelf, onReply, onImageClick }: { message: Th
     </div>
   );
 }
-
