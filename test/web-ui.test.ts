@@ -371,18 +371,20 @@ describe('WebSocket ticket via session', () => {
 // ─── Web UI Static Files ───────────────────────────────────
 
 describe('Web UI static files', () => {
-  it('frontend files exist in web/ui/', async () => {
+  it('frontend source files exist in web-next/', async () => {
     const fs = await import('node:fs');
     const path = await import('node:path');
-    const webDir = path.resolve(import.meta.dirname, '..', 'web', 'ui');
+    const webDir = path.resolve(import.meta.dirname, '..', 'web-next');
+    const pagePath = path.join(webDir, 'src', 'app', 'page.tsx');
+    const cssPath = path.join(webDir, 'src', 'styles', 'globals.css');
 
-    expect(fs.existsSync(path.join(webDir, 'index.html'))).toBe(true);
-    expect(fs.existsSync(path.join(webDir, 'ui.css'))).toBe(true);
+    expect(fs.existsSync(pagePath)).toBe(true);
+    expect(fs.existsSync(cssPath)).toBe(true);
 
-    const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
-    expect(html).toContain('HXA Web UI');
+    const page = fs.readFileSync(pagePath, 'utf8');
+    expect(page).toContain('HXA-Connect');
 
-    const css = fs.readFileSync(path.join(webDir, 'ui.css'), 'utf8');
-    expect(css).toContain('--accent');
+    const css = fs.readFileSync(cssPath, 'utf8');
+    expect(css).toContain('--color-hxa-accent');
   });
 });
