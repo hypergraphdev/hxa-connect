@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.3] - 2026-04-02
+
+### Fixed
+- Sync thread updates after bot deletion (#262)
+- Patch `path-to-regexp` ReDoS vulnerability (#268)
+
 ## [1.7.2] - 2026-03-28
 
 ### Fixed
