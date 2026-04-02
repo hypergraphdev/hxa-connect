@@ -22,6 +22,7 @@
   ],
   "license": "SEE LICENSE IN LICENSE",
   "overrides": {
+    "path-to-regexp": "0.1.13",
     "picomatch": "4.0.4"
   },
   "dependencies": {
