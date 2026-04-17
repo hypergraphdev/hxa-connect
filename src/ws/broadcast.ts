@@ -5,7 +5,8 @@ import type { Message, MessagePart, WireMessage, WsServerEvent } from '../types.
 import type { WsClient } from './protocol.js';
 import { wsLogger } from '../logger.js';
 import { signFileUrl } from '../file-share.js';
-import { deliverToDaemon, hasDaemonFor, toDaemonDelivered } from '../daemon/connect.js';
+import { deliverToDaemon, hasDaemonFor, toDaemonDelivered, toDaemonDeliveredThread } from '../daemon/connect.js';
+import { contentFromParts } from './protocol.js';
 
 // ─── Broadcast functions ─────────────────────────────────────
 // These are extracted as standalone functions that receive dependencies.
@@ -157,6 +158,33 @@ export async function broadcastThreadEvent(
   }
 
   await fireThreadWebhooks(db, webhookManager, participantIds, event, excludeWebhookBotId);
+
+  // Push thread messages to any participant whose @slock-ai/daemon is connected.
+  if (event.type === 'thread_message') {
+    const threadMsg = event.message;
+    const senderId = threadMsg.sender_id;
+    const daemonTargets = participantIds.filter(pid => pid !== senderId && hasDaemonFor(pid));
+    if (daemonTargets.length > 0) {
+      const [thread, senderBot] = await Promise.all([
+        db.getThread(threadId),
+        senderId ? db.getBotById(senderId) : Promise.resolve(undefined),
+      ]);
+      const topic = thread?.topic || threadId.slice(0, 8);
+      const senderName = senderBot?.name || 'unknown';
+      const content = contentFromParts(threadMsg.parts);
+      for (const pid of daemonTargets) {
+        deliverToDaemon(pid, toDaemonDeliveredThread(
+          threadMsg.id,
+          senderName,
+          senderId || '',
+          content,
+          threadMsg.created_at,
+          threadId,
+          topic,
+        ));
+      }
+    }
+  }
 
   // thread_created is an org-wide notification — send to all org admins
   // regardless of subscription. Other thread events require subscription.

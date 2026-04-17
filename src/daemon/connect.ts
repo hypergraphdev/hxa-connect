@@ -58,7 +58,7 @@ function send(ws: WebSocket, msg: DaemonOutbound): void {
   }
 }
 
-/** Serialize a hub Message into the shape daemon's formatIncomingMessage expects. */
+/** Serialize a hub DM Message into the shape daemon's formatIncomingMessage expects. */
 export function toDaemonDelivered(
   messageId: string,
   senderBotName: string,
@@ -74,6 +74,28 @@ export function toDaemonDelivered(
     sender_name: senderBotName,
     content,
     created_at: createdAt,
+  };
+}
+
+/** Serialize a hub Thread message into a daemon agent:deliver payload. */
+export function toDaemonDeliveredThread(
+  messageId: string,
+  senderBotName: string,
+  senderBotId: string,
+  content: string,
+  createdAt: number,
+  threadId: string,
+  threadTopic: string,
+): DaemonDeliveredMessage {
+  return {
+    message_id: messageId,
+    channel_type: 'channel',
+    channel_name: threadTopic || threadId.slice(0, 8),
+    sender_id: senderBotId,
+    sender_name: senderBotName,
+    content,
+    created_at: createdAt,
+    thread_id: threadId,
   };
 }
 

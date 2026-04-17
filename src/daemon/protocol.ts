@@ -110,4 +110,6 @@ export interface DaemonDeliveredMessage {
   sender_name: string;
   content: string;
   created_at: number;
+  /** For thread messages: the hub thread id — lets daemons reply in-thread. */
+  thread_id?: string;
 }
