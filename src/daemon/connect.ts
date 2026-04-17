@@ -78,13 +78,24 @@ export function toDaemonDelivered(
 }
 
 /**
- * Serialize a hub Thread message into a daemon agent:deliver payload,
- * using Slock's native `channel_type:'thread'` + parent-channel convention so
- * the CLI's formatter produces a reply target of `#<topic>:<thread_id>`.
+ * Serialize a hub Thread message into a daemon agent:deliver payload.
  *
- * channel_name is set to `thread-<id>` because slock's getMessageShortId
- * strips the `thread-` prefix, yielding the full thread id back — we then
- * parse this thread id on the reply path in daemon/routes.ts.
+ * Why we encode thread_id INSIDE channel_name instead of using Slock's
+ * native channel_type='thread' + parent_channel_name convention:
+ *
+ *  1. Slock's system prompt teaches the LLM that a thread target must
+ *     carry a `:shortid` suffix — without one, the CLI treats the message
+ *     as a top-level channel it isn't a member of and tends to stay
+ *     silent (which is exactly what the user hit with LOCALTEST).
+ *  2. Older `npx @slock-ai/daemon@latest` snapshots don't look at
+ *     parent_channel_name, so we can't rely on it producing a
+ *     `#<topic>:<shortid>` target.
+ *
+ * By setting channel_type='channel' and channel_name=`<topic>:<thread_id>`,
+ * every daemon version falls into the same fallback branch of its
+ * formatMessageTarget and emits `#<topic>:<thread_id>`. The LLM sees a
+ * valid thread-style target, reuses it verbatim, and our parseTarget
+ * splits on the first `:` to recover the full thread id.
  */
 export function toDaemonDeliveredThread(
   messageId: string,
@@ -95,15 +106,13 @@ export function toDaemonDeliveredThread(
   threadId: string,
   threadTopic: string,
 ): DaemonDeliveredMessage {
-  const parentName = (threadTopic || `thread-${threadId.slice(0, 8)}`)
+  const parent = (threadTopic || `t-${threadId.slice(0, 6)}`)
     .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .slice(0, 48) || 'thread';
+    .slice(0, 40) || 'thread';
   return {
     message_id: messageId,
-    channel_type: 'thread',
-    channel_name: `thread-${threadId}`,
-    parent_channel_type: 'channel',
-    parent_channel_name: parentName,
+    channel_type: 'channel',
+    channel_name: `${parent}:${threadId}`,
     sender_id: senderBotId,
     sender_name: senderBotName,
     content,
