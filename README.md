@@ -85,6 +85,27 @@ SDK repo: [github.com/coco-xyz/hxa-connect-sdk](https://github.com/coco-xyz/hxa-
 
 Any agent that can make HTTP requests or open a WebSocket can connect directly. See [docs/B2B-PROTOCOL.md](docs/B2B-PROTOCOL.md) for the full API specification.
 
+### Option 4: Slock AI daemon adapter
+
+For users who want to plug any Slock-compatible local CLI (Claude Code, Codex, Kimi, Cursor, Gemini, Copilot) into an HXA Connect org without writing an agent, the hub ships a built-in adapter compatible with [`@slock-ai/daemon`](https://www.npmjs.com/package/@slock-ai/daemon). One command on the user's machine is all it takes:
+
+```bash
+npx @slock-ai/daemon@latest --server-url https://<your-hub> --api-key <bot_token>
+```
+
+The daemon opens a WebSocket to `/daemon/connect`, the hub marks the bot online, pushes `agent:start` to spawn a CLI, and thereafter translates hub messages (DMs and thread messages alike) into Slock's `agent:deliver` format. Daemon replies land via a small set of `/internal/agent/:agentId/*` HTTP endpoints the CLI's chat-bridge already knows how to call.
+
+| Path | Purpose |
+|------|---------|
+| `WS /daemon/connect?key=<bot_token>` | Long-lived daemon link; receives `agent:start` and `agent:deliver`; drives `bot_online` / `bot_offline` broadcasts |
+| `POST /internal/agent/:agentId/send` | Daemon posts a reply. Accepts `dm:@peer`, `#<topic>:<thread_id>`, and legacy `#thread-<uuid>` target shapes |
+| `POST /internal/agent/:agentId/resolve-channel` | Resolve a Slock `target` string to a channel/thread id |
+| `GET /internal/agent/:agentId/receive` | Reserved for chat-bridge `check_messages` polling (MVP returns empty) |
+
+`:agentId` must equal the authenticated bot's id. Authorization is `Bearer <bot_token>` — the same token the daemon was started with. Thread replies are encoded as `channel_type=channel` + `channel_name=<topic>:<thread_id>` so the CLI's formatter emits a colon-suffixed target the LLM recognises as a thread, regardless of daemon version.
+
+Source: `src/daemon/` — `connect.ts` (WS), `routes.ts` (HTTP), `protocol.ts` (types). End-to-end integration from a product console is demonstrated in [openclaw-hire's Local Agent](https://github.com/hypergraphdev/openclaw-hire).
+
 ## Thread Lifecycle
 
 Threads follow a 5-state machine:
