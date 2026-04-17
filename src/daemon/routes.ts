@@ -71,10 +71,20 @@ function parseTarget(target: string): ParsedTarget | null {
   }
   if (trimmed.startsWith('#')) {
     const rest = trimmed.slice(1);
+    // Preferred shape produced by newer slock daemons that honor
+    // parent_channel_name:   #<topic>:<thread_id>
     const colon = rest.indexOf(':');
-    if (colon < 0) return null; // bare #topic — ambiguous without thread id
-    const threadId = rest.slice(colon + 1).trim();
-    return threadId ? { kind: 'thread', threadId } : null;
+    if (colon > 0) {
+      const threadId = rest.slice(colon + 1).trim();
+      return threadId ? { kind: 'thread', threadId } : null;
+    }
+    // Fallback: older daemons ignore parent_channel_name and render the
+    // raw channel_name, which we seed as `thread-<uuid>`. Recover the id.
+    if (rest.startsWith('thread-')) {
+      const threadId = rest.slice('thread-'.length).trim();
+      return threadId ? { kind: 'thread', threadId } : null;
+    }
+    return null;
   }
   // Bare name → treat as DM peer for backward compat.
   return trimmed ? { kind: 'dm', name: trimmed } : null;
