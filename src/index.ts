@@ -9,6 +9,8 @@ import { SqliteDriver, PostgresDriver } from './db/index.js';
 import { HubWS } from './ws.js';
 import { WebhookManager } from './webhook.js';
 import { createRouter } from './routes.js';
+import { DaemonServer } from './daemon/connect.js';
+import { createDaemonRouter } from './daemon/routes.js';
 
 import { DEFAULT_CONFIG, type HubConfig } from './types.js';
 import { logger, generateRequestId } from './logger.js';
@@ -185,6 +187,33 @@ async function main() {
   // Wire session store to WS for session heartbeat validation (ADR-002)
   hubWs.setSessionStore(sessionStore);
 
+  // Slock-compatible daemon endpoint: /daemon/connect
+  // HubWS already attached its own upgrade listener for /ws; that listener
+  // rejects unknown paths with 400. We replace the server's upgrade listeners
+  // with a dispatcher so /daemon/connect reaches us first and /ws still works.
+  const daemonServer = new DaemonServer({ db, ws: hubWs });
+  const originalUpgradeListeners = server.listeners('upgrade') as Array<
+    (req: Parameters<typeof daemonServer.handleUpgrade>[0],
+     socket: Parameters<typeof daemonServer.handleUpgrade>[1],
+     head: Parameters<typeof daemonServer.handleUpgrade>[2]) => void
+  >;
+  server.removeAllListeners('upgrade');
+  server.on('upgrade', (req, socket, head) => {
+    const pathname = req.url
+      ? new URL(req.url, `http://${req.headers.host}`).pathname
+      : '';
+    if (pathname === '/daemon/connect') {
+      daemonServer.handleUpgrade(req, socket, head);
+      return;
+    }
+    for (const listener of originalUpgradeListeners) {
+      listener(req, socket, head);
+    }
+  });
+
+  // Mount HTTP endpoints called by @slock-ai/daemon's chat-bridge.
+  app.use(createDaemonRouter(db, hubWs, config));
+
   // O1: Health endpoint (before router so it's always accessible)
   // Public: basic status only. Diagnostics (client_breakdown) require admin secret.
   app.get('/health', async (req, res, next) => {
@@ -313,6 +342,7 @@ async function main() {
     // 2. Drain WS connections (sends close frames, waits up to 5s)
     try {
       await hubWs.shutdown(closeCode);
+      await daemonServer.shutdown();
       console.log('  WebSocket connections drained');
     } catch (err) {
       console.error('  WebSocket shutdown error:', err);

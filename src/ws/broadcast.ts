@@ -5,6 +5,7 @@ import type { Message, MessagePart, WireMessage, WsServerEvent } from '../types.
 import type { WsClient } from './protocol.js';
 import { wsLogger } from '../logger.js';
 import { signFileUrl } from '../file-share.js';
+import { deliverToDaemon, hasDaemonFor, toDaemonDelivered } from '../daemon/connect.js';
 
 // ─── Broadcast functions ─────────────────────────────────────
 // These are extracted as standalone functions that receive dependencies.
@@ -90,7 +91,8 @@ export async function broadcastMessage(
     sender_name: senderName,
   };
 
-  // Fire webhooks for members who have one (and aren't the sender)
+  // Fire webhooks for members who have one (and aren't the sender),
+  // and push to any bot whose @slock-ai/daemon is connected.
   const webhookPayload = { webhook_version: '1' as const, ...event };
   for (const botId of members) {
     if (botId === message.sender_id) continue;
@@ -98,6 +100,15 @@ export async function broadcastMessage(
     if (bot?.webhook_url) {
       wsLogger.info({ botName: bot.name }, 'Webhook dispatch for channel message');
       void webhookManager.deliver(bot.id, bot.webhook_url, bot.webhook_secret, webhookPayload);
+    }
+    if (hasDaemonFor(botId)) {
+      deliverToDaemon(botId, toDaemonDelivered(
+        message.id,
+        senderName,
+        message.sender_id,
+        message.content,
+        message.created_at,
+      ));
     }
   }
 
