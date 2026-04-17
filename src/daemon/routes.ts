@@ -50,28 +50,34 @@ async function authBot(db: HubDB, req: Request, res: Response): Promise<Bot | un
 
 /**
  * Parse the Slock `target` string.
- * Supported (MVP):
- *   dm:@<name>             → { kind: 'dm', peer: '<name>' }
- *   #<channel>             → { kind: 'channel', channel: '<channel>' }
- *   dm:@<name>:<threadId>  → { kind: 'dm_thread' } — not supported, falls back to dm
- *   #<channel>:<threadId>  → { kind: 'channel_thread' } — not supported
+ *   dm:@<name>               → DM
+ *   dm:@<name>:<shortid>     → DM (shortid ignored for MVP — hub has no DM threads)
+ *   #<topic>                 → not supported (no parent-less top-level channels)
+ *   #<topic>:<thread_id>     → Thread reply. The daemon sends the full thread id
+ *                              here because we seeded channel_name=`thread-<id>`
+ *                              in toDaemonDeliveredThread, and Slock's
+ *                              getMessageShortId strips the `thread-` prefix.
  */
-function parseTarget(target: string): { kind: 'dm' | 'channel'; name: string } | null {
+type ParsedTarget =
+  | { kind: 'dm'; name: string }
+  | { kind: 'thread'; threadId: string };
+
+function parseTarget(target: string): ParsedTarget | null {
   const trimmed = target.trim();
   if (trimmed.startsWith('dm:@')) {
     const rest = trimmed.slice(4);
     const name = rest.split(':', 1)[0];
-    if (!name) return null;
-    return { kind: 'dm', name };
+    return name ? { kind: 'dm', name } : null;
   }
   if (trimmed.startsWith('#')) {
     const rest = trimmed.slice(1);
-    const name = rest.split(':', 1)[0];
-    if (!name) return null;
-    return { kind: 'channel', name };
+    const colon = rest.indexOf(':');
+    if (colon < 0) return null; // bare #topic — ambiguous without thread id
+    const threadId = rest.slice(colon + 1).trim();
+    return threadId ? { kind: 'thread', threadId } : null;
   }
-  // Bare name → treat as DM peer.
-  return { kind: 'dm', name: trimmed };
+  // Bare name → treat as DM peer for backward compat.
+  return trimmed ? { kind: 'dm', name: trimmed } : null;
 }
 
 export function createDaemonRouter(db: HubDB, ws: HubWS, config: HubConfig): Router {
@@ -98,60 +104,126 @@ export function createDaemonRouter(db: HubDB, ws: HubWS, config: HubConfig): Rou
       return;
     }
 
-    // MVP: only DM is supported. Channels/threads return a clear error that
-    // chat-bridge will surface to the LLM.
-    if (parsed.kind !== 'dm') {
-      res.status(400).json({ error: 'Only DM targets are supported in MVP (dm:@name)' });
-      return;
-    }
+    if (parsed.kind === 'dm') {
+      const peer = await db.getBotByName(bot.org_id, parsed.name);
+      if (!peer) {
+        res.status(404).json({ error: `Bot not found: ${parsed.name}` });
+        return;
+      }
+      if (peer.id === bot.id) {
+        res.status(400).json({ error: 'Cannot send to yourself' });
+        return;
+      }
 
-    const peer = await db.getBotByName(bot.org_id, parsed.name);
-    if (!peer) {
-      res.status(404).json({ error: `Bot not found: ${parsed.name}` });
-      return;
-    }
-    if (peer.id === bot.id) {
-      res.status(400).json({ error: 'Cannot send to yourself' });
-      return;
-    }
+      const channel = await db.createChannel(bot.org_id, [bot.id, peer.id]);
+      if (channel.isNew) {
+        ws.broadcastToOrg(bot.org_id, {
+          type: 'channel_created',
+          channel: {
+            id: channel.id,
+            org_id: channel.org_id,
+            type: channel.type,
+            name: channel.name,
+            created_at: channel.created_at,
+          },
+          members: [bot.id, peer.id],
+        });
+      }
 
-    const channel = await db.createChannel(bot.org_id, [bot.id, peer.id]);
-    if (channel.isNew) {
-      ws.broadcastToOrg(bot.org_id, {
-        type: 'channel_created',
-        channel: {
-          id: channel.id,
-          org_id: channel.org_id,
-          type: channel.type,
-          name: channel.name,
-          created_at: channel.created_at,
-        },
-        members: [bot.id, peer.id],
+      const msg = await db.createMessage(channel.id, bot.id, content, 'text', null);
+      await db.recordAudit(bot.org_id, bot.id, 'message.send', 'channel_message', msg.id, {
+        channel_id: channel.id,
+        to: peer.id,
+        via: 'daemon',
       });
+      await db.recordCatchupEvent(bot.org_id, peer.id, 'channel_message_summary', {
+        channel_id: channel.id,
+        channel_name: channel.name ?? undefined,
+        count: 1,
+        last_at: msg.created_at,
+      }, channel.id);
+
+      void ws.broadcastMessage(channel.id, msg, bot.name).catch((err) => {
+        routeLogger.error({ err }, 'daemon.send: broadcast failed');
+      });
+
+      res.json({
+        messageId: msg.id,
+        channelId: channel.id,
+        target,
+        recentUnread: [],
+      });
+      return;
     }
 
-    const msg = await db.createMessage(channel.id, bot.id, content, 'text', null);
-    await db.recordAudit(bot.org_id, bot.id, 'message.send', 'channel_message', msg.id, {
-      channel_id: channel.id,
-      to: peer.id,
+    // parsed.kind === 'thread'
+    const thread = await db.getThread(parsed.threadId);
+    if (!thread || thread.org_id !== bot.org_id) {
+      res.status(404).json({ error: `Thread not found: ${parsed.threadId}` });
+      return;
+    }
+    if (thread.status === 'closed' || thread.status === 'resolved') {
+      res.status(409).json({ error: `Thread is ${thread.status}, cannot post` });
+      return;
+    }
+    const participants = await db.getParticipants(thread.id);
+    if (!participants.some((p) => p.bot_id === bot.id)) {
+      res.status(403).json({ error: 'Not a participant of this thread' });
+      return;
+    }
+    if (!(await db.checkThreadPermission(thread, bot.id, 'write'))) {
+      res.status(403).json({ error: 'No write permission on this thread' });
+      return;
+    }
+
+    const threadMsg = await db.createThreadMessage(
+      thread.id,
+      bot.id,
+      content,
+      'text',
+      null, // metadata
+      null, // parts
+      null, // mentions
+      0,    // mentionAll
+      null, // replyToId
+    );
+
+    await db.recordAudit(thread.org_id, bot.id, 'message.send', 'thread_message', threadMsg.id, {
+      thread_id: thread.id,
       via: 'daemon',
     });
-    await db.recordCatchupEvent(bot.org_id, peer.id, 'channel_message_summary', {
-      channel_id: channel.id,
-      channel_name: channel.name ?? undefined,
-      count: 1,
-      last_at: msg.created_at,
-    }, channel.id);
+    for (const p of participants) {
+      if (p.bot_id === bot.id) continue;
+      await db.recordCatchupEvent(thread.org_id, p.bot_id, 'thread_message_summary', {
+        thread_id: thread.id,
+        topic: thread.topic,
+        count: 1,
+        last_at: threadMsg.created_at,
+      }, thread.id);
+    }
 
-    void ws.broadcastMessage(channel.id, msg, bot.name).catch((err) => {
-      routeLogger.error({ err }, 'daemon.send: broadcast failed');
+    // Wire shape matches what the thread message endpoint broadcasts
+    // (see routes.ts /api/threads/:id/messages).
+    const enriched = {
+      ...threadMsg,
+      parts: [{ type: 'text' as const, content }],
+      mentions: [],
+      mention_all: false,
+      metadata: null,
+      sender_name: bot.name,
+    };
+    void ws.broadcastThreadEvent(thread.org_id, thread.id, {
+      type: 'thread_message',
+      thread_id: thread.id,
+      message: enriched as unknown as import('../types.js').WireThreadMessage,
+    }).catch((err) => {
+      routeLogger.error({ err }, 'daemon.send: thread broadcast failed');
     });
 
     res.json({
-      messageId: msg.id,
-      channelId: channel.id,
+      messageId: threadMsg.id,
+      threadId: thread.id,
       target,
-      // chat-bridge looks at recentUnread — MVP returns empty.
       recentUnread: [],
     });
   });
@@ -176,17 +248,28 @@ export function createDaemonRouter(db: HubDB, ws: HubWS, config: HubConfig): Rou
       return;
     }
     const parsed = parseTarget(target);
-    if (!parsed || parsed.kind !== 'dm') {
-      res.status(400).json({ error: 'Only DM targets are supported in MVP' });
+    if (!parsed) {
+      res.status(400).json({ error: `Invalid target: ${target}` });
       return;
     }
-    const peer = await db.getBotByName(bot.org_id, parsed.name);
-    if (!peer) {
-      res.status(404).json({ error: `Bot not found: ${parsed.name}` });
+    if (parsed.kind === 'dm') {
+      const peer = await db.getBotByName(bot.org_id, parsed.name);
+      if (!peer) {
+        res.status(404).json({ error: `Bot not found: ${parsed.name}` });
+        return;
+      }
+      const channel = await db.createChannel(bot.org_id, [bot.id, peer.id]);
+      res.json({ channelId: channel.id });
       return;
     }
-    const channel = await db.createChannel(bot.org_id, [bot.id, peer.id]);
-    res.json({ channelId: channel.id });
+    // Thread — uploads aren't implemented yet (see /upload below); return the
+    // thread id so chat-bridge has something to pass along, but upload will 501.
+    const thread = await db.getThread(parsed.threadId);
+    if (!thread || thread.org_id !== bot.org_id) {
+      res.status(404).json({ error: `Thread not found: ${parsed.threadId}` });
+      return;
+    }
+    res.json({ channelId: thread.id });
   });
 
   // ─── POST /internal/agent/:agentId/upload — MVP not implemented

@@ -110,6 +110,14 @@ export interface DaemonDeliveredMessage {
   sender_name: string;
   content: string;
   created_at: number;
+  /**
+   * Slock's formatMessageTarget treats channel_type='thread' as nested under
+   * a parent. For hub threads (which are top-level), we synthesize a parent
+   * using the thread's topic so the CLI produces the reply target
+   * `#<topic>:<thread_id>`.
+   */
+  parent_channel_type?: 'channel' | 'dm';
+  parent_channel_name?: string;
   /** For thread messages: the hub thread id — lets daemons reply in-thread. */
   thread_id?: string;
 }

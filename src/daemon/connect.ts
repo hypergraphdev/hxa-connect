@@ -77,7 +77,15 @@ export function toDaemonDelivered(
   };
 }
 
-/** Serialize a hub Thread message into a daemon agent:deliver payload. */
+/**
+ * Serialize a hub Thread message into a daemon agent:deliver payload,
+ * using Slock's native `channel_type:'thread'` + parent-channel convention so
+ * the CLI's formatter produces a reply target of `#<topic>:<thread_id>`.
+ *
+ * channel_name is set to `thread-<id>` because slock's getMessageShortId
+ * strips the `thread-` prefix, yielding the full thread id back — we then
+ * parse this thread id on the reply path in daemon/routes.ts.
+ */
 export function toDaemonDeliveredThread(
   messageId: string,
   senderBotName: string,
@@ -87,10 +95,15 @@ export function toDaemonDeliveredThread(
   threadId: string,
   threadTopic: string,
 ): DaemonDeliveredMessage {
+  const parentName = (threadTopic || `thread-${threadId.slice(0, 8)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 48) || 'thread';
   return {
     message_id: messageId,
-    channel_type: 'channel',
-    channel_name: threadTopic || threadId.slice(0, 8),
+    channel_type: 'thread',
+    channel_name: `thread-${threadId}`,
+    parent_channel_type: 'channel',
+    parent_channel_name: parentName,
     sender_id: senderBotId,
     sender_name: senderBotName,
     content,
