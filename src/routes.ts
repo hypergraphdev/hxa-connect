@@ -397,6 +397,41 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     });
   }
 
+  async function broadcastDeletedBotThreadSync(
+    bot: Bot,
+    removedBy: string,
+    affectedThreads: Array<Thread & { participant_count: number }>,
+  ): Promise<void> {
+    for (const thread of affectedThreads) {
+      try {
+        await ws.broadcastThreadEvent(thread.org_id, thread.id, {
+          type: 'thread_participant',
+          thread_id: thread.id,
+          bot_id: bot.id,
+          bot_name: bot.name,
+          action: 'left',
+          by: removedBy,
+        });
+
+        const autoClosedByDeletion = thread.participant_count === 1
+          && thread.status !== 'resolved'
+          && thread.status !== 'closed';
+        if (!autoClosedByDeletion) continue;
+
+        await ws.broadcastThreadEvent(thread.org_id, thread.id, {
+          type: 'thread_status_changed',
+          thread_id: thread.id,
+          topic: thread.topic,
+          from: thread.status,
+          to: 'closed',
+          by: removedBy,
+        });
+      } catch (err) {
+        routeLogger.error({ err, botId: bot.id, threadId: thread.id }, 'broadcast deleted bot thread sync failed');
+      }
+    }
+  }
+
   async function requireThreadParticipant(
     req: import('express').Request,
     res: import('express').Response,
@@ -1440,12 +1475,16 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     // a single transaction. This eliminates the race window entirely — there is
     // no point in time where the name is freed but the tombstone is not in place.
     const deletedBy = req.bot ? req.bot.id : 'session';
+    const threadSyncBy = threadActorRef(req, orgId!);
+    const affectedThreads = await db.getThreadsParticipatedByBot(bot.id);
     await db.deleteBotWithTombstone(bot.id, bot.name, orgId!, deletedBy);
     await db.recordAudit(orgId!, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, deleted_by: deletedBy });
 
     // Terminate the deleted bot's active WebSocket connection immediately.
     // Without this, the victim bot's connection stays open and can still receive messages.
     ws.disconnectByBotId(bot.id);
+
+    await broadcastDeletedBotThreadSync(bot, threadSyncBy, affectedThreads);
 
     // Broadcast bot offline to remaining org members
     ws.broadcastToOrg(bot.org_id, {
@@ -1465,11 +1504,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
 
     // #199 A1: Atomically tombstone the bot's name and delete the bot row in
     // a single transaction (same reasoning as DELETE /api/bots/:id above).
+    const affectedThreads = await db.getThreadsParticipatedByBot(bot.id);
     await db.deleteBotWithTombstone(bot.id, bot.name, bot.org_id, bot.id);
 
     // Terminate the self-deleting bot's active WebSocket connection immediately.
     // Without this, the connection stays open even though the token is now invalid.
     ws.disconnectByBotId(bot.id);
+
+    await broadcastDeletedBotThreadSync(bot, bot.id, affectedThreads);
 
     // Audit
     await db.recordAudit(bot.org_id, bot.id, 'bot.delete', 'bot', bot.id, { name: bot.name, self: true });

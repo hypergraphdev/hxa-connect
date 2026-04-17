@@ -2375,6 +2375,27 @@ export class HubDB {
   }
 
   /**
+   * Returns every thread a bot currently participates in.
+   * Used by destructive flows (for example bot deletion) where the caller needs
+   * to fan out consistency events to every affected thread without pagination.
+   */
+  async getThreadsParticipatedByBot(botId: string): Promise<(Thread & { participant_count: number })[]> {
+    const rows = await this.driver.all<any>(`
+      SELECT t.*, (SELECT COUNT(*) FROM thread_participants tp2 WHERE tp2.thread_id = t.id) AS participant_count
+      FROM threads t
+      JOIN thread_participants tp ON t.id = tp.thread_id
+      WHERE tp.bot_id = ?
+      ORDER BY t.last_activity_at DESC, t.id DESC
+    `, [botId]);
+
+    return rows.map((row: any) => {
+      const count = Number(row.participant_count);
+      delete row.participant_count;
+      return { ...this.rowToThread(row), participant_count: count };
+    });
+  }
+
+  /**
    * Cursor-paginated thread list for a bot.
    * Cursor key: (last_activity_at DESC, id DESC), opaque-encoded.
    * Returns limit+1 rows so the caller can detect has_more.

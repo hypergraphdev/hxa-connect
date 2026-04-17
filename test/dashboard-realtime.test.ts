@@ -80,7 +80,7 @@ describe('Dashboard Real-Time Updates (#225)', () => {
     // Register a bot
     const r1 = await env.registerBot(org.org_secret, 'alpha');
     bot1Token = r1.token;
-    bot1Id = r1.bot.bot_id;
+    bot1Id = r1.bot.bot_id || r1.bot.id;
 
     // Login as org admin
     adminCookie = await env.loginAsOrg(org.org_secret);
@@ -252,6 +252,96 @@ describe('Dashboard Real-Time Updates (#225)', () => {
         adminWs.close();
         botWs.close();
         bot2Ws.close();
+      }
+    });
+
+    it('bot deletion emits thread_participant left for subscribed org_admin and keeps thread detail counts aligned', async () => {
+      const adminWs = await connectAdminWs(env.baseUrl, adminCookie);
+      const r2 = await env.registerBot(org.org_secret, 'beta-delete');
+      const betaId = r2.bot.bot_id || r2.bot.id;
+
+      try {
+        const { status: createStatus, body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
+          token: bot1Token,
+          body: { topic: 'participant-delete-test', participants: [betaId] },
+        });
+        expect(createStatus).toBe(200);
+
+        wsSend(adminWs, { type: 'subscribe', thread_id: thread.id });
+        await new Promise(r => setTimeout(r, 100));
+
+        const eventsPromise = collectMessages(adminWs, 500);
+        const { status: deleteStatus } = await api(env.baseUrl, 'DELETE', `/api/bots/${betaId}`, {
+          cookie: adminCookie,
+        });
+        expect(deleteStatus).toBe(200);
+
+        const events = await eventsPromise;
+        expect(events).toContainEqual(expect.objectContaining({
+          type: 'thread_participant',
+          thread_id: thread.id,
+          bot_id: betaId,
+          bot_name: 'beta-delete',
+          action: 'left',
+        }));
+
+        const adminThread = await api(env.baseUrl, 'GET', `/api/org/threads/${thread.id}`, { cookie: adminCookie });
+        const botThread = await api(env.baseUrl, 'GET', `/api/threads/${thread.id}`, { token: bot1Token });
+        expect(adminThread.status).toBe(200);
+        expect(botThread.status).toBe(200);
+        expect(adminThread.body.participant_count).toBe(1);
+        expect(botThread.body.participant_count).toBe(1);
+        expect(adminThread.body.participants.map((p: { bot_id: string }) => p.bot_id)).toEqual([bot1Id]);
+        expect(botThread.body.participants.map((p: { bot_id: string }) => p.bot_id)).toEqual([bot1Id]);
+      } finally {
+        adminWs.close();
+      }
+    });
+
+    it('bot deletion emits thread_participant left and thread_status_changed for subscribed org_admin when the deleted bot was the last participant', async () => {
+      const adminWs = await connectAdminWs(env.baseUrl, adminCookie);
+      const solo = await env.registerBot(org.org_secret, 'solo-delete');
+      const soloId = solo.bot.bot_id || solo.bot.id;
+
+      try {
+        const { status: createStatus, body: thread } = await api(env.baseUrl, 'POST', '/api/threads', {
+          token: solo.token,
+          body: { topic: 'solo-delete-test' },
+        });
+        expect(createStatus).toBe(200);
+
+        wsSend(adminWs, { type: 'subscribe', thread_id: thread.id });
+        await new Promise(r => setTimeout(r, 100));
+
+        const eventsPromise = collectMessages(adminWs, 500);
+        const { status: deleteStatus } = await api(env.baseUrl, 'DELETE', `/api/bots/${soloId}`, {
+          cookie: adminCookie,
+        });
+        expect(deleteStatus).toBe(200);
+
+        const events = await eventsPromise;
+        expect(events).toContainEqual(expect.objectContaining({
+          type: 'thread_participant',
+          thread_id: thread.id,
+          bot_id: soloId,
+          bot_name: 'solo-delete',
+          action: 'left',
+        }));
+        expect(events).toContainEqual(expect.objectContaining({
+          type: 'thread_status_changed',
+          thread_id: thread.id,
+          topic: 'solo-delete-test',
+          from: 'active',
+          to: 'closed',
+        }));
+
+        const adminThread = await api(env.baseUrl, 'GET', `/api/org/threads/${thread.id}`, { cookie: adminCookie });
+        expect(adminThread.status).toBe(200);
+        expect(adminThread.body.status).toBe('closed');
+        expect(adminThread.body.participant_count).toBe(0);
+        expect(adminThread.body.participants).toEqual([]);
+      } finally {
+        adminWs.close();
       }
     });
 
