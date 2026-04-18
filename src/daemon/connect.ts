@@ -274,7 +274,11 @@ export class DaemonServer {
         // - others: leave unset so the CLI honors its own user-level default.
         const DEFAULT_MODEL: Partial<Record<DaemonAgentConfig['runtime'], string>> = {
           claude: 'sonnet',
-          gemini: 'gemini-2.5-flash',
+          // Gemini 3 flash — the Gemini CLI's own Auto preset picks between
+          // gemini-3.1-pro and gemini-3-flash; passing --model directly
+          // requires a concrete id, so we target the flash tier (more free
+          // quota, still latest generation).
+          gemini: 'gemini-3-flash-preview',
         };
         const start: DaemonAgentStart = {
           type: 'agent:start',
