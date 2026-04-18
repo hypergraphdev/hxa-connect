@@ -274,11 +274,11 @@ export class DaemonServer {
         // - others: leave unset so the CLI honors its own user-level default.
         const DEFAULT_MODEL: Partial<Record<DaemonAgentConfig['runtime'], string>> = {
           claude: 'sonnet',
-          // Gemini 3 flash — the Gemini CLI's own Auto preset picks between
-          // gemini-3.1-pro and gemini-3-flash; passing --model directly
-          // requires a concrete id, so we target the flash tier (more free
-          // quota, still latest generation).
-          gemini: 'gemini-3-flash-preview',
+          // Newest + most capable Gemini tier. Note: Pro has the tightest
+          // free daily quota — a long session can exhaust it and the CLI
+          // will then return 429. If that happens we can fall back to
+          // gemini-3-flash-preview which has far more headroom.
+          gemini: 'gemini-3.1-pro',
         };
         const start: DaemonAgentStart = {
           type: 'agent:start',
