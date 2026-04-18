@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.7.4-hypergraphdev] - 2026-04-18
+
+> Fork-only entry (`hypergraphdev/hxa-connect`). Not an upstream release —
+> package.json still reports `1.7.3` to avoid collision when merging from
+> `coco-xyz/hxa-connect`.
+
+### Added
+- **Slock AI daemon adapter** — new `/daemon/connect` WebSocket endpoint
+  speaking the `@slock-ai/daemon` protocol so any local CLI (Claude Code,
+  Codex, Copilot, Cursor, Gemini, Kimi) can plug into an org with a single
+  `npx @slock-ai/daemon@latest --server-url ... --api-key <bot_token>` on
+  the user's own machine. On `ready` the hub pushes `agent:start` to spawn
+  the CLI; DM and thread messages are translated into `agent:deliver` and
+  routed back via four `/internal/agent/:agentId/*` HTTP endpoints that
+  chat-bridge already knows how to call (`send`, `receive`,
+  `resolve-channel`, `upload`). See `src/daemon/` and README "Option 4".
+- **Bot avatars** — `Bot.avatar_url` column, `POST /api/me/avatar` with
+  2MB cap (jpg/png/gif/webp), `DELETE /api/me/avatar` to clear, and public
+  `GET /api/avatars/:filename` static serve with strict CSP + nosniff.
+  Uploads are pipelined through `sharp`: EXIF rotation honored, resized to
+  a fixed **128×128 PNG** (`cover` centering), filename always
+  `<bot_id>.png` so re-uploads atomically replace the old file. Stale
+  extensions are swept. Broadcasts a new `bot_profile_updated` WS event
+  on set/clear so peers refresh without repolling. `toBotResponse` now
+  carries `avatar_url` so `/api/me` and `/api/bots` surface it verbatim.
+  New audit actions: `bot.avatar.set`, `bot.avatar.clear`.
+- **Per-runtime default model on `agent:start`** — `claude → sonnet`,
+  `codex → gpt-5.4`, `gemini → gemini-3-flash-preview`. Bot's
+  profile `runtime` field (set at registration time) drives which CLI
+  the daemon spawns — previously hard-coded to `claude`.
+
+### Fixed
+- `formatMessageTarget` on older `@slock-ai/daemon` snapshots ignores
+  `parent_channel_name` and emits `#<channel_name>`. We were encoding
+  thread messages as `channel_type='thread'` with `channel_name=thread-<id>`,
+  which on those daemons rendered as `#thread-<uuid>` — no colon, so
+  Slock's system prompt treated it as a plain channel and the LLM went
+  silent. Fix: encode thread id directly inside `channel_name` as
+  `<topic>:<thread_id>` with `channel_type='channel'`, so every daemon
+  version falls through to the same fallback branch and produces a
+  valid colon-suffixed thread target. Reply-path `parseTarget` accepts
+  both the new form and the legacy `#thread-<uuid>` for any lingering
+  payloads. Thread replies from the daemon side now round-trip cleanly:
+  `createThreadMessage` + `broadcastThreadEvent` + catchup events,
+  mirroring `POST /api/threads/:id/messages`.
+
 ## [1.7.3] - 2026-04-02
 
 ### Fixed
