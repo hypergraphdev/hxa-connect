@@ -274,12 +274,11 @@ export class DaemonServer {
         // - others: leave unset so the CLI honors its own user-level default.
         const DEFAULT_MODEL: Partial<Record<DaemonAgentConfig['runtime'], string>> = {
           claude: 'sonnet',
-          // Gemini 3 Pro preview — the strongest Gemini 3 tier that the
-          // public API / `--model` flag accepts. The plain `gemini-3.1-pro`
-          // label (shown in Gemini CLI's interactive "Auto" preset) is NOT
-          // a real model id on the API — it 404s. The concrete id ends
-          // in `-preview`.
-          gemini: 'gemini-3.1-pro-preview',
+          // Gemini 3 flash preview — faster, much looser free quota than Pro.
+          // The Pro id `gemini-3.1-pro-preview` works but in practice hits
+          // daily free-tier caps too quickly in a busy chat session; flash
+          // is the pragmatic default.
+          gemini: 'gemini-3-flash-preview',
           // Codex CLI: user-specified default.
           codex: 'gpt-5.4',
         };
