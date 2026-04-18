@@ -19,6 +19,7 @@ import type { HubWS } from '../ws.js';
 import type { Bot } from '../types.js';
 import { wsLogger } from '../logger.js';
 import type {
+  DaemonAgentConfig,
   DaemonAgentDeliver,
   DaemonAgentStart,
   DaemonDeliveredMessage,
@@ -254,17 +255,23 @@ export class DaemonServer {
           bot: { id: conn.bot.id, name: conn.bot.name },
         });
         wsLogger.info(
-          { botId: conn.bot.id, runtimes: (msg as { runtimes?: string[] }).runtimes },
+          { botId: conn.bot.id, runtimes: (msg as { runtimes?: string[] }).runtimes, chosen: conn.bot.runtime },
           'daemon: ready',
         );
-        // Start the default agent (MVP: claude). agentId == botId so
-        // chat-bridge's /internal/agent/:agentId/send resolves to this bot.
+        // The daemon knows which local CLI to spawn from config.runtime.
+        // We pick it from the bot's profile — set at register time by the
+        // product console. Any unknown / missing value falls back to claude
+        // so older bots registered before this feature existed still work.
+        const SUPPORTED: DaemonAgentConfig['runtime'][] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'kimi'];
+        const runtime = SUPPORTED.includes(conn.bot.runtime as DaemonAgentConfig['runtime'])
+          ? (conn.bot.runtime as DaemonAgentConfig['runtime'])
+          : 'claude';
         const start: DaemonAgentStart = {
           type: 'agent:start',
           agentId: conn.bot.id,
           config: {
-            runtime: 'claude',
-            model: 'sonnet',
+            runtime,
+            model: runtime === 'claude' ? 'sonnet' : undefined,
             name: conn.bot.name,
             displayName: conn.bot.name,
             description: conn.bot.bio || 'Local AI agent',
