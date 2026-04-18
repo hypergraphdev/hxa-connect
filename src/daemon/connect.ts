@@ -266,12 +266,22 @@ export class DaemonServer {
         const runtime = SUPPORTED.includes(conn.bot.runtime as DaemonAgentConfig['runtime'])
           ? (conn.bot.runtime as DaemonAgentConfig['runtime'])
           : 'claude';
+        // Default model per runtime.
+        // - claude: 'sonnet' (driver expects a short alias)
+        // - gemini: 'gemini-2.5-flash' — the CLI otherwise defaults to Pro,
+        //   whose free quota exhausts in a single session (observed 429 on
+        //   very first turn).
+        // - others: leave unset so the CLI honors its own user-level default.
+        const DEFAULT_MODEL: Partial<Record<DaemonAgentConfig['runtime'], string>> = {
+          claude: 'sonnet',
+          gemini: 'gemini-2.5-flash',
+        };
         const start: DaemonAgentStart = {
           type: 'agent:start',
           agentId: conn.bot.id,
           config: {
             runtime,
-            model: runtime === 'claude' ? 'sonnet' : undefined,
+            model: DEFAULT_MODEL[runtime],
             name: conn.bot.name,
             displayName: conn.bot.name,
             description: conn.bot.bio || 'Local AI agent',
