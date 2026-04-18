@@ -61,6 +61,7 @@ export interface DaemonAgentDeliverAck {
 export type DaemonOutbound =
   | DaemonAgentStart
   | DaemonAgentStop
+  | DaemonAgentResetWorkspace
   | DaemonAgentDeliver
   | DaemonPing;
 
@@ -76,6 +77,11 @@ export interface DaemonAgentStart {
 
 export interface DaemonAgentStop {
   type: 'agent:stop';
+  agentId: string;
+}
+
+export interface DaemonAgentResetWorkspace {
+  type: 'agent:reset-workspace';
   agentId: string;
 }
 

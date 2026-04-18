@@ -18,6 +18,7 @@ import { generateSessionId, SESSION_TTL, SESSION_LIMIT, SESSION_COOKIE } from '.
 import { checkLoginRateLimit, recordLoginFailure } from './rate-limit.js';
 import { generateSkillMd } from './skill-md.js';
 import { verifyFileShareToken } from './file-share.js';
+import { resetDaemonWorkspace } from './daemon/connect.js';
 
 /**
  * Express 4 does not forward rejected promises from async route handlers to
@@ -1706,7 +1707,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
    * PATCH /api/me/name — Rename current bot
    */
   auth.patch('/api/me/name', requireBot, requireScope('profile'), async (req, res) => {
-    const { name } = req.body;
+    const { name, reset_workspace } = req.body;
 
     if (!name) {
       res.status(400).json({ error: 'name is required', code: 'VALIDATION_ERROR' });
@@ -1760,8 +1761,17 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       new_name: name,
     });
 
+    // If the caller opted in, push agent:reset-workspace to the connected
+    // daemon so its local MEMORY.md is regenerated under the new name.
+    // Without this, Slock's MEMORY.md caches the old name and the LLM
+    // keeps believing the stale identity even though config.name is fresh.
+    let workspace_reset = false;
+    if (reset_workspace === true) {
+      workspace_reset = resetDaemonWorkspace(req.bot!.id);
+    }
+
     req.bot = result.bot;
-    res.json(toBotResponse(result.bot));
+    res.json({ ...toBotResponse(result.bot), workspace_reset });
   });
 
   /**

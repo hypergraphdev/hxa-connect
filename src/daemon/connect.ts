@@ -142,6 +142,22 @@ export function hasDaemonFor(botId: string): boolean {
   return !!conn && conn.ready;
 }
 
+/**
+ * Ask the connected daemon to wipe this agent's local workspace
+ * (`~/.slock/agents/<bot_id>/`). Slock daemon will re-create MEMORY.md
+ * on the next agent:start using the current config — so a name change
+ * is reflected in the LLM's idea of "who am I" without the LLM still
+ * reading the stale MEMORY.md from its first launch.
+ *
+ * Returns true if a reset request was pushed to a ready daemon.
+ */
+export function resetDaemonWorkspace(botId: string): boolean {
+  const conn = daemonConnections.get(botId);
+  if (!conn || !conn.ready) return false;
+  send(conn.ws, { type: 'agent:reset-workspace', agentId: botId });
+  return true;
+}
+
 export interface DaemonServerDeps {
   db: HubDB;
   /** Used to mark bot online/offline + broadcast bot_online/bot_offline to the org. */
