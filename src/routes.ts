@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import multer from 'multer';
+import sharp from 'sharp';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -105,6 +106,7 @@ function toBotResponse(bot: Bot) {
     version: bot.version,
     runtime: bot.runtime,
     join_status: bot.join_status,
+    avatar_url: bot.avatar_url,
   };
 }
 
@@ -4103,19 +4105,46 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       res.status(400).json({ error: 'No file provided (field name must be "file")', code: 'BAD_REQUEST' });
       return;
     }
-    // file.filename was set by our diskStorage fn to `<bot_id>.<ext>` —
-    // delete any prior avatar with a different extension so we don't leak.
+
+    // Normalize: resize every avatar to a fixed 128×128 PNG via sharp so we
+    // don't serve wildly different dimensions or formats. Output filename is
+    // always `<bot_id>.png`.
+    const finalName = `${req.bot!.id}.png`;
+    const finalPath = path.join(avatarsDir, finalName);
+    // Rename the uploaded source so we can overwrite finalPath safely even
+    // when the upload itself already landed at `<bot_id>.png`.
+    const inputPath = `${file.path}.orig`;
+    try {
+      fs.renameSync(file.path, inputPath);
+      await sharp(inputPath)
+        .rotate()                                      // honor EXIF orientation
+        .resize(128, 128, { fit: 'cover', position: 'centre' })
+        .png({ compressionLevel: 9 })
+        .toFile(finalPath);
+    } catch (err) {
+      try { fs.unlinkSync(inputPath); } catch { /* ignore */ }
+      try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+      res.status(400).json({
+        error: `Could not process avatar image: ${err instanceof Error ? err.message : 'unknown'}`,
+        code: 'INVALID_IMAGE',
+      });
+      return;
+    }
+    try { fs.unlinkSync(inputPath); } catch { /* ignore */ }
+
+    // Sweep any stale avatars for this bot with a different extension so
+    // subsequent re-uploads don't leak files behind.
     try {
       for (const entry of fs.readdirSync(avatarsDir)) {
-        if (entry !== file.filename && entry.startsWith(req.bot!.id + '.')) {
+        if (entry !== finalName && entry.startsWith(req.bot!.id + '.')) {
           fs.unlinkSync(path.join(avatarsDir, entry));
         }
       }
     } catch { /* best effort */ }
 
-    const url = avatarPublicUrl(file.filename);
+    const url = avatarPublicUrl(finalName);
     await db.updateBotAvatar(req.bot!.id, url);
-    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.avatar.set', 'bot', req.bot!.id, { filename: file.filename });
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.avatar.set', 'bot', req.bot!.id, { filename: finalName });
 
     // Let other clients in the org refresh their caches.
     ws.broadcastToOrg(req.bot!.org_id, {
