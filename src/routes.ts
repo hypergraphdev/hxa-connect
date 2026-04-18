@@ -3997,6 +3997,156 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     res.json(enriched);
   });
 
+  // ─── Avatars (bot profile pictures, public read) ─────────
+
+  const avatarsDir = path.join(config.data_dir, 'avatars');
+  fs.mkdirSync(avatarsDir, { recursive: true });
+
+  const AVATAR_MIME_TO_EXT: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+  };
+  const AVATAR_ALLOWED_MIMES = new Set(Object.keys(AVATAR_MIME_TO_EXT));
+  const AVATAR_MAX_BYTES = 2 * 1024 * 1024; // 2MB cap — avatars shouldn't be huge
+
+  const avatarUpload = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => cb(null, avatarsDir),
+      filename: (req, file, cb) => {
+        const ext = AVATAR_MIME_TO_EXT[file.mimetype] ?? '.bin';
+        // Name by bot id so a new upload overwrites the old file — no garbage
+        // and callers don't need to know the old URL to delete it.
+        const botId = req.bot?.id ?? crypto.randomUUID();
+        cb(null, `${botId}${ext}`);
+      },
+    }),
+    limits: { fileSize: AVATAR_MAX_BYTES },
+    fileFilter: (_req, file, cb) => {
+      if (AVATAR_ALLOWED_MIMES.has(file.mimetype)) cb(null, true);
+      else {
+        const err = new Error(`Avatar type not allowed: ${file.mimetype}`);
+        (err as { code?: string }).code = 'UNSUPPORTED_MEDIA_TYPE';
+        cb(err);
+      }
+    },
+  });
+
+  /** Build the public URL for a stored avatar filename. Absolute when
+   *  DOMAIN is configured (i.e. production behind a reverse proxy), so
+   *  consumers in other services can embed it without knowing the hub URL. */
+  function avatarPublicUrl(filename: string): string {
+    const rel = `/api/avatars/${filename}`;
+    if (process.env.HUB_PUBLIC_URL) return process.env.HUB_PUBLIC_URL.replace(/\/$/, '') + rel;
+    const domain = process.env.DOMAIN;
+    const basePath = process.env.BASE_PATH ?? '';
+    if (domain) return `https://${domain}${basePath}${rel}`;
+    return rel;
+  }
+
+  // Public GET — serving static images. No auth check (bot avatars are
+  // displayed to peers who may not yet hold a token). Filename ends in the
+  // bot id + extension which we control, so traversal is not possible.
+  router.get('/api/avatars/:filename', (req, res) => {
+    const filename = req.params.filename;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(filename) || filename.includes('..')) {
+      res.status(400).json({ error: 'Invalid filename', code: 'BAD_REQUEST' });
+      return;
+    }
+    const diskPath = path.join(avatarsDir, filename);
+    if (!diskPath.startsWith(avatarsDir + path.sep) || !fs.existsSync(diskPath)) {
+      res.status(404).json({ error: 'Avatar not found', code: 'NOT_FOUND' });
+      return;
+    }
+    const ext = path.extname(filename).toLowerCase();
+    const mime =
+      ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' :
+      ext === '.png' ? 'image/png' :
+      ext === '.gif' ? 'image/gif' :
+      ext === '.webp' ? 'image/webp' :
+      'application/octet-stream';
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=300'); // 5 min — matches rename cadence
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    fs.createReadStream(diskPath).pipe(res);
+  });
+
+  /**
+   * POST /api/me/avatar — Upload the calling bot's avatar (multipart/form-data, field "file").
+   * Auth: bot token. Returns { avatar_url }.
+   */
+  auth.post('/api/me/avatar', requireBot, requireScope('profile'), async (req, res, next) => {
+    avatarUpload.single('file')(req, res, (err) => {
+      if (err) {
+        if (err instanceof multer.MulterError) {
+          if (err.code === 'LIMIT_FILE_SIZE') {
+            res.status(413).json({ error: `Avatar too large (max ${AVATAR_MAX_BYTES / 1024 / 1024}MB)`, code: 'FILE_TOO_LARGE' });
+            return;
+          }
+          res.status(400).json({ error: err.message, code: 'UPLOAD_ERROR' });
+          return;
+        }
+        if ((err as { code?: string }).code === 'UNSUPPORTED_MEDIA_TYPE') {
+          res.status(415).json({ error: err.message, code: 'UNSUPPORTED_MEDIA_TYPE' });
+          return;
+        }
+        next(err);
+        return;
+      }
+      next();
+    });
+  }, async (req, res) => {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'No file provided (field name must be "file")', code: 'BAD_REQUEST' });
+      return;
+    }
+    // file.filename was set by our diskStorage fn to `<bot_id>.<ext>` —
+    // delete any prior avatar with a different extension so we don't leak.
+    try {
+      for (const entry of fs.readdirSync(avatarsDir)) {
+        if (entry !== file.filename && entry.startsWith(req.bot!.id + '.')) {
+          fs.unlinkSync(path.join(avatarsDir, entry));
+        }
+      }
+    } catch { /* best effort */ }
+
+    const url = avatarPublicUrl(file.filename);
+    await db.updateBotAvatar(req.bot!.id, url);
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.avatar.set', 'bot', req.bot!.id, { filename: file.filename });
+
+    // Let other clients in the org refresh their caches.
+    ws.broadcastToOrg(req.bot!.org_id, {
+      type: 'bot_profile_updated',
+      bot: { id: req.bot!.id, name: req.bot!.name, avatar_url: url },
+    });
+
+    res.json({ avatar_url: url });
+  });
+
+  /**
+   * DELETE /api/me/avatar — Clear the calling bot's avatar.
+   */
+  auth.delete('/api/me/avatar', requireBot, requireScope('profile'), async (req, res) => {
+    try {
+      for (const entry of fs.readdirSync(avatarsDir)) {
+        if (entry.startsWith(req.bot!.id + '.')) {
+          fs.unlinkSync(path.join(avatarsDir, entry));
+        }
+      }
+    } catch { /* best effort */ }
+
+    await db.updateBotAvatar(req.bot!.id, null);
+    await db.recordAudit(req.bot!.org_id, req.bot!.id, 'bot.avatar.clear', 'bot', req.bot!.id, {});
+    ws.broadcastToOrg(req.bot!.org_id, {
+      type: 'bot_profile_updated',
+      bot: { id: req.bot!.id, name: req.bot!.name, avatar_url: null },
+    });
+    res.json({ ok: true });
+  });
+
   // ─── Files ───────────────────────────────────────────────
 
   const filesDir = path.join(config.data_dir, 'files');

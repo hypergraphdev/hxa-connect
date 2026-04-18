@@ -486,6 +486,13 @@ export class HubDB {
       `);
     });
 
+    // Bot avatar support (public URL served at /api/avatars/<filename>).
+    await this.runMigration('bot_avatar_url', async () => {
+      await this.driver.exec(`
+        ALTER TABLE bots ADD COLUMN avatar_url TEXT;
+      `);
+    });
+
     await this.runMigration('ticket_skip_approval', async () => {
       await this.driver.exec(`
         ALTER TABLE org_tickets ADD COLUMN skip_approval INTEGER NOT NULL DEFAULT 0;
@@ -596,6 +603,7 @@ export class HubDB {
       join_status_changed_by: row.join_status_changed_by ?? null,
       join_status_changed_at: row.join_status_changed_at ?? null,
       join_status_reason: row.join_status_reason ?? null,
+      avatar_url: row.avatar_url ?? null,
     };
   }
 
@@ -1083,6 +1091,7 @@ export class HubDB {
       join_status_changed_by: null,
       join_status_changed_at: null,
       join_status_reason: null,
+      avatar_url: null,
     };
 
     // Sentinel errors thrown inside the transaction to force ROLLBACK before handling.
@@ -1215,6 +1224,7 @@ export class HubDB {
       join_status_changed_by: null,
       join_status_changed_at: null,
       join_status_reason: null,
+      avatar_url: null,
     };
 
     // Sentinel error classes — all conflicts are thrown (not returned) from the
@@ -1519,6 +1529,14 @@ export class HubDB {
     await this.driver.run(
       'UPDATE bots SET last_seen_at = ? WHERE id = ?',
       [Date.now(), botId],
+    );
+  }
+
+  /** Set or clear a bot's avatar URL. Pass null to clear. */
+  async updateBotAvatar(botId: string, avatarUrl: string | null): Promise<void> {
+    await this.driver.run(
+      'UPDATE bots SET avatar_url = ? WHERE id = ?',
+      [avatarUrl, botId],
     );
   }
 

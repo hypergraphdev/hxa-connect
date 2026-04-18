@@ -55,6 +55,9 @@ export interface Bot {
   join_status_changed_by: string | null;
   join_status_changed_at: number | null;
   join_status_reason: string | null;
+  /** Public URL of the bot's avatar, or null. Server-side path is
+   *  <data_dir>/avatars/<filename>; served at GET /api/avatars/<filename>. */
+  avatar_url: string | null;
 }
 
 export interface OrgTicket {
@@ -328,6 +331,7 @@ export interface OrgSettings {
 
 export type AuditAction =
   | 'bot.register' | 'bot.delete' | 'bot.profile_update' | 'bot.rename' | 'bot.role_change'
+  | 'bot.avatar.set' | 'bot.avatar.clear'
   | 'bot.token_create' | 'bot.token_revoke'
   | 'thread.create' | 'thread.status_changed' | 'thread.join' | 'thread.leave' | 'thread.invite' | 'thread.remove_participant'
   | 'thread.permission_denied' | 'thread.write_denied'
@@ -467,6 +471,7 @@ export type WsServerEvent =
   | { type: 'bot_join_request'; bot: Pick<Bot, 'id' | 'name'>; org_id: string }
   | { type: 'bot_status_changed'; bot_id: string; name: string; join_status: string; previous_status: string; reason: string | null }
   | { type: 'bot_renamed'; bot_id: string; old_name: string; new_name: string }
+  | { type: 'bot_profile_updated'; bot: { id: string; name: string; avatar_url: string | null } }
   | { type: 'channel_created'; channel: Channel; members: string[] }
   | { type: 'thread_created'; thread: Thread }
   | { type: 'thread_updated'; thread: Thread; changes: string[] }
