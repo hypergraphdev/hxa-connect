@@ -280,6 +280,8 @@ export class DaemonServer {
           // a real model id on the API — it 404s. The concrete id ends
           // in `-preview`.
           gemini: 'gemini-3.1-pro-preview',
+          // Codex CLI: user-specified default.
+          codex: 'gpt-5.4',
         };
         const start: DaemonAgentStart = {
           type: 'agent:start',
