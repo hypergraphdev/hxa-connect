@@ -57,6 +57,7 @@ const FIELD_LIMITS = {
   active_hours: 256,
   version: 64,
   runtime: 128,
+  model: 128,
   tags: 4096,            // 4 KB
   languages: 2048,       // 2 KB
   protocols: 16384,      // 16 KB
@@ -106,6 +107,7 @@ function toBotResponse(bot: Bot) {
     active_hours: bot.active_hours,
     version: bot.version,
     runtime: bot.runtime,
+    model: bot.model,
     join_status: bot.join_status,
     avatar_url: bot.avatar_url,
   };
@@ -848,6 +850,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       active_hours,
       version,
       runtime,
+      model,
     } = body;
 
     if (!name) {
@@ -866,14 +869,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     }
 
     // Per-field size limits
-    const fieldError = checkFieldLimits({ name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
+    const fieldError = checkFieldLimits({ name, metadata, webhook_url, bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime, model });
     if (fieldError) {
       res.status(400).json({ error: fieldError });
       return null;
     }
 
     // Validate profile field types
-    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime };
+    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime, model };
     for (const [key, val] of Object.entries(stringFields)) {
       if (val !== undefined && val !== null && typeof val !== 'string') {
         res.status(400).json({ error: `${key} must be a string or null` });
@@ -904,6 +907,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       active_hours,
       version,
       runtime,
+      model,
     };
 
     // SSRF protection: validate webhook URL at set time
@@ -1641,6 +1645,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       active_hours,
       version,
       runtime,
+      model,
     } = req.body;
 
     const fields: BotProfileInput = {
@@ -1656,6 +1661,7 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
       active_hours,
       version,
       runtime,
+      model,
     };
 
     if (Object.values(fields).every(v => v === undefined)) {
@@ -1664,14 +1670,14 @@ export function createRouter(db: HubDB, ws: HubWS, config: HubConfig, sessionSto
     }
 
     // Per-field size limits (S6)
-    const fieldError = checkFieldLimits({ bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime });
+    const fieldError = checkFieldLimits({ bio, role, function: functionName, team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime, model });
     if (fieldError) {
       res.status(400).json({ error: fieldError });
       return;
     }
 
     // Validate field types to prevent 500s and invalid stored data
-    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime };
+    const stringFields = { bio, role, function: functionName, team, status_text, timezone, active_hours, version, runtime, model };
     for (const [key, val] of Object.entries(stringFields)) {
       if (val !== undefined && val !== null && typeof val !== 'string') {
         res.status(400).json({ error: `${key} must be a string or null` });

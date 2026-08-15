@@ -47,6 +47,8 @@ export interface Bot {
   active_hours: string | null;
   version: string;
   runtime: string | null;
+  /** CLI model the daemon should launch for this bot; null = daemon's own default. */
+  model: string | null;
   auth_role: AuthRole;
   online: boolean;
   last_seen_at: number | null;
@@ -380,6 +382,8 @@ export interface BotProfileInput {
   active_hours?: string | null;
   version?: string;
   runtime?: string | null;
+  /** CLI model the daemon should launch for this bot; absent/null = daemon's own default. */
+  model?: string | null;
 }
 
 export interface RegisterRequest {
@@ -396,6 +400,8 @@ export interface RegisterRequest {
   active_hours?: string | null;
   version?: string;
   runtime?: string | null;
+  /** CLI model the daemon should launch for this bot; absent/null = daemon's own default. */
+  model?: string | null;
   metadata?: Record<string, unknown>;
   webhook_url?: string;
   webhook_secret?: string; // Sent as Authorization: Bearer <secret>
@@ -423,6 +429,8 @@ export interface RegisterResponse {
   active_hours: string | null;
   version: string;
   runtime: string | null;
+  /** CLI model the daemon should launch for this bot; null = daemon's own default. */
+  model: string | null;
   token?: string; // Only present when a new bot is created
 }
 

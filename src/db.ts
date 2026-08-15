@@ -98,6 +98,7 @@ export class HubDB {
         active_hours TEXT,
         version TEXT,
         runtime TEXT,
+        model TEXT,
         auth_role TEXT NOT NULL DEFAULT 'member' CHECK(auth_role IN ('admin','member')),
         online INTEGER DEFAULT 0,
         last_seen_at ${ts},
@@ -542,6 +543,24 @@ export class HubDB {
         `);
       } catch { /* may fail on some DB versions */ }
     });
+
+    // Per-bot CLI model pin (null = daemon's own default).
+    await this.runMigration('bot_model', async () => {
+      // New databases already have the column from CREATE TABLE. PostgreSQL skips
+      // it natively; SQLite has no IF NOT EXISTS for columns, so the duplicate
+      // column error is swallowed instead.
+      if (this.driver.dialect === 'postgres') {
+        await this.driver.exec(`
+          ALTER TABLE bots ADD COLUMN IF NOT EXISTS model TEXT;
+        `);
+        return;
+      }
+      try {
+        await this.driver.exec(`
+          ALTER TABLE bots ADD COLUMN model TEXT;
+        `);
+      } catch { /* column already exists on new databases */ }
+    });
   }
 
   /**
@@ -597,6 +616,7 @@ export class HubDB {
       active_hours: row.active_hours ?? null,
       version: row.version ?? '1.0.0',
       runtime: row.runtime ?? null,
+      model: row.model ?? null,
       auth_role: row.auth_role ?? 'member',
       online: !!row.online,
       join_status: row.join_status ?? 'active',
@@ -677,6 +697,7 @@ export class HubDB {
     active_hours?: string | null;
     version?: string;
     runtime?: string | null;
+    model?: string | null;
   } {
     if (!fields) return {};
     return {
@@ -692,6 +713,7 @@ export class HubDB {
       active_hours: fields.active_hours,
       version: fields.version,
       runtime: fields.runtime,
+      model: fields.model,
     };
   }
 
@@ -1083,6 +1105,7 @@ export class HubDB {
       active_hours: serializedProfile.active_hours ?? null,
       version: serializedProfile.version ?? '1.0.0',
       runtime: serializedProfile.runtime ?? null,
+      model: serializedProfile.model ?? null,
       auth_role: authRole,
       online: false,
       last_seen_at: now,
@@ -1127,16 +1150,16 @@ export class HubDB {
           await txn.run(
             `INSERT INTO bots (
               id, org_id, name, token, metadata, webhook_url, webhook_secret,
-              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
+              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime, model,
               auth_role, online, last_seen_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               bot.id, bot.org_id, bot.name,
               tokenHash, // Store hash, not plaintext
               bot.metadata, bot.webhook_url, bot.webhook_secret,
               bot.bio, bot.role, bot.function, bot.team, bot.tags,
               bot.languages, bot.protocols, bot.status_text, bot.timezone,
-              bot.active_hours, bot.version, bot.runtime, bot.auth_role,
+              bot.active_hours, bot.version, bot.runtime, bot.model, bot.auth_role,
               bot.online ? 1 : 0, bot.last_seen_at, bot.created_at,
             ],
           );
@@ -1216,6 +1239,7 @@ export class HubDB {
       active_hours: serializedProfile.active_hours ?? null,
       version: serializedProfile.version ?? '1.0.0',
       runtime: serializedProfile.runtime ?? null,
+      model: serializedProfile.model ?? null,
       auth_role: authRole,
       online: false,
       last_seen_at: now,
@@ -1269,16 +1293,16 @@ export class HubDB {
           await txn.run(
             `INSERT INTO bots (
               id, org_id, name, token, metadata, webhook_url, webhook_secret,
-              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime,
+              bio, role, "function", team, tags, languages, protocols, status_text, timezone, active_hours, version, runtime, model,
               auth_role, online, last_seen_at, created_at, join_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               botObj.id, botObj.org_id, botObj.name,
               tokenHash, // Store hash, not plaintext
               botObj.metadata, botObj.webhook_url, botObj.webhook_secret,
               botObj.bio, botObj.role, botObj.function, botObj.team, botObj.tags,
               botObj.languages, botObj.protocols, botObj.status_text, botObj.timezone,
-              botObj.active_hours, botObj.version, botObj.runtime, botObj.auth_role,
+              botObj.active_hours, botObj.version, botObj.runtime, botObj.model, botObj.auth_role,
               botObj.online ? 1 : 0, botObj.last_seen_at, botObj.created_at, botObj.join_status,
             ],
           );
@@ -1366,6 +1390,10 @@ export class HubDB {
     if (serialized.runtime !== undefined) {
       updates.push('runtime = ?');
       params.push(serialized.runtime);
+    }
+    if (serialized.model !== undefined) {
+      updates.push('model = ?');
+      params.push(serialized.model);
     }
 
     if (updates.length === 0) {
